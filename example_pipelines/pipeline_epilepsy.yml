@@ -89,6 +89,62 @@ FeatureDefinitions:
               save_data: True
           include_timings: True
 
+  apSlopeMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: FooofArray.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_scalars
+        args:
+          fooof_like: id.1
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'fooof_aperiodic_exponent'
+      - id: 4
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.3
+          dim: 'epochs'
+          operation: 'mean'
+
+  apSlopeSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: FooofArray.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_scalars
+        args:
+          fooof_like: id.1
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'fooof_aperiodic_exponent'
+      - id: 4
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.3
+          dim: 'epochs'
+          operation: 'std'
+
   BandPower:
     overwrite: False
     for_dataframe: false
@@ -697,6 +753,8 @@ FeatureList:
   - SpectrumArrayMultitaper
 
   - FooofArray
+  - apSlopeMean
+  - apSlopeSD
 
   - BandPower
   - BandPowerMean

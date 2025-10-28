@@ -632,7 +632,7 @@ def fooof(
 def fooof_scalars(
     fooof_like: NodeResult | xr.DataArray | str | os.PathLike[str],
     *,
-    component: Literal["aperiodic_params", "r_squared", "error", "all"] = "aperiodic_params",
+    component: Literal["aperiodic_params", "r_squared", "error", "all"] = "all",
     freq_dim: str = "frequencies",
 ) -> NodeResult:
     """Extract scalar outputs from serialized FOOOF models.
@@ -753,8 +753,15 @@ def fooof_scalars(
         "error": "fooof_error",
     }
 
+    selection_map: dict[str, tuple[str, ...]] = {
+        "aperiodic_params": ("aperiodic_offset", "aperiodic_knee", "aperiodic_exponent"),
+        "r_squared": ("r_squared",),
+        "error": ("error",),
+        "all": tuple(name_map.keys()),
+    }
+
     metadata_base: dict[str, Any] = {
-        "components": list(name_map),
+        "components": [name_map[key] for key in name_map],
         "invalid_count": len(set(invalid_indices)),
         "total_count": flat_count,
         "invalid_indices": sorted(set(invalid_indices)),
@@ -767,53 +774,25 @@ def fooof_scalars(
         xarr = xr.DataArray(data, dims=other_dims, coords=coords, name=name_map[key])
         this_meta = dict(metadata_base)
         this_meta["component"] = key
+        this_meta["variable"] = name_map[key]
         xarr.attrs["metadata"] = json.dumps(this_meta, indent=2, default=_json_safe)
         return xarr
 
-    artifacts: dict[str, Artifact]
-    if component == "all":
-        artifacts = {}
-        for key, suffix in (
-            ("aperiodic_offset", ".apOffset.nc"),
-            ("aperiodic_knee", ".apKnee.nc"),
-            ("aperiodic_exponent", ".apExponent.nc"),
-            ("r_squared", ".rSquared.nc"),
-            ("error", ".error.nc"),
-        ):
-            xarr = make_array(key)
-            artifacts[suffix] = Artifact(
-                item=xarr,
-                writer=lambda path, arr=xarr: arr.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
-            )
-    else:
-        mapped = {
-            "aperiodic_params": ["aperiodic_offset", "aperiodic_knee", "aperiodic_exponent"],
-            "r_squared": ["rSquared"],
-            "error": ["error"],
-        }
-        keys = mapped.get(component, [component])
-        if component == "aperiodic_params":
-            artifacts = {}
-            for key, suffix in zip(
-                keys,
-                (".apOffset.nc", ".apKnee.nc", ".apExponent.nc"),
-            ):
-                xarr = make_array(key)
-                artifacts[suffix] = Artifact(
-                    item=xarr,
-                    writer=lambda path, arr=xarr: arr.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
-                )
-        else:
-            key = keys[0]
-            xarr = make_array(key)
-            artifacts = {
-                ".nc": Artifact(
-                    item=xarr,
-                    writer=lambda path: xarr.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
-                )
-            }
+    selected_keys = selection_map[component]
+    dataset_vars = [make_array(key) for key in selected_keys]
+    dataset = xr.Dataset({var.name: var for var in dataset_vars})
 
-    return NodeResult(artifacts=artifacts)
+    dataset_meta = dict(metadata_base)
+    dataset_meta["component"] = component
+    dataset_meta["variables"] = [var.name for var in dataset_vars]
+    dataset.attrs["metadata"] = json.dumps(dataset_meta, indent=2, default=_json_safe)
+
+    artifact = Artifact(
+        item=dataset,
+        writer=lambda path, ds=dataset: ds.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
+    )
+
+    return NodeResult(artifacts={".nc": artifact})
 
 @register_node
 def fooof_component(
