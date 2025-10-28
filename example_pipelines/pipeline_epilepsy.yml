@@ -113,7 +113,7 @@ FeatureDefinitions:
             preAlpha: [5.5, 8.0]
             slowTheta: [4.0, 5.5]
 
-  BandPowerAverage:
+  BandPowerMean:
     overwrite: False
     save: False
     for_dataframe: True
@@ -121,10 +121,25 @@ FeatureDefinitions:
       - id: 0
         feature: BandPower.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  BandPowerSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPower.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropyHjorthParams:
     overwrite: False
@@ -139,7 +154,7 @@ FeatureDefinitions:
           dim: 'times'
 
 
-  Mobility:
+  MobilityMean:
     overwrite: False
     save: False
     for_dataframe: True
@@ -154,12 +169,35 @@ FeatureDefinitions:
           start: mobility
           end: mobility
       - id: 2
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.1
           dim: 'epochs'
+          operation: 'mean'
 
-  Complexity:
+  MobilitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: mobility
+          end: mobility
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
+
+  ComplexityMean:
     overwrite: False
     save: False
     for_dataframe: True
@@ -174,10 +212,33 @@ FeatureDefinitions:
           start: complexity
           end: complexity
       - id: 2
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.1
           dim: 'epochs'
+          operation: 'mean'
+
+  ComplexitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: complexity
+          end: complexity
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
 
   AntropyAppEntropy:
     overwrite: False
@@ -191,17 +252,31 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  AppEntropy:
+  AppEntropyMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyAppEntropy.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  AppEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyAppEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropyLZivComplexity:
     overwrite: False
@@ -224,18 +299,31 @@ FeatureDefinitions:
           data_like: id.2
           dim: 'times'
 
-  LZiv:
+  LZivMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyLZivComplexity.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
 
+  LZivSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyLZivComplexity.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropyNumZeroCross:
     overwrite: False
@@ -249,17 +337,32 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  NumZeroCross:
+  NumZeroCrossMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyNumZeroCross.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+
+  NumZeroCrossSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyNumZeroCross.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs' 
+          operation: 'std'
 
 
   AntropyPermutationEntropy:
@@ -274,17 +377,31 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  PermEntropy:
+  PermEntropyMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyPermutationEntropy.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  PermEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyPermutationEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropySampleEntropy:
     overwrite: False
@@ -298,17 +415,32 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  SampleEntropy:
+  SampleEntropyMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropySampleEntropy.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+
+  SampleEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySampleEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropySpectralEntropy:
     overwrite: False
@@ -323,17 +455,31 @@ FeatureDefinitions:
           dim: 'times'
           sf: 200.0
 
-  SpectralEntropy:
+  SpectralEntropyMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropySpectralEntropy.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  SpectralEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySpectralEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropySVDEntropy:
     overwrite: False
@@ -347,17 +493,31 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  SVDEntropy:
+  SVDEntropyMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropySVDEntropy.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  SVDEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySVDEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropyHiguchiFD:
     overwrite: False
@@ -371,17 +531,31 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  HiguchiFD:
+  HiguchiFDMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyHiguchiFD.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  HiguchiFDSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyHiguchiFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropyKatzFD:
     overwrite: False
@@ -395,17 +569,31 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  KatzFD:
+  KatzFDMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyKatzFD.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
+
+  KatzFDSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyKatzFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   AntropyPetrosianFD:
     overwrite: False
@@ -419,18 +607,31 @@ FeatureDefinitions:
           data_like: id.0
           dim: 'times'
 
-  PetrosianFD:
+  PetrosianFDMean:
     overwrite: False
     save: False
     nodes:
       - id: 0
         feature: AntropyPetrosianFD.nc
       - id: 1
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
+          operation: 'mean'
 
+  PetrosianFDSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyPetrosianFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
 
   NeurokitEntropyMultiscale:
     overwrite: False
@@ -451,7 +652,7 @@ FeatureDefinitions:
             refined: False
             fuzzy: False
 
-  EntropyMultiscale:
+  EntropyMultiscaleMean:
     overwrite: False
     save: False
     nodes:
@@ -463,42 +664,88 @@ FeatureDefinitions:
           dataset_like: id.0
           data_var: 'value'
       - id: 2
-        node: mean_across_dimension
+        node: aggregate_across_dimension
         args:
           xarray_data: id.1
           dim: 'epochs'
 
+  EntropyMultiscaleSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: NeurokitEntropyMultiscale.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'value'
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
 
 FeatureList:
   - Mat2fif
   - BasicPrep
   - AmpNorm
+
   - NeurokitEntropyMultiscale
-  - EntropyMultiscale
+  - EntropyMultiscaleMean
+  - EntropyMultiscaleSD
   - SpectrumArrayMultitaper
-  - BandPower
-  - AntropyLZivComplexity
-  - LZiv
-  - AntropyHjorthParams
-  - AntropyAppEntropy
-  - AppEntropy
-  - AntropyNumZeroCross
-  - NumZeroCross
-  - AntropyPermutationEntropy
-  - PermEntropy
-  - AntropySampleEntropy
-  - SampleEntropy
-  - AntropySpectralEntropy
-  - SpectralEntropy
-  - AntropySVDEntropy
-  - SVDEntropy
-  - AntropyHiguchiFD
-  - HiguchiFD
-  - AntropyKatzFD
-  - KatzFD
-  - AntropyPetrosianFD
-  - PetrosianFD
+
   - FooofArray
-  - BandPowerAverage
-  - Mobility
-  - Complexity
+
+  - BandPower
+  - BandPowerMean
+  - BandPowerSD
+
+  - AntropyLZivComplexity
+  - LZivMean
+  - LZivSD
+
+  - AntropyHjorthParams
+  - MobilityMean
+  - MobilitySD
+  - ComplexityMean
+  - ComplexitySD
+
+  - AntropyAppEntropy
+  - AppEntropyMean
+  - AppEntropySD
+
+  - AntropyNumZeroCross
+  - NumZeroCrossMean
+  - NumZeroCrossSD
+
+  - AntropyPermutationEntropy
+  - PermEntropyMean
+  - PermEntropySD
+
+  - AntropySampleEntropy
+  - SampleEntropyMean
+  - SampleEntropySD
+
+  - AntropySpectralEntropy
+  - SpectralEntropyMean
+  - SpectralEntropySD
+
+  - AntropySVDEntropy
+  - SVDEntropyMean
+  - SVDEntropySD
+
+  - AntropyHiguchiFD
+  - HiguchiFDMean
+  - HiguchiFDSD
+
+  - AntropyKatzFD
+  - KatzFDMean
+  - KatzFDSD
+
+  
+  - AntropyPetrosianFD
+  - PetrosianFDMean
+  - PetrosianFDSD
+
