@@ -800,8 +800,10 @@ def fooof_component(
     *,
     component: Literal["aperiodic", "periodic", "residual", "all"] = "aperiodic",
     freq_dim: str = "frequencies",
+    mode: Literal["fooof-api", "manual"] = "fooof-api",
+    space: Literal["log", "linear"] = "linear",
 ) -> NodeResult:
-    """Derive linear-space components directly from serialized FOOOF models.
+    """Derive spectral components directly from serialized FOOOF models.
 
     Parameters
     ----------
@@ -814,17 +816,34 @@ def fooof_component(
         emits all three components as separate artifacts.
     freq_dim : str, optional
         Name of the frequency dimension for the output. Defaults to ``"frequencies"``.
+    mode : {"fooof-api", "manual"}, optional
+        Strategy used to recover the components. ``"fooof-api"`` leverages
+        :meth:`FOOOF.get_data` for the aperiodic and data spectrum while deriving
+        the FOOOF model from stored fits (the periodic output matches FOOOF's
+        peak component in the selected space). ``"manual"`` reproduces the
+        previous logic based on stored log-domain fits.
+    space : {"log", "linear"}, optional
+        Output space for the recovered components. Defaults to ``"linear"``.
 
     Returns
     -------
     NodeResult
-        ``.nc`` artifact with the requested component in linear power units.
+        ``.nc`` artifact containing an ``xarray.Dataset`` with the requested
+        component(s) in the specified space.
     """
 
     component = component.lower()
     valid_components = {"aperiodic", "periodic", "residual", "all"}
     if component not in valid_components:
         raise ValueError("component must be one of {'aperiodic', 'periodic', 'residual', 'all'}")
+
+    mode = mode.lower()
+    if mode not in {"fooof-api", "manual"}:
+        raise ValueError("mode must be either 'fooof-api' or 'manual'")
+
+    space = space.lower()
+    if space not in {"log", "linear"}:
+        raise ValueError("space must be either 'log' or 'linear'")
 
     fooof_xr = _resolve_psd_dataarray(fooof_like)
     other_dims = list(fooof_xr.dims)
@@ -876,6 +895,21 @@ def fooof_component(
         raise ValueError("No valid FOOOF models with frequency information were found.")
 
     freq_len = freq_values_model.size
+
+    def _ensure_shape(values: np.ndarray, label: str) -> np.ndarray:
+        arr = np.asarray(values, dtype=float)
+        if arr.size != freq_len:
+            raise ValueError(f"{label} length mismatch")
+        return arr
+
+    def _log_to_space(values: np.ndarray, label: str) -> np.ndarray:
+        arr = _ensure_shape(values, label)
+        return arr if space == "log" else np.power(10.0, arr)
+
+    def _model_to_space(values: np.ndarray, label: str) -> np.ndarray:
+        """Convert modeled log spectra to requested space."""
+        return _log_to_space(values, label)
+
     component_arrays: dict[str, np.ndarray] = {
         "aperiodic": np.full((flat_count, freq_len), np.nan, dtype=float),
         "periodic": np.full((flat_count, freq_len), np.nan, dtype=float),
@@ -887,23 +921,40 @@ def fooof_component(
             continue
 
         try:
-            ap_fit_log = np.asarray(fm._ap_fit, dtype=float)
-            if ap_fit_log.size != freq_len:
-                raise ValueError("Aperiodic fit length mismatch")
-            ap_linear = np.power(10.0, ap_fit_log)
+            model_log = _ensure_shape(getattr(fm, "fooofed_spectrum_", None), "fooofed spectrum")
+            power_log = _ensure_shape(getattr(fm, "power_spectrum", None), "power spectrum")
+            model_in_space = _model_to_space(model_log, "fooofed spectrum")
+            full_in_space = (
+                _ensure_shape(fm.get_data("full", space=space), "full spectrum")
+                if mode == "fooof-api"
+                else _model_to_space(power_log, "power spectrum")
+            )
 
-            model_log = np.asarray(getattr(fm, "fooofed_spectrum_", None), dtype=float)
-            power_log = np.asarray(getattr(fm, "power_spectrum", None), dtype=float)
-            if model_log.size != freq_len or power_log.size != freq_len:
-                raise ValueError("FOOOF spectra length mismatch")
+            if mode == "fooof-api":
+                aperiodic = _ensure_shape(fm.get_data("aperiodic", space=space), "aperiodic spectrum")
+                periodic = _ensure_shape(fm.get_data("peak", space=space), "peak spectrum")
+                # if space == "linear":
+                #     periodic = np.clip(periodic, a_min=0.0, a_max=None)
+            else:
+                ap_fit_log = _ensure_shape(getattr(fm, "_ap_fit", None), "aperiodic fit")
+                peak_log = getattr(fm, "_peak_fit", None)
+                if peak_log is not None:
+                    peak_log = _ensure_shape(peak_log, "peak fit")
+                else:
+                    peak_log = model_log - ap_fit_log
 
-            model_linear = np.power(10.0, model_log)
-            periodic_linear = np.clip(model_linear - ap_linear, a_min=0.0, a_max=None)
-            residual_linear = np.power(10.0, power_log) - model_linear
+                aperiodic = _log_to_space(ap_fit_log, "aperiodic fit")
+                if space == "linear":
+                    periodic = model_in_space - aperiodic
+                    #periodic = np.clip(periodic, a_min=0.0, a_max=None)
+                else:
+                    periodic = peak_log
 
-            component_arrays["aperiodic"][idx] = ap_linear
-            component_arrays["periodic"][idx] = periodic_linear
-            component_arrays["residual"][idx] = residual_linear
+            residual = full_in_space - model_in_space
+
+            component_arrays["aperiodic"][idx] = aperiodic
+            component_arrays["periodic"][idx] = periodic
+            component_arrays["residual"][idx] = residual
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to compute FOOOF component", index=idx, error=str(exc))
             invalid_indices.append(idx)
@@ -919,10 +970,18 @@ def fooof_component(
         coords[dim] = coord.values if coord is not None else np.arange(fooof_xr.sizes[dim])
     coords[freq_dim] = freq_values_model
 
+    suffix = "linear" if space == "linear" else "log"
     name_map = {
-        "aperiodic": "fooof_aperiodic_linear",
-        "periodic": "fooof_periodic_linear",
-        "residual": "fooof_residual_linear",
+        "aperiodic": f"fooof_aperiodic_{suffix}",
+        "periodic": f"fooof_periodic_{suffix}",
+        "residual": f"fooof_residual_{suffix}",
+    }
+
+    selection_map: dict[str, tuple[str, ...]] = {
+        "aperiodic": ("aperiodic",),
+        "periodic": ("periodic",),
+        "residual": ("residual",),
+        "all": tuple(name_map.keys()),
     }
 
     def build_component(key: str) -> xr.DataArray:
@@ -935,6 +994,9 @@ def fooof_component(
         "invalid_count": len(set(invalid_indices)),
         "total_count": flat_count,
         "invalid_indices": sorted(set(invalid_indices)),
+        "components": [name_map[k] for k in name_map],
+        "mode": mode,
+        "space": space,
     }
     if fooof_meta:
         metadata_base["fooof_metadata"] = fooof_meta
@@ -945,33 +1007,21 @@ def fooof_component(
         xarr.attrs["metadata"] = json.dumps(this_meta, indent=2, default=_json_safe)
         return xarr
 
-    artifacts: dict[str, Artifact]
-    if component == "all":
-        artifacts = {}
-        for key, suffix in (
-            ("aperiodic", ".aperiodic.nc"),
-            ("periodic", ".periodic.nc"),
-            ("residual", ".residual.nc"),
-        ):
-            xr_component = attach_metadata(build_component(key), key)
-            artifacts[suffix] = Artifact(
-                item=xr_component,
-                writer=lambda path, arr=xr_component: arr.to_netcdf(
-                    path, engine="netcdf4", format="NETCDF4"
-                ),
-            )
-    else:
-        xr_component = attach_metadata(build_component(component), component)
-        artifacts = {
-            ".nc": Artifact(
-                item=xr_component,
-                writer=lambda path: xr_component.to_netcdf(
-                    path, engine="netcdf4", format="NETCDF4"
-                ),
-            )
-        }
+    selected_keys = selection_map[component]
+    dataset_vars = [attach_metadata(build_component(key), key) for key in selected_keys]
+    dataset = xr.Dataset({var.name: var for var in dataset_vars})
 
-    return NodeResult(artifacts=artifacts)
+    dataset_meta = dict(metadata_base)
+    dataset_meta["component"] = component
+    dataset_meta["variables"] = [var.name for var in dataset_vars]
+    dataset.attrs["metadata"] = json.dumps(dataset_meta, indent=2, default=_json_safe)
+
+    artifact = Artifact(
+        item=dataset,
+        writer=lambda path, ds=dataset: ds.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
+    )
+
+    return NodeResult(artifacts={".nc": artifact})
 
 
 @register_node
