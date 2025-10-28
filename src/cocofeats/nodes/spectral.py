@@ -971,10 +971,15 @@ def fooof_component(
     coords[freq_dim] = freq_values_model
 
     suffix = "linear" if space == "linear" else "log"
+    # name_map = {
+    #     "aperiodic": f"fooof_aperiodic_{suffix}",
+    #     "periodic": f"fooof_periodic_{suffix}",
+    #     "residual": f"fooof_residual_{suffix}",
+    # }
     name_map = {
-        "aperiodic": f"fooof_aperiodic_{suffix}",
-        "periodic": f"fooof_periodic_{suffix}",
-        "residual": f"fooof_residual_{suffix}",
+        "aperiodic": "aperiodic",
+        "periodic": "periodic", 
+        "residual": "residual",
     }
 
     selection_map: dict[str, tuple[str, ...]] = {

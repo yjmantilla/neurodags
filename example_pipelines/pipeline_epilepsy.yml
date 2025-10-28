@@ -160,6 +160,32 @@ FeatureDefinitions:
         node: bandpower
         args:
           psd_like: id.1
+          relative: False
+          bands:
+            hfo: [70.0, 110.0]
+            delta: [1.0, 4.0]
+            theta: [4.0, 8.0]
+            alpha: [8.0, 13.0]
+            beta: [13.0, 30.0]
+            preAlpha: [5.5, 8.0]
+            slowTheta: [4.0, 5.5]
+
+  BandPowerRelative:
+    overwrite: False
+    for_dataframe: false
+    nodes:
+      - id: 0
+        feature: SpectrumArrayMultitaper.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'spectrum'
+      - id: 2
+        node: bandpower
+        args:
+          psd_like: id.1
+          relative: True
           bands:
             hfo: [70.0, 110.0]
             delta: [1.0, 4.0]
@@ -175,7 +201,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: BandPower.nc
+        feature: BandPowerRelative.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -189,13 +215,48 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: BandPower.nc
+        feature: BandPowerRelative.nc
       - id: 1
         node: aggregate_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
           operation: 'std'
+
+  BandPowerRelativeFooof:
+    overwrite: False
+    for_dataframe: false
+    nodes:
+      - id: 0
+        feature: FooofArray.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_component
+        args:
+          fooof_like: id.1
+          component: 'all'
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'periodic'
+      - id: 4
+        node: bandpower
+        args:
+          psd_like: id.3
+          relative: True
+          bands:
+            hfo: [70.0, 110.0]
+            delta: [1.0, 4.0]
+            theta: [4.0, 8.0]
+            alpha: [8.0, 13.0]
+            beta: [13.0, 30.0]
+            preAlpha: [5.5, 8.0]
+            slowTheta: [4.0, 5.5]
 
   AntropyHjorthParams:
     overwrite: False
@@ -757,8 +818,10 @@ FeatureList:
   - apSlopeSD
 
   - BandPower
+  - BandPowerRelative
   - BandPowerMean
   - BandPowerSD
+  - BandPowerRelativeFooof
 
   - AntropyLZivComplexity
   - LZivMean
