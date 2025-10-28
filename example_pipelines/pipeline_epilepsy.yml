@@ -258,6 +258,35 @@ FeatureDefinitions:
             preAlpha: [5.5, 8.0]
             slowTheta: [4.0, 5.5]
 
+  BandPowerFooofMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPowerRelativeFooof.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  BandPowerFooofSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPowerRelativeFooof.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+
   AntropyHjorthParams:
     overwrite: False
     for_dataframe: False
@@ -822,6 +851,8 @@ FeatureList:
   - BandPowerMean
   - BandPowerSD
   - BandPowerRelativeFooof
+  - BandPowerFooofMean
+  - BandPowerFooofSD
 
   - AntropyLZivComplexity
   - LZivMean
