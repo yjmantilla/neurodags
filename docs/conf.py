@@ -83,11 +83,11 @@ autoapi_keep_files = False  # useful for debugging
 # Be generous so you truly get “the whole API”
 autoapi_options = [
     "members",
-    #"undoc-members",
+    "undoc-members",
     "private-members",  # include _private
     "special-members",  # e.g. __call__, __iter__
-    "inherited-members",
-    "show-inheritance",
+    #"inherited-members",
+    #"show-inheritance",
     "show-module-summary",
     # "imported-members",   # enable if you also want re-exported/imported names
 ]

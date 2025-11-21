@@ -120,8 +120,6 @@ def load_configuration(rules: RulesLike) -> dict[str, Any]:
             active_log.debug("Closed YAML file handle")
 
 
-log = get_logger(__name__)
-
 PathLike = Union[str, "os.PathLike[str]"]
 
 

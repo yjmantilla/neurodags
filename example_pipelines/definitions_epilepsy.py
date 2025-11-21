@@ -168,7 +168,7 @@ def amplitude_normalization_per_segment(mne_object) -> NodeResult:
 
 register_node_with_name('amplitude_normalization_per_segment', amplitude_normalization_per_segment)
 
-def metadata_properties(path_like, str | os.PathLike) -> NodeResult:
+def metadata_properties ( path_like: str | os.PathLike) -> NodeResult:
     """Extract metadata properties from a file path.
 
     Parameters
