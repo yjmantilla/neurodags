@@ -159,14 +159,13 @@ def analyze_bids_filename(path: PathLike) -> dict[str, bool]:
 
     Returns
     -------
-    dict
-        Dictionary with:
-        - ``is_key_value_pairs`` : bool
-            True if all underscore-separated parts before the suffix are
-            BIDS-like key-value pairs (`key-value`).
-        - ``has_suffix`` : bool
-            True if there is a final part (before the extension) that is not
-            a key-value pair (e.g., "_bold", "_eeg", "_meg").
+    dict : Dictionary with two boolean entries:
+    - ``is_key_value_pairs`` : bool
+        True if all underscore-separated parts before the suffix are
+        BIDS-like key-value pairs (`key-value`).
+    - ``has_suffix`` : bool
+        True if there is a final part (before the extension) that is not
+        a key-value pair (e.g., "_bold", "_eeg", "_meg").
     """
     path = Path(path)
     filename = path.stem  # remove extension
