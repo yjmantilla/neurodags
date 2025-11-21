@@ -167,3 +167,26 @@ def amplitude_normalization_per_segment(mne_object) -> NodeResult:
     return out
 
 register_node_with_name('amplitude_normalization_per_segment', amplitude_normalization_per_segment)
+
+def metadata_properties(path_like, str | os.PathLike) -> NodeResult:
+    """Extract metadata properties from a file path.
+
+    Parameters
+    ----------
+    path_like : str | os.PathLike
+        File path to extract metadata from.
+    Returns
+    -------
+    NodeResult
+        A feature result containing the metadata properties as a NetCDF artifact.
+    """
+    path_like = str(path_like)
+    props = parse_bids(path_like)
+    props_xr = xr.Dataset()
+    for key, val in props.items():
+        props_xr[key] = xr.DataArray([val], dims=["entry"])
+    
+    artifacts = {
+        ".nc": Artifact(item=props_xr, writer=lambda path: props_xr.to_netcdf(path))
+    }
+    return NodeResult(artifacts=artifacts)
