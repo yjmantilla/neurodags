@@ -6,7 +6,8 @@ from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _v
 from pathlib import Path
-
+import importlib
+import inspect
 project = "cocofeats"
 
 # Full version from installed dist (hatch-vcs stamps this)
@@ -82,7 +83,7 @@ autoapi_keep_files = False  # useful for debugging
 # Be generous so you truly get “the whole API”
 autoapi_options = [
     "members",
-    "undoc-members",
+    #"undoc-members",
     "private-members",  # include _private
     "special-members",  # e.g. __call__, __iter__
     "inherited-members",
@@ -123,7 +124,6 @@ GITHUB_USER = "yjmantilla"
 GITHUB_REPO = "cocofeats"
 GITHUB_BRANCH = "main"  # or "master"
 
-
 def linkcode_resolve(domain, info):
     if domain != "py":
         return None
@@ -156,3 +156,59 @@ def linkcode_resolve(domain, info):
 
     linespec = f"#L{lineno}-L{lineno+len(source)-1}"
     return f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{fn}{linespec}"
+
+
+# # --- Hide Pydantic internals from docs ---------------------------------------
+
+# _PYDANTIC_INTERNAL_ATTRS = {
+#     "model_config",
+#     "__class_vars__",
+#     "__private_attributes__",
+#     "__signature__",
+#     "__pydantic_complete__",
+#     "__pydantic_core_schema__",
+#     "__pydantic_custom_init__",
+#     "__pydantic_decorators__",
+#     "__pydantic_generic_metadata__",
+#     "__pydantic_parent_namespace__",
+#     "__pydantic_post_init__",
+#     "__pydantic_root_model__",
+#     "__pydantic_serializer__",
+#     "__pydantic_validator__",
+#     "__pydantic_fields__",
+#     "__pydantic_setattr_handlers__",
+#     "__pydantic_computed_fields__",
+# }
+
+
+# def _is_pydantic_internal(name: str, obj: object) -> bool:
+#     # Any of the explicit ones
+#     if name in _PYDANTIC_INTERNAL_ATTRS:
+#         return True
+
+#     # Anything starting with this prefix
+#     if name.startswith("__pydantic_"):
+#         return True
+
+#     # Extra safety: things whose defining module is clearly pydantic
+#     mod = getattr(obj, "__module__", "") or ""
+#     if mod.startswith("pydantic") or mod.startswith("pydantic_core"):
+#         return True
+
+#     return False
+
+
+# def autodoc_skip_pydantic(app, what, name, obj, skip, options):
+#     if _is_pydantic_internal(name, obj):
+#         return True  # skip it
+#     return None      # use default behaviour otherwise
+
+
+# def autoapi_skip_pydantic(app, what, name, obj, skip, options):
+#     if _is_pydantic_internal(name, obj):
+#         return True  # skip it in AutoAPI too
+#     return None
+
+# def setup(app):
+#     app.connect("autodoc-skip-member", autodoc_skip_pydantic)
+#     app.connect("autoapi-skip-member", autoapi_skip_pydantic)
