@@ -125,7 +125,7 @@ def _is_step_cached(
     """
     Decide if a 'feature' step can be considered already computed.
     By default: look for any file whose prefix matches:
-      <reference_base>@<CamelCase(step_feature_name)>.*
+    <reference_base>@<CamelCase(step_feature_name)>.*
     """
     # prefix = f"{reference_base}@{snake_to_camel(step_feature_name)}"
     postfix = f"@{step_feature_name}"
