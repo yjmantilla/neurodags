@@ -45,7 +45,7 @@ FigureEncoding = str | None
 CallableLike = Callable[[np.ndarray], Any]
 
 
-@dataclass(slots=True)
+@dataclass(slots=False) # breaks parallelization?
 class _CallRecord:
     metadata: Any | None
     figure: dict[str, np.ndarray] | None
@@ -322,8 +322,8 @@ def _build_node(name: str, func: CallableLike) -> None:
         resolved_args = tuple(function_args or ())
 
         capture_requested = figure_encoding not in {None, "none", ""}
-        if capture_requested and "show" not in resolved_kwargs:
-            resolved_kwargs["show"] = True
+        #if capture_requested and "show" not in resolved_kwargs:
+        #    resolved_kwargs["show"] = True
         if force_show is not None:
             resolved_kwargs["show"] = bool(force_show)
 
@@ -365,6 +365,7 @@ def _build_node(name: str, func: CallableLike) -> None:
 
 _NEUROKIT_FUNCTIONS: Mapping[str, CallableLike] = {
     "neurokit_complexity_delay": nk.complexity_delay,
+    "neurokit_entropy_multiscale": nk.entropy_multiscale,
 }
 
 

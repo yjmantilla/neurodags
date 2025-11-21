@@ -125,7 +125,7 @@ def _is_step_cached(
     """
     Decide if a 'feature' step can be considered already computed.
     By default: look for any file whose prefix matches:
-      <reference_base>@<CamelCase(step_feature_name)>.*
+    <reference_base>@<CamelCase(step_feature_name)>.*
     """
     # prefix = f"{reference_base}@{snake_to_camel(step_feature_name)}"
     postfix = f"@{step_feature_name}"
@@ -193,7 +193,8 @@ def register_features_from_yaml(yaml_path: str) -> list[str]:
 
 
 def _artifact_candidates_for(prefix: str) -> list[str]:
-    return sorted(glob.glob(prefix + ".*"))
+    #TODO: How to add option to skip features that previously failed? (.error files)
+    return [x for x in sorted(glob.glob(prefix + ".*")) if not x.endswith('.error')]
 
 
 class _MissingPrecomputedArtifacts(RuntimeError):
@@ -469,6 +470,7 @@ def collect_feature_for_dataframe(
     *,
     flatten_xarray_artifacts: bool = True,
     sort_flattened_dims: bool = True,
+    preserve_complex_values: bool = False,
 ) -> dict[str, Any]:
     """
     Collect artifacts for a feature and convert them into dataframe-ready values.
@@ -485,6 +487,10 @@ def collect_feature_for_dataframe(
     sort_flattened_dims:
         When flattening a ``DataArray``, sort dimension names alphanumerically when constructing
         the column suffix.
+
+    preserve_complex_values:
+        When True, skip flattening and value simplification so artifacts retain their original
+        Python objects (after potential on-disk loading).
 
     Returns a dictionary suitable for composing a DataFrame row, with columns named
     ``{feature_name}{artifact_suffix}`` (with optional BIDS-like suffixes per flattened element).
@@ -523,8 +529,9 @@ def collect_feature_for_dataframe(
         simplified = _simplify_artifact_payload(
             payload,
             suffix=suffix,
-            flatten_xarray=flatten_xarray_artifacts,
+            flatten_xarray=flatten_xarray_artifacts and not preserve_complex_values,
             sort_dims_alphabetically=sort_flattened_dims,
+            preserve_complex_values=preserve_complex_values,
         )
         if isinstance(simplified, _FlattenedArtifactColumns):
             for flatten_suffix, value in simplified.items():
@@ -607,8 +614,12 @@ def _simplify_artifact_payload(
     suffix: str,
     flatten_xarray: bool = False,
     sort_dims_alphabetically: bool = True,
+    preserve_complex_values: bool = False,
 ) -> Any:
     value = _load_from_path(payload, suffix=suffix) if isinstance(payload, Path) else payload
+
+    if preserve_complex_values:
+        return value
 
     if flatten_xarray and xr is not None and isinstance(value, xr.DataArray):
         return _flatten_dataarray_payload(
@@ -726,8 +737,17 @@ def _format_coord_value(value: Any) -> str:
         except Exception:
             pass
     text = "NA" if value is None else str(value)
-    sanitized = re.sub(r"[^0-9A-Za-z\-.]+", "-", text)
-    sanitized = sanitized.strip("-")
+    #sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
+    #sanitized = sanitized.strip("-")
+    value = str(value)
+
+    if isinstance(value, str):
+        value = value.replace('-', '~')
+        value = value.replace('_', '|')
+        value = value.replace('@', '$')
+        value = value.replace(',', '.')
+    sanitized = value
+
     return sanitized or "NA"
 
 

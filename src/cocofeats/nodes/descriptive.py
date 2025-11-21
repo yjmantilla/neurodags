@@ -81,7 +81,7 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
 
     Parameters
     ----------
-    mne_object : str | os.PathLike | mne.io.Raw | mne.Epochs
+    mne_object : str | os.PathLike | mne.io.Raw | mne.BaseEpochs
         Path to a MEEG file or an already loaded MNE object.
 
     Returns
@@ -125,7 +125,7 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
         coords["times"] = {'start': float(mne_object.times[0]), 'stop': float(mne_object.times[-1]), 'n_times': n_times, 'delta': float(mne_object.times[1] - mne_object.times[0])}
         coords["spaces"] = info_dict["ch_names"]
 
-    elif isinstance(mne_object, mne.Epochs):
+    elif isinstance(mne_object, mne.BaseEpochs):
         dims = ["epochs", "times", "spaces"]
         n_epochs, n_channels, n_times = mne_object.get_data().shape
         shape = (n_epochs, n_times, n_channels)
@@ -198,7 +198,7 @@ def meeg_to_xarray(mne_object) -> NodeResult:
             },
         )
 
-    elif isinstance(mne_object, mne.Epochs):
+    elif isinstance(mne_object, mne.BaseEpochs):
         data = mne_object.get_data()
         ch_names = list(mne_object.ch_names)
         coords = {

@@ -1,0 +1,9 @@
+cleveland:
+  name: cleveland
+  file_pattern: 
+    local: "/home/yorguin/datasets/epilepsy/rawdata/**/*SF_iEEG.mat"
+    #"/mnt/y/datasets/epilepsy/rawdata/sub-S001/run-1P/sub-S001_run-1P_task-BG_acq-EZ0_outcome-SF_iEEG.mat"
+    fir: ""
+  derivatives_path: 
+    local: "/home/yorguin/datasets/epilepsy/derivatives/"
+    fir: ""

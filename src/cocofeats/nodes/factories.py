@@ -69,7 +69,7 @@ class _FactoryError(ValueError):
     """Internal helper error for consistent exception types."""
 
 
-@dataclass(slots=True)
+@dataclass(slots=False) # break parallelization?
 class _SliceParameterCache:
     """Cached view of a per-slice argument or keyword value."""
 
@@ -96,7 +96,7 @@ class _SliceParameterCache:
         }
 
 
-@dataclass(slots=True)
+@dataclass(slots=False) # Breaks parallelization?
 class _ArgumentSpec:
     """Descriptor for positional/keyword arguments resolved per slice."""
 

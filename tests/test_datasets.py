@@ -796,7 +796,7 @@ def test_returns_none(tmp_path: Path):
 
 def test_get_dummy_epochs_shapes():
     epochs = get_dummy_epochs(NCHANNELS=3, SFREQ=100.0, STOP=5.0, NUMEVENTS=5, random_state=0)
-    assert isinstance(epochs, mne.Epochs)
+    assert isinstance(epochs, mne.BaseEpochs)
     # Check events length
     assert len(epochs.events) == 5
     # Check channels

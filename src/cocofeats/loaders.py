@@ -139,7 +139,7 @@ def load_meeg(meeg_file: PathLike, kwargs: dict | None = None):
 
     Returns
     -------
-    mne.io.BaseRaw | mne.Epochs
+    mne.io.BaseRaw | mne.BaseEpochs
         Loaded MEEG object (either Raw or Epochs).
 
     Raises

@@ -12,19 +12,38 @@
             "console": "integratedTerminal"
         },
     {
-      "name": "Python: iterate_feature_pipeline",
+      "name": "Python: iterate_feature_pipeline psychostimulants",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
       "console": "integratedTerminal",
       "justMyCode": false,
       "args": [
-        "/home/user/code/cocofeats/example_pipelines/pipeline_psycho.yml",
+        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_psycho.yml",
         //"--max_files_per_dataset", "5",
         //  "--dry_run",
         // "--only_index", "0", "3"
       ],
     },
+
+    // python src/cocofeats/orchestrators.py /home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml --max_files_per_dataset 5 --dry_run --n-jobs 2
+    {
+      "name": "Python: iterate_feature_pipeline epilepsy",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml",
+        "--max_files_per_dataset", "2",
+        //  "--dry_run",
+        // "--only_index", "0", "3",
+        //"--n-jobs", "2",
+        "--raise_on_error"
+      ],
+    },
+
     {
       "name": "Python: build_feature_dataframe",
       "type": "debugpy",
@@ -33,13 +52,33 @@
       "console": "integratedTerminal",
       "justMyCode": false,
       "args": [
-        "/home/user/code/cocofeats/example_pipelines/pipeline_psycho.yml",
+        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_psycho.yml",
         "--make_final_dataframe",
         "--dataframe_output", "${workspaceFolder}/outputs/features.csv",
         //"--dataframe_features", "FooofScalarsAllSpectrumArrayWelchEpochsAverage5seg",
         //"--max_files_per_dataset", "2"
       ],
+    },
+
+    // Equivalent line:
+    // python src/cocofeats/orchestrators.py /home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml --make_final_dataframe --dataframe_output outputs/epilepsy_features.csv --dataframe_format long --max_files_per_dataset 5 
+    {
+      "name": "Python: build_feature_dataframe epilepsy",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml",
+        "--make_final_dataframe",
+        "--dataframe_output", "${workspaceFolder}/outputs/epilepsy_features.csv",
+        //"--dataframe_features", "FooofScalarsAllSpectrumArrayWelchEpochsAverage5seg",
+        "--max_files_per_dataset", "2",
+        "--dataframe_format","long"
+      ],
     }
+
 
     ],
 }

@@ -8,7 +8,8 @@ log = get_logger(__name__)
 this_file = __file__
 this_yaml = this_file.replace(".py", ".yml")
 
-yaml_definitions = yaml.safe_load(open(this_yaml))
+with open(this_yaml) as f:
+    yaml_definitions = yaml.safe_load(f)
 
 
 def register_features_from_dict(yaml_definitions: dict):

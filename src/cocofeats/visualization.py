@@ -5,11 +5,21 @@ from dash import Dash, dcc, html, Input, Output
 import webbrowser
 import json
 import numpy as np
-
+from cocofeats.loaders import load_meeg
+from cocofeats.nodes.descriptive import meeg_to_xarray
 # ---------- Load Data ----------
 filename = sys.argv[1]   # <--- uncomment to accept from command line
 
-ds = xr.open_dataarray(filename)
+
+if filename.endswith('.fif'):
+    meeg = load_meeg(filename)
+    ds = meeg_to_xarray(meeg).artifacts['.nc'].item
+
+if filename.endswith('.nc'):
+    try:
+        ds = xr.open_dataarray(filename)
+    except Exception as e:
+        raise ValueError(f"Failed to open {filename} as xarray DataArray: {e}")
 
 dims = list(ds.dims)
 coords = {dim: ds.coords[dim].values for dim in dims}

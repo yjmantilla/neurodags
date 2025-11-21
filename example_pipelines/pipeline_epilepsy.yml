@@ -1,0 +1,903 @@
+datasets: example_pipelines/datasets_epilepsy.yml
+mount_point: local
+new_definitions: example_pipelines/definitions_epilepsy.py
+
+FeatureDefinitions:
+  Mat2fif:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: SourceFile
+      - id: 1
+        node: mat2fif
+        args:
+          eegpath: id.0
+
+  BasicPrep:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: Mat2fif.fif
+      - id: 1
+        node: basic_preprocessing
+        args:
+          mne_object: id.0
+          resample: 256
+          notch_filter: null
+          filter_args:
+            l_freq: 0.5
+            h_freq: 110
+          epoch_config:
+            duration: 1
+            overlap: 0.5
+            reject_by_annotation : False
+            proj : False
+          extra_artifacts: True
+  AmpNorm:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: BasicPrep.fif
+      - id: 1
+        node: amplitude_normalization_per_segment
+        args:
+          mne_object: id.0
+
+  SpectrumArrayMultitaper:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: mne_spectrum_array
+        args:
+          meeg: id.0
+          method: 'multitaper'
+          method_kwargs:
+            bandwidth : null
+            adaptive: False
+            low_bias: True
+            normalization: 'length'
+            remove_dc: True
+            output: 'power'
+
+
+  FooofArray:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: SpectrumArrayMultitaper.nc
+      - id: 1
+        node: fooof
+        args:
+          psd_like: id.0
+          freq_dim: 'frequencies'
+          fooof_options:
+            FOOOF:
+              aperiodic_mode: 'knee'
+            fit:
+              freq_range: [1, 90]
+            freq_res: 1
+            save:
+              save_results: True
+              save_settings: True
+              save_data: True
+          include_timings: True
+
+  apSlopeMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: FooofArray.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_scalars
+        args:
+          fooof_like: id.1
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'fooof_aperiodic_exponent'
+      - id: 4
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.3
+          dim: 'epochs'
+          operation: 'mean'
+
+  apSlopeSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: FooofArray.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_scalars
+        args:
+          fooof_like: id.1
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'fooof_aperiodic_exponent'
+      - id: 4
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.3
+          dim: 'epochs'
+          operation: 'std'
+
+  BandPower:
+    overwrite: False
+    for_dataframe: false
+    nodes:
+      - id: 0
+        feature: SpectrumArrayMultitaper.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'spectrum'
+      - id: 2
+        node: bandpower
+        args:
+          psd_like: id.1
+          relative: False
+          bands:
+            hfo: [70.0, 110.0]
+            delta: [1.0, 4.0]
+            theta: [4.0, 8.0]
+            alpha: [8.0, 13.0]
+            beta: [13.0, 30.0]
+            preAlpha: [5.5, 8.0]
+            slowTheta: [4.0, 5.5]
+
+  BandPowerRelative:
+    overwrite: False
+    for_dataframe: false
+    nodes:
+      - id: 0
+        feature: SpectrumArrayMultitaper.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'spectrum'
+      - id: 2
+        node: bandpower
+        args:
+          psd_like: id.1
+          relative: True
+          bands:
+            hfo: [70.0, 110.0]
+            delta: [1.0, 4.0]
+            theta: [4.0, 8.0]
+            alpha: [8.0, 13.0]
+            beta: [13.0, 30.0]
+            preAlpha: [5.5, 8.0]
+            slowTheta: [4.0, 5.5]
+
+  BandPowerMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPowerRelative.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  BandPowerSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPowerRelative.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  BandPowerRelativeFooof:
+    overwrite: False
+    for_dataframe: false
+    nodes:
+      - id: 0
+        feature: FooofArray.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_component
+        args:
+          fooof_like: id.1
+          component: 'all'
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'periodic'
+      - id: 4
+        node: bandpower
+        args:
+          psd_like: id.3
+          relative: True
+          bands:
+            hfo: [70.0, 110.0]
+            delta: [1.0, 4.0]
+            theta: [4.0, 8.0]
+            alpha: [8.0, 13.0]
+            beta: [13.0, 30.0]
+            preAlpha: [5.5, 8.0]
+            slowTheta: [4.0, 5.5]
+
+  BandPowerFooofMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPowerRelativeFooof.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  BandPowerFooofSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: BandPowerRelativeFooof.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+
+  AntropyHjorthParams:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_hjorth_params
+        args:
+          data_like: id.0
+          dim: 'times'
+
+
+  MobilityMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: mobility
+          end: mobility
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'mean'
+
+  MobilitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: mobility
+          end: mobility
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
+
+  ComplexityMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: complexity
+          end: complexity
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'mean'
+
+  ComplexitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        feature: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: complexity
+          end: complexity
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
+
+  AntropyAppEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_app_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  AppEntropyMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyAppEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  AppEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyAppEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropyLZivComplexity:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: meeg_to_xarray
+        args:
+          mne_object: id.0
+      - id: 2
+        node: binarize_with_median
+        args:
+          data: id.1
+          dim: 'times'
+      - id: 3
+        node: antropy_lziv_complexity
+        args:
+          data_like: id.2
+          dim: 'times'
+
+  LZivMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyLZivComplexity.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  LZivSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyLZivComplexity.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropyNumZeroCross:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_num_zerocross
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  NumZeroCrossMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyNumZeroCross.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+
+  NumZeroCrossSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyNumZeroCross.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs' 
+          operation: 'std'
+
+
+  AntropyPermutationEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_perm_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  PermEntropyMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyPermutationEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  PermEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyPermutationEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropySampleEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_sample_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  SampleEntropyMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySampleEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+
+  SampleEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySampleEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropySpectralEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_spectral_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+          sf: 200.0
+
+  SpectralEntropyMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySpectralEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  SpectralEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySpectralEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropySVDEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_svd_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  SVDEntropyMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySVDEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  SVDEntropySD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropySVDEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropyHiguchiFD:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_higuchi_fd
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  HiguchiFDMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyHiguchiFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  HiguchiFDSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyHiguchiFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropyKatzFD:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_katz_fd
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  KatzFDMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyKatzFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  KatzFDSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyKatzFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  AntropyPetrosianFD:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: antropy_petrosian_fd
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  PetrosianFDMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyPetrosianFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  PetrosianFDSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: AntropyPetrosianFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  NeurokitEntropyMultiscale:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        feature: AmpNorm.fif
+      - id: 1
+        node: neurokit_entropy_multiscale
+        args:
+          data_like: id.0
+          dim: 'times'
+          function_kwargs:
+            scale: 'default'
+            dimension: 2
+            r: 'default'
+            composite: False
+            refined: False
+            fuzzy: False
+
+  EntropyMultiscaleMean:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: NeurokitEntropyMultiscale.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'value'
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+
+  EntropyMultiscaleSD:
+    overwrite: False
+    save: False
+    nodes:
+      - id: 0
+        feature: NeurokitEntropyMultiscale.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'value'
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+
+FeatureList:
+  - Mat2fif
+  - BasicPrep
+  - AmpNorm
+
+  - NeurokitEntropyMultiscale
+  - EntropyMultiscaleMean
+  - EntropyMultiscaleSD
+  - SpectrumArrayMultitaper
+
+  - FooofArray
+  - apSlopeMean
+  - apSlopeSD
+
+  - BandPower
+  - BandPowerRelative
+  - BandPowerMean
+  - BandPowerSD
+  - BandPowerRelativeFooof
+  - BandPowerFooofMean
+  - BandPowerFooofSD
+
+  - AntropyLZivComplexity
+  - LZivMean
+  - LZivSD
+
+  - AntropyHjorthParams
+  - MobilityMean
+  - MobilitySD
+  - ComplexityMean
+  - ComplexitySD
+
+  - AntropyAppEntropy
+  - AppEntropyMean
+  - AppEntropySD
+
+  - AntropyNumZeroCross
+  - NumZeroCrossMean
+  - NumZeroCrossSD
+
+  - AntropyPermutationEntropy
+  - PermEntropyMean
+  - PermEntropySD
+
+  - AntropySampleEntropy
+  - SampleEntropyMean
+  - SampleEntropySD
+
+  - AntropySpectralEntropy
+  - SpectralEntropyMean
+  - SpectralEntropySD
+
+  - AntropySVDEntropy
+  - SVDEntropyMean
+  - SVDEntropySD
+
+  - AntropyHiguchiFD
+  - HiguchiFDMean
+  - HiguchiFDSD
+
+  - AntropyKatzFD
+  - KatzFDMean
+  - KatzFDSD
+
+  
+  - AntropyPetrosianFD
+  - PetrosianFDMean
+  - PetrosianFDSD
+
