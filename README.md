@@ -2,23 +2,25 @@
 
 A slurm friendly MEEG feature extraction package leveraging bids-like data organization and DAG processing.
 
-- Bids-like data organization
+- Agnostic to data organization
 - Slurm friendly
 - Reusage of existing derivatives through DAG processing.
-- Yaml configuration
+- Yaml-based configuration
+- Extensible without needing to fork the repository  
+
+## Basic Example
+
+Let's say you are exploring 
+
 
 ## Quickstart
 
+
+## For developers
+
 ```bash
-# Clone and rename the repository
+# Clone the repository
 
-# Create and activate a virtual environment
-python -m venv .venv
-.venv\Scripts\activate  # on Windows
-# source .venv/bin/activate  # on Linux/macOS
-
-# Install in development mode with extras
-pip install -U pip
 pip install -e .[dev,test,docs]
 
 # Run quality checks
@@ -45,13 +47,7 @@ rm -rf docs/_build
 
 # HDF5 and NetCDF4
 
-You may need to install hdf5 in your system and built from source:
-
-```bash
-pip install --no-binary=h5py h5py
-```
-
-if you get an error like:
+If you get an error like:
 
 ```bash
   File "src/netCDF4/_netCDF4.pyx", line 5645, in netCDF4._netCDF4.Variable.__setitem__
@@ -60,10 +56,14 @@ if you get an error like:
 RuntimeError: NetCDF: HDF error
 ```
 
+You may need to install hdf5 in your system and built from source:
+
+```bash
+pip install --no-binary=h5py h5py
+```
+
 ## Documentation
 
-- Local build: `docs/_build/html/index.html`
-- Hosted docs: configure GitHub Pages and set the URL in `pyproject.toml` under `[project.urls]`.
 - [Docs](https://yjmantilla.github.io/cocofeats/)
 
 ## Custom node definitions
