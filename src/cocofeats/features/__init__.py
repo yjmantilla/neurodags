@@ -32,7 +32,7 @@ class DerivativeEntry:
 
 
 # Global registry
-_FEATURE_REGISTRY: dict[str, DerivativeEntry] = {}
+_DERIVATIVE_REGISTRY: dict[str, DerivativeEntry] = {}
 
 log = get_logger(__name__)
 
@@ -65,12 +65,12 @@ def register_derivative(
 
     def decorator(target: DerivativeCallable) -> DerivativeCallable:
         key = name or target.__name__
-        if not override and key in _FEATURE_REGISTRY and _FEATURE_REGISTRY[key].func is not target:
+        if not override and key in _DERIVATIVE_REGISTRY and _DERIVATIVE_REGISTRY[key].func is not target:
             raise ValueError(f"Derivative '{key}' is already registered")
-        elif override and key in _FEATURE_REGISTRY:
+        elif override and key in _DERIVATIVE_REGISTRY:
             log.info(f"Overriding existing derivative registration for '{key}'")
 
-        _FEATURE_REGISTRY[key] = DerivativeEntry(key, target, definition)
+        _DERIVATIVE_REGISTRY[key] = DerivativeEntry(key, target, definition)
         return target
 
     if func is not None:
@@ -98,30 +98,30 @@ def register_derivative_with_name(
 def get_derivative(name: str) -> DerivativeEntry:
     """Return a registered derivative entry by name."""
     try:
-        return _FEATURE_REGISTRY[name]
+        return _DERIVATIVE_REGISTRY[name]
     except KeyError as exc:
-        available = ", ".join(sorted(_FEATURE_REGISTRY)) or "<none>"
+        available = ", ".join(sorted(_DERIVATIVE_REGISTRY)) or "<none>"
         raise KeyError(f"Unknown derivative '{name}'. Available derivatives: {available}") from exc
 
 
 def iter_derivatives() -> Iterable[tuple[str, DerivativeEntry]]:
     """Yield registered derivatives as (name, DerivativeEntry) pairs."""
-    return _FEATURE_REGISTRY.items()
+    return _DERIVATIVE_REGISTRY.items()
 
 
 def list_derivatives() -> tuple[str, ...]:
     """Return the registered derivative names sorted alphabetically."""
-    return tuple(sorted(_FEATURE_REGISTRY))
+    return tuple(sorted(_DERIVATIVE_REGISTRY))
 
 
 def clear_derivative_registry() -> None:
     """Remove all registered derivatives (useful for tests)."""
-    _FEATURE_REGISTRY.clear()
+    _DERIVATIVE_REGISTRY.clear()
 
 
 def unregister_derivative(name: str) -> None:
     """Remove a derivative from the registry if present."""
-    _FEATURE_REGISTRY.pop(name, None)
+    _DERIVATIVE_REGISTRY.pop(name, None)
 
 
 # -------------------------
