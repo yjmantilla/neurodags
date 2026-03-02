@@ -1,4 +1,4 @@
-"""Node wrappers for the ``neurokit2`` feature functions.
+"""Node wrappers for the ``neurokit2`` derivative functions.
 
 The wrappers delegate numerical computation to :func:`cocofeats.nodes.factories.apply_1d`
 while collecting per-slice metadata and optional Matplotlib figures returned by

@@ -1,10 +1,10 @@
-FeatureDefinitions:
+DerivativeDefinitions:
 
   CheckLineFrequency:
     overwrite : False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: mne_spectrum
         args:
@@ -19,7 +19,7 @@ FeatureDefinitions:
     overwrite: False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: basic_preprocessing
         args:
@@ -48,13 +48,13 @@ FeatureDefinitions:
             overlap: 0.5
           extra_artifacts: True
 
-  InterFeatureDependence:
+  InterDerivativeDependence:
     overwrite: False
     nodes:
       - id: 0
-        feature: BasicPrep1.fif
+        derivative: BasicPrep1.fif
       - id: 1
-        feature: CheckLineFrequency.nc
+        derivative: CheckLineFrequency.nc
       - id: 3
         node: dummy
         args:
@@ -65,7 +65,7 @@ FeatureDefinitions:
     overwrite: False
     nodes:
       - id: 0
-        feature: BasicPrep1.fif
+        derivative: BasicPrep1.fif
       - id: 1
         node: mne_spectrum_array
         args:
@@ -84,7 +84,7 @@ FeatureDefinitions:
     overwrite: False
     nodes:
       - id: 0
-        feature: BasicPrep1.fif
+        derivative: BasicPrep1.fif
       - id: 1
         node: mne_spectrum_array
         args:
@@ -102,7 +102,7 @@ FeatureDefinitions:
     overwrite: False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: extract_meeg_metadata
         args:

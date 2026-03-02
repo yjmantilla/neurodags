@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "cocofeats"
 dynamic = ["version"]
-description = "A slurm friendly MEEG feature extraction package leveraging bids-like data organization and DAG processing."
+description = "A slurm friendly MEEG derivative extraction package leveraging bids-like data organization and DAG processing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
   { name = "Yorguin-Jose Mantilla-Ramos", email = "yjmantilla@gmail.com" },
 ]
-keywords = ["meeg", "feature","extraction", "bids", "meg", "eeg"]
+keywords = ["meeg", "derivative","extraction", "bids", "meg", "eeg"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",

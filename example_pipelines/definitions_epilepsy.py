@@ -178,7 +178,7 @@ def metadata_properties ( path_like: str | os.PathLike) -> NodeResult:
     Returns
     -------
     NodeResult
-        A feature result containing the metadata properties as a NetCDF artifact.
+        A derivative result containing the metadata properties as a NetCDF artifact.
     """
     path_like = str(path_like)
     props = parse_bids(path_like)

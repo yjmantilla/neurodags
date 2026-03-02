@@ -59,7 +59,7 @@ def load_configuration(rules: RulesLike) -> dict[str, Any]:
       - a path (str/PathLike) to a YAML file, or
       - a text file-like object with YAML content.
 
-    Features:
+    Derivatives:
       - Safe loader (no object construction).
       - Raises on duplicate keys (with line/column) and logs them.
       - Ensures the document root is a mapping/dict.

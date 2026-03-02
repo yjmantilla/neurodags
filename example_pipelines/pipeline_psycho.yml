@@ -1,13 +1,13 @@
 datasets: example_pipelines/datasets_psycho.yml
 mount_point: local
 new_definitions: null
-FeatureDefinitions:
+DerivativeDefinitions:
   BasicPrep5seg:
     overwrite: False
     for_dataframe: False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: keep_channels
         args:
@@ -45,7 +45,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: keep_channels
         args:
@@ -83,7 +83,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: keep_channels
         args:
@@ -105,7 +105,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: mne_spectrum_array
         args:
@@ -124,7 +124,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep10min.fif
+        derivative: BasicPrep10min.fif
       - id: 1
         node: mne_spectrum_array
         args:
@@ -143,9 +143,9 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
-        feature: SpectrumArrayMultitaper5seg.nc
+        derivative: SpectrumArrayMultitaper5seg.nc
       - id: 2
         node: extract_data_var
         args:
@@ -163,7 +163,7 @@ FeatureDefinitions:
     overwrite: False
     nodes:
       - id: 0
-        feature: SpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: SpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: bandpower
         args:
@@ -173,7 +173,7 @@ FeatureDefinitions:
     overwrite: False
     nodes:
       - id: 0
-        feature: BandPowerSpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: BandPowerSpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: band_ratios
         args:
@@ -184,7 +184,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: SpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: SpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: fooof
         args:
@@ -207,7 +207,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: FooofSpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: FooofSpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: extract_data_var
         args:
@@ -225,7 +225,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: FooofSpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: FooofSpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: extract_data_var
         args:
@@ -243,7 +243,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: FooofSpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: FooofSpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: extract_data_var
         args:
@@ -261,7 +261,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: FooofSpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: FooofSpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: extract_data_var
         args:
@@ -279,7 +279,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: FooofSpectrumArrayWelchEpochsAverage5seg.nc
+        derivative: FooofSpectrumArrayWelchEpochsAverage5seg.nc
       - id: 1
         node: extract_data_var
         args:
@@ -298,7 +298,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_hjorth_params
         args:
@@ -310,7 +310,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_app_entropy
         args:
@@ -322,7 +322,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyAppEntropy5seg.nc
+        derivative: AntropyAppEntropy5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -334,7 +334,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: binarize_with_median
         args:
@@ -351,7 +351,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyLZivComplexity5seg.nc
+        derivative: AntropyLZivComplexity5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -364,7 +364,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_num_zerocross
         args:
@@ -376,7 +376,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyNumZeroCross5seg.nc
+        derivative: AntropyNumZeroCross5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -389,7 +389,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_perm_entropy
         args:
@@ -401,7 +401,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyPermutationEntropy5seg.nc
+        derivative: AntropyPermutationEntropy5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -413,7 +413,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_sample_entropy
         args:
@@ -425,7 +425,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySampleEntropy5seg.nc
+        derivative: AntropySampleEntropy5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -437,7 +437,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_spectral_entropy
         args:
@@ -450,7 +450,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySpectralEntropy5seg.nc
+        derivative: AntropySpectralEntropy5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -462,7 +462,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_svd_entropy
         args:
@@ -474,7 +474,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySVDEntropy5seg.nc
+        derivative: AntropySVDEntropy5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -486,7 +486,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_higuchi_fd
         args:
@@ -498,7 +498,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyHiguchiFD5seg.nc
+        derivative: AntropyHiguchiFD5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -510,7 +510,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_katz_fd
         args:
@@ -522,7 +522,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyKatzFD5seg.nc
+        derivative: AntropyKatzFD5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -534,7 +534,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: antropy_petrosian_fd
         args:
@@ -546,7 +546,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyPetrosianFD5seg.nc
+        derivative: AntropyPetrosianFD5seg.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -558,7 +558,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep10min.fif
+        derivative: BasicPrep10min.fif
       - id: 1
         node: antropy_detrended_fluctuation
         args:
@@ -570,7 +570,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyDetrendedFluctuation10min.nc
+        derivative: AntropyDetrendedFluctuation10min.nc
       - id: 1
         node: mean_across_dimension
         args:
@@ -582,7 +582,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep5seg.fif
+        derivative: BasicPrep5seg.fif
       - id: 1
         node: neurokit_complexity_delay
         args:
@@ -594,14 +594,14 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: NeurokitComplexityDelay.nc
+        derivative: NeurokitComplexityDelay.nc
       - id: 1
         node: mean_across_dimension
         args:
           xarray_data: id.0
           dim: 'epochs'
 
-FeatureList:
+DerivativeList:
   - BasicPrep5seg
   - BasicPrep10min
   - CheckLineFrequency

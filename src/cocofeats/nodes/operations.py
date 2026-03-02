@@ -63,7 +63,7 @@ def mean_across_dimension(xarray_data, dim):
     Returns
     -------
     NodeResult
-        A feature result containing the mean as a netcdf4 artifact.
+        A derivative result containing the mean as a netcdf4 artifact.
     """
     import xarray as xr
     import numpy as np
@@ -98,7 +98,7 @@ def extract_data_var(dataset_like, data_var: str):
     Returns
     -------
     NodeResult
-        A feature result containing the selected variable as a NetCDF artifact.
+        A derivative result containing the selected variable as a NetCDF artifact.
     """
 
     if isinstance(dataset_like, NodeResult):
@@ -156,7 +156,7 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
     Returns
     -------
     NodeResult
-        A feature result containing the sliced data as a netcdf4 artifact.
+        A derivative result containing the sliced data as a netcdf4 artifact.
     """
 
     if isinstance(xarray_data, (str, os.PathLike)):
@@ -220,7 +220,7 @@ def aggregate_across_dimension(xarray_data, dim, operation='mean', args=None):
     Returns
     -------
     NodeResult
-        A feature result containing the aggregated data as a netcdf4 artifact.
+        A derivative result containing the aggregated data as a netcdf4 artifact.
     """
 
     if isinstance(xarray_data, (str, os.PathLike)):

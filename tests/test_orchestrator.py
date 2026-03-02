@@ -2,7 +2,7 @@ from cocofeats.datasets import generate_dummy_dataset
 from cocofeats.orchestrators import (
     get_all_files_from_pipeline_configuration,
     get_datasets_and_mount_point_from_pipeline_configuration,
-    iterate_feature_pipeline,
+    iterate_derivative_pipeline,
 )
 dataset_1 = {
     "PATTERN": "sub-%subject%/ses-%session%/sub-%subject%_ses-%session%_task-%task%_acq-%acquisition%_run-%run%",
@@ -58,28 +58,28 @@ print("Files per dataset:", files_per_dataset)
 print("All files with indices:", all_files)
 print("Common roots:", common_roots)
 
-# Now run the feature extraction
+# Now run the derivative extraction
 from cocofeats.nodes import get_node, list_nodes
 
 print("Registered nodes:", list_nodes())
 
 if False:
-    for feature in ["spectrum", "basic_preprocessing"]:
-        iterate_feature_pipeline(
+    for derivative in ["spectrum", "basic_preprocessing"]:
+        iterate_derivative_pipeline(
             pipeline_configuration=pipeline_input,
-            feature=get_node(feature),
+            derivative=get_node(derivative),
             max_files_per_dataset=2,
         )
 
-# 1) Load and register features
-# 2) Use your existing iterate_feature_pipeline per feature name
+# 1) Load and register derivatives
+# 2) Use your existing iterate_derivative_pipeline per derivative name
 
 # "BasicPrep1", "CheckLineFrequency",
-# "BasicPrep1", "CheckLineFrequency", "InterFeatureDependence",
-for feature_name in ["SpectrumArrayWelch", "SpectrumArrayMultitaper"]:
-    df = iterate_feature_pipeline(
+# "BasicPrep1", "CheckLineFrequency", "InterDerivativeDependence",
+for derivative_name in ["SpectrumArrayWelch", "SpectrumArrayMultitaper"]:
+    df = iterate_derivative_pipeline(
         pipeline_configuration=pipeline_input,
-        feature=feature_name,  # the thin wrapper
+        derivative=derivative_name,  # the thin wrapper
         max_files_per_dataset=None,
         dry_run = False,
         only_index = [3,5],

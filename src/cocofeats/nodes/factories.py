@@ -12,7 +12,7 @@ scalar or a 1D sequence.  The helper takes care of:
 * rebuilding an output ``DataArray`` with well-defined coordinates, and
 * returning a ``NodeResult`` suitable for the node registry.
 
-The exported ``xarray_factory`` node can be used directly from feature pipeline
+The exported ``xarray_factory`` node can be used directly from derivative pipeline
 definitions, and ``apply_1d`` is available for composing bespoke nodes in
 Python code.
 """

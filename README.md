@@ -1,6 +1,6 @@
 # cocofeats
 
-A slurm friendly MEEG feature extraction package leveraging bids-like data organization and DAG processing.
+A slurm friendly MEEG derivative extraction package leveraging bids-like data organization and DAG processing.
 
 - Agnostic to data organization
 - Slurm friendly
@@ -68,7 +68,7 @@ pip install --no-binary=h5py h5py
 
 ## Custom node definitions
 
-Pipelines can import additional node definitions before registering features by pointing `new_definitions` to one or more Python files:
+Pipelines can import additional node definitions before registering derivatives by pointing `new_definitions` to one or more Python files:
 
 ```yaml
 datasets: example_pipelines/datasets_epilepsy.yml
@@ -76,8 +76,8 @@ mount_point: local
 new_definitions:
   - custom_nodes/artifacts.py
   - /abs/path/to/local_nodes.py
-FeatureDefinitions:
-  MyCustomFeature:
+DerivativeDefinitions:
+  MyCustomDerivative:
     nodes:
       - id: 0
         node: my_custom_node  # registered inside the imported modules
@@ -87,7 +87,7 @@ Relative paths are resolved from the pipeline YAML location. Each module is exec
 
 ## Parallel execution
 
-`iterate_feature_pipeline` can fan out across files using joblib. You can enable it either by passing `n_jobs` (and optionally `joblib_backend` / `joblib_prefer`) when calling the orchestrator or by adding the keys to your pipeline YAML:
+`iterate_derivative_pipeline` can fan out across files using joblib. You can enable it either by passing `n_jobs` (and optionally `joblib_backend` / `joblib_prefer`) when calling the orchestrator or by adding the keys to your pipeline YAML:
 
 ```yaml
 n_jobs: 4           # -1 to use all cores, 1 or null keeps it serial

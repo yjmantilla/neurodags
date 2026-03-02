@@ -2,13 +2,13 @@ datasets: example_pipelines/datasets_epilepsy.yml
 mount_point: local
 new_definitions: example_pipelines/definitions_epilepsy.py
 
-FeatureDefinitions:
+DerivativeDefinitions:
   Mat2fif:
     overwrite: False
     for_dataframe: False
     nodes:
       - id: 0
-        feature: SourceFile
+        derivative: SourceFile
       - id: 1
         node: mat2fif
         args:
@@ -19,7 +19,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: Mat2fif.fif
+        derivative: Mat2fif.fif
       - id: 1
         node: basic_preprocessing
         args:
@@ -40,7 +40,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: BasicPrep.fif
+        derivative: BasicPrep.fif
       - id: 1
         node: amplitude_normalization_per_segment
         args:
@@ -51,7 +51,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: mne_spectrum_array
         args:
@@ -71,7 +71,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: SpectrumArrayMultitaper.nc
+        derivative: SpectrumArrayMultitaper.nc
       - id: 1
         node: fooof
         args:
@@ -95,7 +95,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: FooofArray.nc
+        derivative: FooofArray.nc
       - id: 1
         node: extract_data_var
         args:
@@ -123,7 +123,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: FooofArray.nc
+        derivative: FooofArray.nc
       - id: 1
         node: extract_data_var
         args:
@@ -150,7 +150,7 @@ FeatureDefinitions:
     for_dataframe: false
     nodes:
       - id: 0
-        feature: SpectrumArrayMultitaper.nc
+        derivative: SpectrumArrayMultitaper.nc
       - id: 1
         node: extract_data_var
         args:
@@ -175,7 +175,7 @@ FeatureDefinitions:
     for_dataframe: false
     nodes:
       - id: 0
-        feature: SpectrumArrayMultitaper.nc
+        derivative: SpectrumArrayMultitaper.nc
       - id: 1
         node: extract_data_var
         args:
@@ -201,7 +201,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: BandPowerRelative.nc
+        derivative: BandPowerRelative.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -215,7 +215,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: BandPowerRelative.nc
+        derivative: BandPowerRelative.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -228,7 +228,7 @@ FeatureDefinitions:
     for_dataframe: false
     nodes:
       - id: 0
-        feature: FooofArray.nc
+        derivative: FooofArray.nc
       - id: 1
         node: extract_data_var
         args:
@@ -264,7 +264,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: BandPowerRelativeFooof.nc
+        derivative: BandPowerRelativeFooof.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -278,7 +278,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: BandPowerRelativeFooof.nc
+        derivative: BandPowerRelativeFooof.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -292,7 +292,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_hjorth_params
         args:
@@ -306,7 +306,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: AntropyHjorthParams.nc
+        derivative: AntropyHjorthParams.nc
       - id: 1
         node: slice_xarray
         args:
@@ -327,7 +327,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: AntropyHjorthParams.nc
+        derivative: AntropyHjorthParams.nc
       - id: 1
         node: slice_xarray
         args:
@@ -349,7 +349,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: AntropyHjorthParams.nc
+        derivative: AntropyHjorthParams.nc
       - id: 1
         node: slice_xarray
         args:
@@ -370,7 +370,7 @@ FeatureDefinitions:
     for_dataframe: True
     nodes:
       - id: 0
-        feature: AntropyHjorthParams.nc
+        derivative: AntropyHjorthParams.nc
       - id: 1
         node: slice_xarray
         args:
@@ -391,7 +391,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_app_entropy
         args:
@@ -403,7 +403,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyAppEntropy.nc
+        derivative: AntropyAppEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -416,7 +416,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyAppEntropy.nc
+        derivative: AntropyAppEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -429,7 +429,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: meeg_to_xarray
         args:
@@ -450,7 +450,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyLZivComplexity.nc
+        derivative: AntropyLZivComplexity.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -463,7 +463,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyLZivComplexity.nc
+        derivative: AntropyLZivComplexity.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -476,7 +476,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_num_zerocross
         args:
@@ -488,7 +488,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyNumZeroCross.nc
+        derivative: AntropyNumZeroCross.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -502,7 +502,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyNumZeroCross.nc
+        derivative: AntropyNumZeroCross.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -516,7 +516,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_perm_entropy
         args:
@@ -528,7 +528,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyPermutationEntropy.nc
+        derivative: AntropyPermutationEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -541,7 +541,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyPermutationEntropy.nc
+        derivative: AntropyPermutationEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -554,7 +554,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_sample_entropy
         args:
@@ -566,7 +566,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySampleEntropy.nc
+        derivative: AntropySampleEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -580,7 +580,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySampleEntropy.nc
+        derivative: AntropySampleEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -593,7 +593,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_spectral_entropy
         args:
@@ -606,7 +606,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySpectralEntropy.nc
+        derivative: AntropySpectralEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -619,7 +619,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySpectralEntropy.nc
+        derivative: AntropySpectralEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -632,7 +632,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_svd_entropy
         args:
@@ -644,7 +644,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySVDEntropy.nc
+        derivative: AntropySVDEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -657,7 +657,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropySVDEntropy.nc
+        derivative: AntropySVDEntropy.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -670,7 +670,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_higuchi_fd
         args:
@@ -682,7 +682,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyHiguchiFD.nc
+        derivative: AntropyHiguchiFD.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -695,7 +695,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyHiguchiFD.nc
+        derivative: AntropyHiguchiFD.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -708,7 +708,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_katz_fd
         args:
@@ -720,7 +720,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyKatzFD.nc
+        derivative: AntropyKatzFD.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -733,7 +733,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyKatzFD.nc
+        derivative: AntropyKatzFD.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -746,7 +746,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: antropy_petrosian_fd
         args:
@@ -758,7 +758,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyPetrosianFD.nc
+        derivative: AntropyPetrosianFD.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -771,7 +771,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: AntropyPetrosianFD.nc
+        derivative: AntropyPetrosianFD.nc
       - id: 1
         node: aggregate_across_dimension
         args:
@@ -784,7 +784,7 @@ FeatureDefinitions:
     for_dataframe: False
     nodes:
       - id: 0
-        feature: AmpNorm.fif
+        derivative: AmpNorm.fif
       - id: 1
         node: neurokit_entropy_multiscale
         args:
@@ -803,7 +803,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: NeurokitEntropyMultiscale.nc
+        derivative: NeurokitEntropyMultiscale.nc
       - id: 1
         node: extract_data_var
         args:
@@ -820,7 +820,7 @@ FeatureDefinitions:
     save: False
     nodes:
       - id: 0
-        feature: NeurokitEntropyMultiscale.nc
+        derivative: NeurokitEntropyMultiscale.nc
       - id: 1
         node: extract_data_var
         args:
@@ -832,7 +832,7 @@ FeatureDefinitions:
           xarray_data: id.1
           dim: 'epochs'
 
-FeatureList:
+DerivativeList:
   - Mat2fif
   - BasicPrep
   - AmpNorm

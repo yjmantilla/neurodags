@@ -87,7 +87,7 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
     Returns
     -------
     NodeResult
-        A feature result containing a JSON artifact with metadata.
+        A derivative result containing a JSON artifact with metadata.
     """
 
     if isinstance(mne_object, NodeResult):

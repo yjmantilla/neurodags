@@ -1,4 +1,4 @@
-"""Node wrappers for the ``antropy`` feature functions.
+"""Node wrappers for the ``antropy`` derivative functions.
 
 Each wrapper exposes an ``antropy`` computation through the node registry by
 delegating to :func:`cocofeats.nodes.factories.apply_1d`.  The nodes expect an

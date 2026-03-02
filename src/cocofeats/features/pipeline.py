@@ -1,6 +1,6 @@
 import yaml
 
-from cocofeats.features import register_feature_with_name
+from cocofeats.derivatives import register_derivative_with_name
 from cocofeats.loggers import get_logger
 
 log = get_logger(__name__)
@@ -12,8 +12,8 @@ with open(this_yaml) as f:
     yaml_definitions = yaml.safe_load(f)
 
 
-def register_features_from_dict(yaml_definitions: dict):
-    for name, chain in yaml_definitions.get("FeatureDefinitions", {}).items():
+def register_derivatives_from_dict(yaml_definitions: dict):
+    for name, chain in yaml_definitions.get("DerivativeDefinitions", {}).items():
 
         def make_wrapper(chain, name=name):  # capture both in closure
             def wrapper(
@@ -25,9 +25,9 @@ def register_features_from_dict(yaml_definitions: dict):
             ):
                 from pathlib import Path
 
-                from cocofeats.dag import run_feature
+                from cocofeats.dag import run_derivative
 
-                return run_feature(
+                return run_derivative(
                     chain,
                     name,
                     file_path,
@@ -40,9 +40,9 @@ def register_features_from_dict(yaml_definitions: dict):
             return wrapper
 
         func = make_wrapper(chain)
-        # pass chain as definition so FeatureEntry stores it
-        register_feature_with_name(name, func, definition=chain, override=True)
-        log.info("Registered feature", name=name)
+        # pass chain as definition so DerivativeEntry stores it
+        register_derivative_with_name(name, func, definition=chain, override=True)
+        log.info("Registered derivative", name=name)
 
 
-register_features_from_dict(yaml_definitions)
+register_derivatives_from_dict(yaml_definitions)

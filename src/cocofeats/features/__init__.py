@@ -8,16 +8,16 @@ from typing import Any
 
 from cocofeats.loggers import get_logger
 
-FeatureCallable = Callable[..., Any]
+DerivativeCallable = Callable[..., Any]
 
 
-class FeatureEntry:
-    """Bundle a feature callable with its definition."""
+class DerivativeEntry:
+    """Bundle a derivative callable with its definition."""
 
     def __init__(
         self,
         name: str,
-        func: FeatureCallable,
+        func: DerivativeCallable,
         definition: dict[str, Any] | None = None,
     ):
         self.name = name
@@ -28,11 +28,11 @@ class FeatureEntry:
         return self.func(*args, **kwargs)
 
     def __repr__(self) -> str:
-        return f"<FeatureEntry name={self.name!r} func={self.func!r}>"
+        return f"<DerivativeEntry name={self.name!r} func={self.func!r}>"
 
 
 # Global registry
-_FEATURE_REGISTRY: dict[str, FeatureEntry] = {}
+_FEATURE_REGISTRY: dict[str, DerivativeEntry] = {}
 
 log = get_logger(__name__)
 
@@ -42,35 +42,35 @@ log = get_logger(__name__)
 # -------------------------
 
 
-def register_feature(
-    func: FeatureCallable | None = None,
+def register_derivative(
+    func: DerivativeCallable | None = None,
     *,
     name: str | None = None,
     override: bool = False,
     definition: dict[str, Any] | None = None,
-) -> FeatureCallable:
-    """Register a feature callable with optional definition.
+) -> DerivativeCallable:
+    """Register a derivative callable with optional definition.
 
     Can be used as:
 
-        @register_feature
-        def my_feature(...): ...
+        @register_derivative
+        def my_derivative(...): ...
 
     or:
 
-        @register_feature(name="alias", definition=defn)
+        @register_derivative(name="alias", definition=defn)
 
-    or programmatically with `register_feature_with_name`.
+    or programmatically with `register_derivative_with_name`.
     """
 
-    def decorator(target: FeatureCallable) -> FeatureCallable:
+    def decorator(target: DerivativeCallable) -> DerivativeCallable:
         key = name or target.__name__
         if not override and key in _FEATURE_REGISTRY and _FEATURE_REGISTRY[key].func is not target:
-            raise ValueError(f"Feature '{key}' is already registered")
+            raise ValueError(f"Derivative '{key}' is already registered")
         elif override and key in _FEATURE_REGISTRY:
-            log.info(f"Overriding existing feature registration for '{key}'")
+            log.info(f"Overriding existing derivative registration for '{key}'")
 
-        _FEATURE_REGISTRY[key] = FeatureEntry(key, target, definition)
+        _FEATURE_REGISTRY[key] = DerivativeEntry(key, target, definition)
         return target
 
     if func is not None:
@@ -79,15 +79,15 @@ def register_feature(
     return decorator
 
 
-def register_feature_with_name(
+def register_derivative_with_name(
     name: str,
-    func: FeatureCallable,
+    func: DerivativeCallable,
     definition: dict[str, Any] | None = None,
     override: bool = False,
 ) -> None:
-    """Register a feature under a specific name."""
+    """Register a derivative under a specific name."""
     func.__name__ = name
-    register_feature(func, name=name, definition=definition, override=override)
+    register_derivative(func, name=name, definition=definition, override=override)
 
 
 # -------------------------
@@ -95,32 +95,32 @@ def register_feature_with_name(
 # -------------------------
 
 
-def get_feature(name: str) -> FeatureEntry:
-    """Return a registered feature entry by name."""
+def get_derivative(name: str) -> DerivativeEntry:
+    """Return a registered derivative entry by name."""
     try:
         return _FEATURE_REGISTRY[name]
     except KeyError as exc:
         available = ", ".join(sorted(_FEATURE_REGISTRY)) or "<none>"
-        raise KeyError(f"Unknown feature '{name}'. Available features: {available}") from exc
+        raise KeyError(f"Unknown derivative '{name}'. Available derivatives: {available}") from exc
 
 
-def iter_features() -> Iterable[tuple[str, FeatureEntry]]:
-    """Yield registered features as (name, FeatureEntry) pairs."""
+def iter_derivatives() -> Iterable[tuple[str, DerivativeEntry]]:
+    """Yield registered derivatives as (name, DerivativeEntry) pairs."""
     return _FEATURE_REGISTRY.items()
 
 
-def list_features() -> tuple[str, ...]:
-    """Return the registered feature names sorted alphabetically."""
+def list_derivatives() -> tuple[str, ...]:
+    """Return the registered derivative names sorted alphabetically."""
     return tuple(sorted(_FEATURE_REGISTRY))
 
 
-def clear_feature_registry() -> None:
-    """Remove all registered features (useful for tests)."""
+def clear_derivative_registry() -> None:
+    """Remove all registered derivatives (useful for tests)."""
     _FEATURE_REGISTRY.clear()
 
 
-def unregister_feature(name: str) -> None:
-    """Remove a feature from the registry if present."""
+def unregister_derivative(name: str) -> None:
+    """Remove a derivative from the registry if present."""
     _FEATURE_REGISTRY.pop(name, None)
 
 
@@ -129,14 +129,14 @@ def unregister_feature(name: str) -> None:
 # -------------------------
 
 __all__ = [
-    "FeatureEntry",
-    "clear_feature_registry",
-    "get_feature",
-    "iter_features",
-    "list_features",
-    "register_feature",
-    "register_feature_with_name",
-    "unregister_feature",
+    "DerivativeEntry",
+    "clear_derivative_registry",
+    "get_derivative",
+    "iter_derivatives",
+    "list_derivatives",
+    "register_derivative",
+    "register_derivative_with_name",
+    "unregister_derivative",
 ]
 
 
