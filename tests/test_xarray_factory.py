@@ -7,9 +7,9 @@ import pytest
 import xarray as xr
 from numpy.testing import assert_allclose
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.nodes import get_node
-from cocofeats.nodes.factories import apply_1d
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.nodes import get_node
+from neurodags.nodes.factories import apply_1d
 
 try:  # pragma: no cover - optional dependency during tests
     import mne

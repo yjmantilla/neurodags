@@ -6,7 +6,7 @@ import xarray as xr
 
 import matplotlib
 
-from cocofeats.nodes import get_node
+from neurodags.nodes import get_node
 
 matplotlib.use("Agg", force=True)
 

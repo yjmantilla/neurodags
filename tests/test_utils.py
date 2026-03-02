@@ -1,7 +1,7 @@
 # tests/test_get_num_digits.py
 import pytest
 import os
-from cocofeats.utils import get_num_digits, get_path, find_unique_root, replace_bids_suffix
+from neurodags.utils import get_num_digits, get_path, find_unique_root, replace_bids_suffix
 import ntpath
 import posixpath
 from pathlib import PureWindowsPath, PurePosixPath

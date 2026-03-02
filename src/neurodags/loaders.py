@@ -9,8 +9,8 @@ from typing import Any, Union
 import mne
 import yaml
 
-from cocofeats.definitions import RulesLike
-from cocofeats.loggers import get_logger
+from neurodags.definitions import RulesLike
+from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
 
@@ -59,7 +59,7 @@ def load_configuration(rules: RulesLike) -> dict[str, Any]:
       - a path (str/PathLike) to a YAML file, or
       - a text file-like object with YAML content.
 
-    Features:
+    Derivatives:
       - Safe loader (no object construction).
       - Raises on duplicate keys (with line/column) and logs them.
       - Ensures the document root is a mapping/dict.

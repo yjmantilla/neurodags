@@ -12,7 +12,7 @@ scalar or a 1D sequence.  The helper takes care of:
 * rebuilding an output ``DataArray`` with well-defined coordinates, and
 * returning a ``NodeResult`` suitable for the node registry.
 
-The exported ``xarray_factory`` node can be used directly from feature pipeline
+The exported ``xarray_factory`` node can be used directly from derivative pipeline
 definitions, and ``apply_1d`` is available for composing bespoke nodes in
 Python code.
 """
@@ -35,12 +35,12 @@ import numpy as np
 import xarray as xr
 import time
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.loggers import get_logger
-from cocofeats.nodes import register_node
-from cocofeats.utils import _resolve_eval_strings
-from cocofeats.writers import _json_safe
-from cocofeats.loaders import load_meeg
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.loggers import get_logger
+from neurodags.nodes import register_node
+from neurodags.utils import _resolve_eval_strings
+from neurodags.writers import _json_safe
+from neurodags.loaders import load_meeg
 
 log = get_logger(__name__)
 

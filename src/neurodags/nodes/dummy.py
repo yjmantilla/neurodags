@@ -1,4 +1,4 @@
-from cocofeats.definitions import Artifact, NodeResult
+from neurodags.definitions import Artifact, NodeResult
 
 from . import register_node
 
@@ -6,7 +6,7 @@ from . import register_node
 @register_node
 def dummy(param1=None, param2=None) -> NodeResult:
     """
-    A dummy feature extraction function that returns a simple message.
+    A dummy derivative extraction function that returns a simple message.
 
     Parameters
     ----------
@@ -20,7 +20,7 @@ def dummy(param1=None, param2=None) -> NodeResult:
     NodeResult
         A NodeResult containing a simple message.
     """
-    message = f"Dummy feature extraction completed with param1={param1} and param2={param2}"
+    message = f"Dummy derivative extraction completed with param1={param1} and param2={param2}"
 
     def write_message(path: str) -> None:
         with open(path, "w") as f:

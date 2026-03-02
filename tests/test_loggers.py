@@ -10,8 +10,8 @@ import pytest
 import structlog
 
 # Adjust import to your package layout:
-import cocofeats.loggers as logmod
-from cocofeats.loggers import configure_logging, get_logger
+import neurodags.loggers as logmod
+from neurodags.loggers import configure_logging, get_logger
 
 
 @pytest.fixture(autouse=True)

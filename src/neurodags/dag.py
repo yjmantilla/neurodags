@@ -19,15 +19,15 @@ except ImportError:  # pragma: no cover - optional dependency
 
 import yaml
 
-from cocofeats.definitions import NodeResult
-from cocofeats.features import (
-    get_feature as get_feature_definition,
-    list_features as list_feature_definitions,
-    register_feature_with_name,
+from neurodags.definitions import NodeResult
+from neurodags.derivatives import (
+    get_derivative as get_derivative_definition,
+    list_derivatives as list_derivative_definitions,
+    register_derivative_with_name,
 )
-from cocofeats.nodes import get_node
-from cocofeats.loggers import get_logger
-from cocofeats.utils import snake_to_camel
+from neurodags.nodes import get_node
+from neurodags.loggers import get_logger
+from neurodags.utils import snake_to_camel
 
 log = get_logger(__name__)
 _ID_REF = re.compile(r"^id\.(\d+)$")
@@ -120,23 +120,23 @@ def _topo_order(nodes: list[dict[str, Any]]) -> list[int]:
 
 # Optional: simple cache probe (customize for your FS layout)
 def _is_step_cached(
-    feature_name: str, step_feature_name: str, reference_base: Path, accept_ambiguous=False
+    derivative_name: str, step_derivative_name: str, reference_base: Path, accept_ambiguous=False
 ) -> bool:
     """
-    Decide if a 'feature' step can be considered already computed.
+    Decide if a 'derivative' step can be considered already computed.
     By default: look for any file whose prefix matches:
-    <reference_base>@<CamelCase(step_feature_name)>.*
+    <reference_base>@<CamelCase(step_derivative_name)>.*
     """
-    # prefix = f"{reference_base}@{snake_to_camel(step_feature_name)}"
-    postfix = f"@{step_feature_name}"
+    # prefix = f"{reference_base}@{snake_to_camel(step_derivative_name)}"
+    postfix = f"@{step_derivative_name}"
     # return any(reference_base.parent.glob(Path(prefix).name + ".*"))
     candidates = glob.glob(reference_base.as_posix() + postfix if isinstance(reference_base, Path) else reference_base + postfix)  # or use
     if len(candidates) > 1:
         if not accept_ambiguous:
             log.error(
                 "Multiple cached artifacts found",
-                feature=feature_name,
-                step_reference=step_feature_name,
+                derivative=derivative_name,
+                step_reference=step_derivative_name,
                 reference_base=reference_base,
                 candidates=candidates,
             )
@@ -146,8 +146,8 @@ def _is_step_cached(
         else:
             log.warning(
                 "Multiple cached artifacts found, using the first one",
-                feature=feature_name,
-                step_reference=step_feature_name,
+                derivative=derivative_name,
+                step_reference=step_derivative_name,
                 reference_base=reference_base,
                 candidates=candidates,
             )
@@ -155,23 +155,23 @@ def _is_step_cached(
 
 
 # --- registration from YAML ---
-def register_features_from_yaml(yaml_path: str) -> list[str]:
+def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
     with open(yaml_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    feature_defs: dict[str, dict] = cfg.get("FeatureDefinitions", {}) or {}
+    derivative_defs: dict[str, dict] = cfg.get("DerivativeDefinitions", {}) or {}
     registered: list[str] = []
 
-    for feature_name, feature_def in feature_defs.items():
+    for derivative_name, derivative_def in derivative_defs.items():
 
-        def make_wrapper(feature_name: str, feature_def: dict):
+        def make_wrapper(derivative_name: str, derivative_def: dict):
             def wrapper(
                 file_path: str,
                 reference_base: Path | None = None,
                 dataset_config: Any = None,
                 mount_point: Path | None = None,
             ) -> NodeResult:
-                return run_feature(
-                    feature_def,
+                return run_derivative(
+                    derivative_def,
                     file_path,
                     reference_base or Path(""),
                     dataset_config=dataset_config,
@@ -180,20 +180,20 @@ def register_features_from_yaml(yaml_path: str) -> list[str]:
 
             return wrapper
 
-        func = make_wrapper(feature_name, feature_def)
+        func = make_wrapper(derivative_name, derivative_def)
 
         # pass the definition into the registry
-        register_feature_with_name(feature_name, func, definition=feature_def)
+        register_derivative_with_name(derivative_name, func, definition=derivative_def)
 
-        registered.append(feature_name)
-        log.info("Registered feature", name=feature_name)
+        registered.append(derivative_name)
+        log.info("Registered derivative", name=derivative_name)
 
     return registered
 
 
 
 def _artifact_candidates_for(prefix: str) -> list[str]:
-    #TODO: How to add option to skip features that previously failed? (.error files)
+    #TODO: How to add option to skip derivatives that previously failed? (.error files)
     return [x for x in sorted(glob.glob(prefix + ".*")) if not x.endswith('.error')]
 
 
@@ -201,18 +201,18 @@ class _MissingPrecomputedArtifacts(RuntimeError):
     """Raised when dataframe-only collection requires cached artifacts but none are available."""
 
 
-def _split_feature_ref(feature_ref: str) -> tuple[str, str | None]:
-    if "." in feature_ref:
-        base, ext = feature_ref.split(".", 1)
+def _split_derivative_ref(derivative_ref: str) -> tuple[str, str | None]:
+    if "." in derivative_ref:
+        base, ext = derivative_ref.split(".", 1)
         return base, ext
-    return feature_ref, None
+    return derivative_ref, None
 
 # ---------- executor ----------
 
 
-def run_feature(
-    feature_def: dict,
-    feature_name: str,
+def run_derivative(
+    derivative_def: dict,
+    derivative_name: str,
     file_path: str,
     reference_base: Path,
     dataset_config: Any = None,
@@ -220,7 +220,7 @@ def run_feature(
     dry_run: bool = False,
 ) -> NodeResult | Dict[str, Any]:
     """
-    Evaluate (or dry-run) a feature on a single file.
+    Evaluate (or dry-run) a derivative on a single file.
 
     When dry_run=True:
       - Do NOT execute any steps.
@@ -228,12 +228,12 @@ def run_feature(
       - Return a dict with a 'plan' list (so callers don't confuse it with NodeResult).
 
     Normal mode:
-      - 'feature' steps: if cached and overwrite=False, skip compute; else compute or recurse.
-      - 'node' steps: execute; if it's the last step, save artifacts under '@<FeatureName>*'.
+      - 'derivative' steps: if cached and overwrite=False, skip compute; else compute or recurse.
+      - 'node' steps: execute; if it's the last step, save artifacts under '@<DerivativeName>*'.
     """
-    overwrite = bool(feature_def.get("overwrite", False))
-    save = bool(feature_def.get("save", True))
-    nodes = feature_def.get("nodes", [])
+    overwrite = bool(derivative_def.get("overwrite", False))
+    save = bool(derivative_def.get("save", True))
+    nodes = derivative_def.get("nodes", [])
     order = _topo_order(nodes)
 
     store: dict[int, Any] = {}
@@ -244,16 +244,16 @@ def run_feature(
         if plan is not None:
             plan.append(kwargs)
 
-    # In dry-run, also check the final output of the feature upfront
+    # In dry-run, also check the final output of the derivative upfront
     base_reference = reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-    final_prefix = base_reference + "@" + snake_to_camel(feature_name) if save else None
+    final_prefix = base_reference + "@" + snake_to_camel(derivative_name) if save else None
     if dry_run:
         if save:
             final_candidates = _artifact_candidates_for(final_prefix)
             _record(
                 id="final",
-                kind="feature_output",
-                name=feature_name,
+                kind="derivative_output",
+                name=derivative_name,
                 prefix=final_prefix,
                 cached=len(final_candidates) > 0,
                 paths=final_candidates,
@@ -261,8 +261,8 @@ def run_feature(
         else:
             _record(
                 id="final",
-                kind="feature_output",
-                name=feature_name,
+                kind="derivative_output",
+                name=derivative_name,
                 will_save=False,
                 cached=False,
                 paths=[],
@@ -273,8 +273,8 @@ def run_feature(
             final_candidates = _artifact_candidates_for(final_prefix)
             if len(final_candidates) > 0:
                 log.info(
-                    "Last step of the feature is cached",
-                    feature=feature_name,
+                    "Last step of the derivative is cached",
+                    derivative=derivative_name,
                     final_prefix=final_prefix,
                     reference_base=reference_base,
                     candidate=final_candidates[0],
@@ -284,16 +284,16 @@ def run_feature(
     for sid in order:
         step = next(s for s in nodes if s["id"] == sid)
 
-        # 1) 'feature' step
-        if "feature" in step:
-            feature_ref = step["feature"]
+        # 1) 'derivative' step
+        if "derivative" in step:
+            derivative_ref = step["derivative"]
 
-            if feature_ref == "SourceFile":
+            if derivative_ref == "SourceFile":
                 store[sid] = file_path
                 _record(id=sid, kind="source", name="SourceFile", path=file_path)
                 continue
 
-            base_name, ext = _split_feature_ref(feature_ref)
+            base_name, ext = _split_derivative_ref(derivative_ref)
             prefix = reference_base.as_posix() + "@" + snake_to_camel(base_name) if isinstance(reference_base, Path) else reference_base + "@" + snake_to_camel(base_name)
             candidates = _artifact_candidates_for(prefix)
             if ext:
@@ -302,15 +302,15 @@ def run_feature(
             if dry_run:
                 entry: Dict[str, Any] = {
                     "id": sid,
-                    "kind": "feature",
-                    "name": feature_ref,
+                    "kind": "derivative",
+                    "name": derivative_ref,
                     "prefix": prefix,
                     "cached": len(candidates) > 0,
                     "paths": candidates,
                 }
-                if base_name in list_feature_definitions():
-                    sub_def = get_feature_definition(base_name).definition
-                    entry["subfeature_plan"] = run_feature(
+                if base_name in list_derivative_definitions():
+                    sub_def = get_derivative_definition(base_name).definition
+                    entry["subderivative_plan"] = run_derivative(
                         sub_def,
                         base_name,
                         file_path,
@@ -326,18 +326,18 @@ def run_feature(
             cached_here = (len(candidates) > 0) and not overwrite
             if cached_here:
                 log.debug(
-                    "Using cached feature",
-                    feature=feature_name,
+                    "Using cached derivative",
+                    derivative=derivative_name,
                     id=sid,
-                    child_feature=feature_ref,
+                    child_derivative=derivative_ref,
                     paths=candidates,
                 )
                 store[sid] = candidates[0]  # marker
                 if len(candidates) > 1:
                     log.warning(
                         "Multiple cached artifacts found, using the first one",
-                        feature=feature_name,
-                        child_feature=feature_ref,
+                        derivative=derivative_name,
+                        child_derivative=derivative_ref,
                         reference_base=reference_base,
                         candidates=candidates,
                         selected=candidates[0],
@@ -345,10 +345,10 @@ def run_feature(
                 last_result = {"cached": candidates}
                 continue
 
-            if base_name in list_feature_definitions():
-                log.debug("Recurse into sub-feature", parent_feature=feature_name, child_feature=base_name)
-                sub_result = run_feature(
-                    get_feature_definition(base_name).definition,
+            if base_name in list_derivative_definitions():
+                log.debug("Recurse into sub-derivative", parent_derivative=derivative_name, child_derivative=base_name)
+                sub_result = run_derivative(
+                    get_derivative_definition(base_name).definition,
                     base_name,
                     file_path,
                     reference_base=reference_base,
@@ -356,12 +356,12 @@ def run_feature(
                     mount_point=mount_point,
                     dry_run=False,
                 )
-                # sub-feature may return None if already cached
+                # sub-derivative may return None if already cached
                 store[sid] = sub_result
                 last_result = sub_result if isinstance(sub_result, NodeResult) else last_result
             else:
-                log.error("Unknown feature reference", feature=feature_name, id=sid, child_feature=feature_ref)
-                raise ValueError(f"Unknown feature '{feature_ref}' in feature '{feature_name}'")
+                log.error("Unknown derivative reference", derivative=derivative_name, id=sid, child_derivative=derivative_ref)
+                raise ValueError(f"Unknown derivative '{derivative_ref}' in derivative '{derivative_name}'")
 
         # 2) 'node' step
         elif "node" in step:
@@ -390,7 +390,7 @@ def run_feature(
                 extra_args["mount_point"] = mount_point
 
             kwargs = _prep_kwargs(step.get("args", {}), store)
-            log.debug("Execute node", feature=feature_name, id=sid, node=node_name, kwargs=kwargs)
+            log.debug("Execute node", derivative=derivative_name, id=sid, node=node_name, kwargs=kwargs)
             try:
                 res = fn(**kwargs, **extra_args)
                 if not isinstance(res, NodeResult):
@@ -399,7 +399,7 @@ def run_feature(
                 last_result = res
 
                 if sid == order[-1] and save:
-                    # save final artifacts under '@<FeatureName>'
+                    # save final artifacts under '@<DerivativeName>'
                     assert final_prefix is not None
                     for artifact_name, artifact in res.artifacts.items():
                         try:
@@ -419,7 +419,7 @@ def run_feature(
             except Exception as e:
                 log.error(
                     "Error executing node",
-                    feature=feature_name,
+                    derivative=derivative_name,
                     id=sid,
                     node=node_name,
                     error=str(e),
@@ -432,7 +432,7 @@ def run_feature(
                         error_path = final_prefix + ".error"
                         with open(error_path, "w", encoding="utf-8") as ef:
                             ef.write(
-                                f"Feature '{feature_name}' step id={sid} node='{node_name}' failed:\n{str(e)}\n"
+                                f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{str(e)}\n"
                             )
                         log.info("Wrote error marker file", path=error_path)
                     except Exception as ee:
@@ -444,11 +444,11 @@ def run_feature(
                         )
                 raise
         else:
-            raise ValueError(f"Step id={sid} must specify 'feature' or 'node'")
+            raise ValueError(f"Step id={sid} must specify 'derivative' or 'node'")
 
     if dry_run:
         return {
-            "feature": feature_name,
+            "derivative": derivative_name,
             "file": file_path,
             "reference_base": reference_base.as_posix() if isinstance(reference_base, Path) else reference_base,
             "overwrite": overwrite,
@@ -456,13 +456,13 @@ def run_feature(
         }
 
     if last_result is None:
-        raise RuntimeError(f"Feature '{feature_name}' produced no result")
+        raise RuntimeError(f"Derivative '{derivative_name}' produced no result")
     return last_result
 
 
-def collect_feature_for_dataframe(
-    feature_def: dict,
-    feature_name: str,
+def collect_derivative_for_dataframe(
+    derivative_def: dict,
+    derivative_name: str,
     file_path: str,
     reference_base: Path,
     dataset_config: Any = None,
@@ -473,10 +473,10 @@ def collect_feature_for_dataframe(
     preserve_complex_values: bool = False,
 ) -> dict[str, Any]:
     """
-    Collect artifacts for a feature and convert them into dataframe-ready values.
+    Collect artifacts for a derivative and convert them into dataframe-ready values.
 
     This helper prefers cached artifacts if they exist on disk. If none are available,
-    it will execute ``run_feature`` to obtain the necessary results (without forcing a recompute
+    it will execute ``run_derivative`` to obtain the necessary results (without forcing a recompute
     when cached outputs are already present).
 
     Parameters
@@ -493,19 +493,19 @@ def collect_feature_for_dataframe(
         Python objects (after potential on-disk loading).
 
     Returns a dictionary suitable for composing a DataFrame row, with columns named
-    ``{feature_name}{artifact_suffix}`` (with optional BIDS-like suffixes per flattened element).
-    Features flagged with ``save=True`` and ``for_dataframe=True`` are skipped when no cached
+    ``{derivative_name}{artifact_suffix}`` (with optional BIDS-like suffixes per flattened element).
+    Derivatives flagged with ``save=True`` and ``for_dataframe=True`` are skipped when no cached
     artifacts are found instead of triggering a recomputation.
     """
 
-    enforce_precomputed = bool(feature_def.get("save", True)) and bool(
-        feature_def.get("for_dataframe", True)
+    enforce_precomputed = bool(derivative_def.get("save", True)) and bool(
+        derivative_def.get("for_dataframe", True)
     )
 
     try:
-        artifact_payloads = _resolve_feature_artifacts(
-            feature_def,
-            feature_name,
+        artifact_payloads = _resolve_derivative_artifacts(
+            derivative_def,
+            derivative_name,
             file_path,
             reference_base,
             dataset_config=dataset_config,
@@ -514,8 +514,8 @@ def collect_feature_for_dataframe(
         )
     except _MissingPrecomputedArtifacts:
         log.debug(
-            "Skipping feature during dataframe collection because cached artifacts are missing",
-            feature=feature_name,
+            "Skipping derivative during dataframe collection because cached artifacts are missing",
+            derivative=derivative_name,
             file=file_path,
             reference_base=reference_base.as_posix()
             if isinstance(reference_base, Path)
@@ -525,7 +525,7 @@ def collect_feature_for_dataframe(
 
     row_values: dict[str, Any] = {}
     for suffix, payload in artifact_payloads.items():
-        column_name = f"{feature_name}{suffix}"
+        column_name = f"{derivative_name}{suffix}"
         simplified = _simplify_artifact_payload(
             payload,
             suffix=suffix,
@@ -542,7 +542,7 @@ def collect_feature_for_dataframe(
                     log.warning(
                         "Overwriting dataframe column while flattening artifact",
                         column=target_column,
-                        feature=feature_name,
+                        derivative=derivative_name,
                         suffix=suffix,
                     )
                 row_values[target_column] = value
@@ -551,9 +551,9 @@ def collect_feature_for_dataframe(
     return row_values
 
 
-def _resolve_feature_artifacts(
-    feature_def: dict,
-    feature_name: str,
+def _resolve_derivative_artifacts(
+    derivative_def: dict,
+    derivative_name: str,
     file_path: str,
     reference_base: Path,
     dataset_config: Any = None,
@@ -561,9 +561,9 @@ def _resolve_feature_artifacts(
     *,
     precomputed_only: bool = False,
 ) -> dict[str, Any]:
-    save = bool(feature_def.get("save", True))
+    save = bool(derivative_def.get("save", True))
     base_reference = reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-    prefix = base_reference + "@" + snake_to_camel(feature_name)
+    prefix = base_reference + "@" + snake_to_camel(derivative_name)
 
     payloads: dict[str, Any] = {}
     if save:
@@ -575,12 +575,12 @@ def _resolve_feature_artifacts(
             return payloads
         if precomputed_only:
             raise _MissingPrecomputedArtifacts(
-                f"Cached artifacts not found for feature '{feature_name}' with prefix '{prefix}'"
+                f"Cached artifacts not found for derivative '{derivative_name}' with prefix '{prefix}'"
             )
 
-    result = run_feature(
-        feature_def,
-        feature_name,
+    result = run_derivative(
+        derivative_def,
+        derivative_name,
         file_path,
         reference_base,
         dataset_config=dataset_config,
@@ -605,7 +605,7 @@ def _resolve_feature_artifacts(
             payloads[suffix] = Path(path)
         return payloads
 
-    raise RuntimeError(f"Unexpected result type when collecting feature '{feature_name}': {type(result)!r}")
+    raise RuntimeError(f"Unexpected result type when collecting derivative '{derivative_name}': {type(result)!r}")
 
 
 def _simplify_artifact_payload(

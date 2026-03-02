@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 # Import the function under test
-from cocofeats.loaders import load_configuration
+from neurodags.loaders import load_configuration
 
 
 def test_load_from_mapping_returns_deepcopy():

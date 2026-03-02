@@ -3,12 +3,12 @@ import os
 import mne
 import xarray as xr
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.loaders import load_meeg
-from cocofeats.loggers import get_logger
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.loaders import load_meeg
+from neurodags.loggers import get_logger
 from . import register_node
 
-from cocofeats.writers import _json_safe
+from neurodags.writers import _json_safe
 
 log = get_logger(__name__)
 
@@ -87,7 +87,7 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
     Returns
     -------
     NodeResult
-        A feature result containing a JSON artifact with metadata.
+        A derivative result containing a JSON artifact with metadata.
     """
 
     if isinstance(mne_object, NodeResult):

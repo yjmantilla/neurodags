@@ -12,30 +12,30 @@
             "console": "integratedTerminal"
         },
     {
-      "name": "Python: iterate_feature_pipeline psychostimulants",
+      "name": "Python: iterate_derivative_pipeline psychostimulants",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
+      "program": "${workspaceFolder}/src/neurodags/orchestrators.py",
       "console": "integratedTerminal",
       "justMyCode": false,
       "args": [
-        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_psycho.yml",
+        "/home/yorguin/code/neurodags/example_pipelines/pipeline_psycho.yml",
         //"--max_files_per_dataset", "5",
         //  "--dry_run",
         // "--only_index", "0", "3"
       ],
     },
 
-    // python src/cocofeats/orchestrators.py /home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml --max_files_per_dataset 5 --dry_run --n-jobs 2
+    // python src/neurodags/orchestrators.py /home/yorguin/code/neurodags/example_pipelines/pipeline_epilepsy.yml --max_files_per_dataset 5 --dry_run --n-jobs 2
     {
-      "name": "Python: iterate_feature_pipeline epilepsy",
+      "name": "Python: iterate_derivative_pipeline epilepsy",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
+      "program": "${workspaceFolder}/src/neurodags/orchestrators.py",
       "console": "integratedTerminal",
       "justMyCode": false,
       "args": [
-        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml",
+        "/home/yorguin/code/neurodags/example_pipelines/pipeline_epilepsy.yml",
         "--max_files_per_dataset", "2",
         //  "--dry_run",
         // "--only_index", "0", "3",
@@ -45,35 +45,35 @@
     },
 
     {
-      "name": "Python: build_feature_dataframe",
+      "name": "Python: build_derivative_dataframe",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
+      "program": "${workspaceFolder}/src/neurodags/orchestrators.py",
       "console": "integratedTerminal",
       "justMyCode": false,
       "args": [
-        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_psycho.yml",
+        "/home/yorguin/code/neurodags/example_pipelines/pipeline_psycho.yml",
         "--make_final_dataframe",
-        "--dataframe_output", "${workspaceFolder}/outputs/features.csv",
-        //"--dataframe_features", "FooofScalarsAllSpectrumArrayWelchEpochsAverage5seg",
+        "--dataframe_output", "${workspaceFolder}/outputs/derivatives.csv",
+        //"--dataframe_derivatives", "FooofScalarsAllSpectrumArrayWelchEpochsAverage5seg",
         //"--max_files_per_dataset", "2"
       ],
     },
 
     // Equivalent line:
-    // python src/cocofeats/orchestrators.py /home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml --make_final_dataframe --dataframe_output outputs/epilepsy_features.csv --dataframe_format long --max_files_per_dataset 5 
+    // python src/neurodags/orchestrators.py /home/yorguin/code/neurodags/example_pipelines/pipeline_epilepsy.yml --make_final_dataframe --dataframe_output outputs/epilepsy_derivatives.csv --dataframe_format long --max_files_per_dataset 5 
     {
-      "name": "Python: build_feature_dataframe epilepsy",
+      "name": "Python: build_derivative_dataframe epilepsy",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/src/cocofeats/orchestrators.py",
+      "program": "${workspaceFolder}/src/neurodags/orchestrators.py",
       "console": "integratedTerminal",
       "justMyCode": false,
       "args": [
-        "/home/yorguin/code/cocofeats/example_pipelines/pipeline_epilepsy.yml",
+        "/home/yorguin/code/neurodags/example_pipelines/pipeline_epilepsy.yml",
         "--make_final_dataframe",
-        "--dataframe_output", "${workspaceFolder}/outputs/epilepsy_features.csv",
-        //"--dataframe_features", "FooofScalarsAllSpectrumArrayWelchEpochsAverage5seg",
+        "--dataframe_output", "${workspaceFolder}/outputs/epilepsy_derivatives.csv",
+        //"--dataframe_derivatives", "FooofScalarsAllSpectrumArrayWelchEpochsAverage5seg",
         "--max_files_per_dataset", "2",
         "--dataframe_format","long"
       ],

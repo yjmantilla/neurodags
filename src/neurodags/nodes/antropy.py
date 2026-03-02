@@ -1,7 +1,7 @@
-"""Node wrappers for the ``antropy`` feature functions.
+"""Node wrappers for the ``antropy`` derivative functions.
 
 Each wrapper exposes an ``antropy`` computation through the node registry by
-delegating to :func:`cocofeats.nodes.factories.apply_1d`.  The nodes expect an
+delegating to :func:`neurodags.nodes.factories.apply_1d`.  The nodes expect an
 ``xarray``-like input and apply the underlying function to one-dimensional
 slices along the requested dimension.
 """
@@ -30,12 +30,12 @@ try:
     )
 except ImportError as exc:  # pragma: no cover - optional dependency guidance
     raise ImportError(
-        "The 'antropy' extra is required for cocofeats.nodes.antropy. Install it via 'pip install antropy'."
+        "The 'antropy' extra is required for neurodags.nodes.antropy. Install it via 'pip install antropy'."
     ) from exc
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.nodes import register_node
-from cocofeats.nodes.factories import apply_1d
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.nodes import register_node
+from neurodags.nodes.factories import apply_1d
 
 
 _HJORTH_RESULT_DIM = "hjorthComponents"

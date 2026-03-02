@@ -1,9 +1,9 @@
 import glob
 
-from cocofeats.datasets import get_datasets_and_mount_point_from_pipeline_configuration
-from cocofeats.definitions import DatasetConfig
-from cocofeats.loggers import get_logger
-from cocofeats.utils import find_unique_root, get_path
+from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.definitions import DatasetConfig
+from neurodags.loggers import get_logger
+from neurodags.utils import find_unique_root, get_path
 
 log = get_logger(__name__)
 

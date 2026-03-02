@@ -3,11 +3,11 @@ import os
 
 import mne
 
-from cocofeats.definitions import Artifact, NodeResult, PathLike
-from cocofeats.loggers import get_logger
-from cocofeats.writers import save_dict_to_json
+from neurodags.definitions import Artifact, NodeResult, PathLike
+from neurodags.loggers import get_logger
+from neurodags.writers import save_dict_to_json
 
-from cocofeats.nodes import register_node
+from neurodags.nodes import register_node
 import xarray as xr
 import numpy as np
 
@@ -63,7 +63,7 @@ def mean_across_dimension(xarray_data, dim):
     Returns
     -------
     NodeResult
-        A feature result containing the mean as a netcdf4 artifact.
+        A derivative result containing the mean as a netcdf4 artifact.
     """
     import xarray as xr
     import numpy as np
@@ -98,7 +98,7 @@ def extract_data_var(dataset_like, data_var: str):
     Returns
     -------
     NodeResult
-        A feature result containing the selected variable as a NetCDF artifact.
+        A derivative result containing the selected variable as a NetCDF artifact.
     """
 
     if isinstance(dataset_like, NodeResult):
@@ -156,7 +156,7 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
     Returns
     -------
     NodeResult
-        A feature result containing the sliced data as a netcdf4 artifact.
+        A derivative result containing the sliced data as a netcdf4 artifact.
     """
 
     if isinstance(xarray_data, (str, os.PathLike)):
@@ -220,7 +220,7 @@ def aggregate_across_dimension(xarray_data, dim, operation='mean', args=None):
     Returns
     -------
     NodeResult
-        A feature result containing the aggregated data as a netcdf4 artifact.
+        A derivative result containing the aggregated data as a netcdf4 artifact.
     """
 
     if isinstance(xarray_data, (str, os.PathLike)):

@@ -1,4 +1,4 @@
-# Tests for cocofeats.datasets module
+# Tests for neurodags.datasets module
 from __future__ import annotations
 import sys, os
 import numpy as np
@@ -8,7 +8,7 @@ import mne
 import re
 
 
-from cocofeats.datasets import (
+from neurodags.datasets import (
     replace_brainvision_filename,
     make_dummy_dataset,
     generate_1_over_f_noise,
@@ -739,8 +739,8 @@ def test_auto_template_creation_when_example_missing(tmp_path: Path):
     BrainVision trio (not persisted under package _data) and still populate ROOT.
     """
     # Import the real function + module to locate the package _data dir
-    from cocofeats.datasets import generate_dummy_dataset  # ← adjust if different
-    from cocofeats import datasets as ds_mod  # ← adjust if different
+    from neurodags.datasets import generate_dummy_dataset  # ← adjust if different
+    from neurodags import datasets as ds_mod  # ← adjust if different
     import shutil
 
     dataset_name = "AUTOTPL"

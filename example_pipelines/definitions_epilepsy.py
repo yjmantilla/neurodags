@@ -5,9 +5,9 @@ import scipy
 import scipy.io as sio
 import mat73
 import mne
-from cocofeats.loaders import load_meeg
-from cocofeats.nodes import register_node,register_node_with_name
-from cocofeats.definitions import Artifact, NodeResult
+from neurodags.loaders import load_meeg
+from neurodags.nodes import register_node,register_node_with_name
+from neurodags.definitions import Artifact, NodeResult
 import xarray as xr
 
 def parse_bids(bidsname):
@@ -178,7 +178,7 @@ def metadata_properties ( path_like: str | os.PathLike) -> NodeResult:
     Returns
     -------
     NodeResult
-        A feature result containing the metadata properties as a NetCDF artifact.
+        A derivative result containing the metadata properties as a NetCDF artifact.
     """
     path_like = str(path_like)
     props = parse_bids(path_like)

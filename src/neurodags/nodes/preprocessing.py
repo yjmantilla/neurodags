@@ -3,9 +3,9 @@ import os
 
 import mne
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.loaders import load_meeg
-from cocofeats.loggers import get_logger
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.loaders import load_meeg
+from neurodags.loggers import get_logger
 
 from . import register_node
 

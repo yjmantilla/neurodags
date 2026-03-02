@@ -2,7 +2,7 @@
 html_theme_sidebar_secondary: false
 ---
 
-# cocofeats
+# neurodags
 
 A modern Python package template.
 
@@ -12,7 +12,7 @@ A modern Python package template.
 
 user_guide/index
 api/index
-api/src/cocofeats/index
+api/src/neurodags/index
 auto_examples/index
 changelog
 ```

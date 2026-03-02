@@ -1,5 +1,5 @@
-from cocofeats import add
-from cocofeats.datasets import generate_dummy_dataset
+from neurodags import add
+from neurodags.datasets import generate_dummy_dataset
 
 
 def test_add():

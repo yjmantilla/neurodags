@@ -8,17 +8,17 @@ from typing import Any, List, Literal
 
 from joblib import Parallel, delayed
 
-from cocofeats.datasets import get_datasets_and_mount_point_from_pipeline_configuration
-from cocofeats.iterators import get_all_files_from_pipeline_configuration
-from cocofeats.loggers import get_logger
-from cocofeats.utils import get_path
-from cocofeats.nodes import get_node, list_nodes
-from cocofeats.nodes.loader import load_node_definitions
-from cocofeats.features import get_feature, list_features
-from cocofeats.dag import collect_feature_for_dataframe, run_feature
-from cocofeats.loaders import load_configuration
-from cocofeats.features.pipeline import register_features_from_dict
-from cocofeats.definitions import DatasetConfig
+from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.iterators import get_all_files_from_pipeline_configuration
+from neurodags.loggers import get_logger
+from neurodags.utils import get_path
+from neurodags.nodes import get_node, list_nodes
+from neurodags.nodes.loader import load_node_definitions
+from neurodags.derivatives import get_derivative, list_derivatives
+from neurodags.dag import collect_derivative_for_dataframe, run_derivative
+from neurodags.loaders import load_configuration
+from neurodags.derivatives.pipeline import register_derivatives_from_dict
+from neurodags.definitions import DatasetConfig
 import pandas as pd
 
 log = get_logger(__name__)
@@ -34,9 +34,9 @@ class _FileJob:
     common_root: str | None
     is_node: bool
     node_name: str | None
-    feature_name: str | None
-    feature_definition: dict[str, Any] | None
-    feature_label: str
+    derivative_name: str | None
+    derivative_definition: dict[str, Any] | None
+    derivative_label: str
     dry_run: bool
     custom_node_paths: tuple[str, ...] = ()
 
@@ -46,7 +46,7 @@ class _FileResult:
     index: int
     dataset: str
     file_path: str
-    feature_label: str
+    derivative_label: str
     success: bool
     stage: str | None = None
     dry_run_payload: dict[str, Any] | None = None
@@ -89,7 +89,7 @@ def _process_file_job(job: _FileJob) -> _FileResult:
             index=job.index,
             dataset=job.dataset,
             file_path=job.file_path,
-            feature_label=job.feature_label,
+            derivative_label=job.derivative_label,
             success=False,
             stage="setup",
             error_message=str(setup_error),
@@ -111,12 +111,12 @@ def _process_file_job(job: _FileJob) -> _FileResult:
             node_callable(job.file_path, **node_kwargs)
             dry_payload: dict[str, Any] | None = None
         else:
-            if job.feature_definition is None or job.feature_name is None:
-                raise ValueError("Feature job requires both definition and name.")
+            if job.derivative_definition is None or job.derivative_name is None:
+                raise ValueError("Derivative job requires both definition and name.")
             dry_payload = None
-            result = run_feature(
-                job.feature_definition,
-                job.feature_name,
+            result = run_derivative(
+                job.derivative_definition,
+                job.derivative_name,
                 job.file_path,
                 reference_base=reference_base_path,
                 dataset_config=dataset_config,
@@ -130,7 +130,7 @@ def _process_file_job(job: _FileJob) -> _FileResult:
             index=job.index,
             dataset=job.dataset,
             file_path=job.file_path,
-            feature_label=job.feature_label,
+            derivative_label=job.derivative_label,
             success=True,
             dry_run_payload=dry_payload,
         )
@@ -139,7 +139,7 @@ def _process_file_job(job: _FileJob) -> _FileResult:
             index=job.index,
             dataset=job.dataset,
             file_path=job.file_path,
-            feature_label=job.feature_label,
+            derivative_label=job.derivative_label,
             success=False,
             stage="run",
             error_message=str(run_error),
@@ -148,9 +148,9 @@ def _process_file_job(job: _FileJob) -> _FileResult:
         )
 
 
-def iterate_feature_pipeline(
+def iterate_derivative_pipeline(
     pipeline_configuration: dict,
-    feature: Callable | str,
+    derivative: Callable | str,
     max_files_per_dataset: int | None = None,
     dry_run: bool = False,
     only_index: int | List[int] | None = None,
@@ -166,9 +166,9 @@ def iterate_feature_pipeline(
     ----------
     pipeline_configuration : dict
         The pipeline configuration containing dataset information.
-    feature : callable | str
-        The feature or node to execute for each file. May be a registered feature/node name, a
-        FeatureEntry, or a callable node.
+    derivative : callable | str
+        The derivative or node to execute for each file. May be a registered derivative/node name, a
+        DerivativeEntry, or a callable node.
     max_files_per_dataset : int, optional
         Maximum number of files to process per dataset. If None, processes all files.
     dry_run : bool, optional
@@ -220,11 +220,11 @@ def iterate_feature_pipeline(
         load_node_definitions(definition_paths, base_dir=base_dir)
         custom_node_paths = tuple(resolved_definition_paths)
 
-    if "FeatureDefinitions" in config_dict:
-        register_features_from_dict(config_dict)
+    if "DerivativeDefinitions" in config_dict:
+        register_derivatives_from_dict(config_dict)
     else:
         log.warning(
-            "No 'FeatureDefinitions' found in the configuration. Skipping feature registration."
+            "No 'DerivativeDefinitions' found in the configuration. Skipping derivative registration."
         )
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
@@ -268,34 +268,34 @@ def iterate_feature_pipeline(
             per_dataset=dataset_file_count,
         )
 
-    feature_entry = None
+    derivative_entry = None
     node_callable: Callable | None = None
-    feature_label: str | None = None
+    derivative_label: str | None = None
 
-    if isinstance(feature, str):
-        feature_label = feature
-        if feature in list_nodes():
-            node_callable = get_node(feature)
-        elif feature in list_features():
-            feature_entry = get_feature(feature)
+    if isinstance(derivative, str):
+        derivative_label = derivative
+        if derivative in list_nodes():
+            node_callable = get_node(derivative)
+        elif derivative in list_derivatives():
+            derivative_entry = get_derivative(derivative)
         else:
-            raise KeyError(f"Unknown feature or node '{feature}'")
-    elif hasattr(feature, "definition") and hasattr(feature, "func"):
-        feature_entry = feature
-        feature_label = feature.name
-    elif callable(feature):
-        node_callable = feature
-        feature_label = getattr(feature, "__name__", "<callable>")
+            raise KeyError(f"Unknown derivative or node '{derivative}'")
+    elif hasattr(derivative, "definition") and hasattr(derivative, "func"):
+        derivative_entry = derivative
+        derivative_label = derivative.name
+    elif callable(derivative):
+        node_callable = derivative
+        derivative_label = getattr(derivative, "__name__", "<callable>")
     else:
         raise TypeError(
-            "feature must be a registered feature name, node name, FeatureEntry, or callable node"
+            "derivative must be a registered derivative name, node name, DerivativeEntry, or callable node"
         )
-    # skip save=False features
-    if 'save' in feature_entry.definition:
-        if feature_entry.definition['save'] is False:
+    # skip save=False derivatives
+    if 'save' in derivative_entry.definition:
+        if derivative_entry.definition['save'] is False:
             log.info(
-                "Feature is marked with save=False; skipping execution.",
-                feature=feature_label
+                "Derivative is marked with save=False; skipping execution.",
+                derivative=derivative_label
             )
             return None
     effective_n_jobs = n_jobs if n_jobs is not None else config_dict.get("n_jobs")
@@ -328,10 +328,10 @@ def iterate_feature_pipeline(
                 mount_point=mount_point,
                 common_root=common_roots.get(dataset_name),
                 is_node=node_callable is not None,
-                node_name=feature_label if node_callable is not None else None,
-                feature_name=feature_entry.name if feature_entry is not None else None,
-                feature_definition=feature_entry.definition if feature_entry is not None else None,
-                feature_label=feature_label or "<unknown>",
+                node_name=derivative_label if node_callable is not None else None,
+                derivative_name=derivative_entry.name if derivative_entry is not None else None,
+                derivative_definition=derivative_entry.definition if derivative_entry is not None else None,
+                derivative_label=derivative_label or "<unknown>",
                 dry_run=dry_run,
                 custom_node_paths=custom_node_paths,
             )
@@ -366,7 +366,7 @@ def iterate_feature_pipeline(
                 index=result.index,
                 dataset=result.dataset,
                 file_path=result.file_path,
-                feature=result.feature_label,
+                derivative=result.derivative_label,
             )
             if dry_run and result.dry_run_payload is not None:
                 entry = {
@@ -379,7 +379,7 @@ def iterate_feature_pipeline(
                 dry_run_collection.append(entry)
         else:
             message = (
-                "Error running feature"
+                "Error running derivative"
                 if result.stage == "run"
                 else "Error processing file"
             )
@@ -388,14 +388,14 @@ def iterate_feature_pipeline(
                 index=result.index,
                 dataset=result.dataset,
                 file_path=result.file_path,
-                feature=result.feature_label,
+                derivative=result.derivative_label,
                 error=result.error_message,
                 error_type=result.error_type,
                 traceback=result.traceback,
             )
             if raise_on_error:
                 error_summary = (
-                    f"Failed to process file '{result.file_path}' for '{result.feature_label}' "
+                    f"Failed to process file '{result.file_path}' for '{result.derivative_label}' "
                     f"(dataset '{result.dataset}', index {result.index}). "
                     f"{result.error_type}: {result.error_message}"
                 )
@@ -408,10 +408,10 @@ def iterate_feature_pipeline(
         return pd.DataFrame(dry_run_collection)
 
 
-def build_feature_dataframe(
+def build_derivative_dataframe(
     pipeline_configuration: dict | str,
     *,
-    include_features: List[str] | None = None,
+    include_derivatives: List[str] | None = None,
     max_files_per_dataset: int | None = None,
     only_index: int | List[int] | None = None,
     output_format: Literal["wide", "long"] = "wide",
@@ -419,61 +419,61 @@ def build_feature_dataframe(
     raise_on_error: bool = False,
 ) -> pd.DataFrame:
     """
-    Assemble a dataframe by collecting feature artifacts for every file in a pipeline configuration.
+    Assemble a dataframe by collecting derivative artifacts for every file in a pipeline configuration.
 
     Parameters
     ----------
     pipeline_configuration : dict | str
         Pipeline configuration or path to it.
-    include_features : list[str], optional
-        Restrict collection to this explicit subset of feature names.
+    include_derivatives : list[str], optional
+        Restrict collection to this explicit subset of derivative names.
     max_files_per_dataset : int, optional
         Limit the number of files processed per dataset.
     only_index : int | list[int], optional
-        Restrict collection to specific indices (matching iterate_feature_pipeline behaviour).
+        Restrict collection to specific indices (matching iterate_derivative_pipeline behaviour).
     output_format : {"wide", "long"}, optional
-        Shape of the returned dataframe. ``"wide"`` retains one row per file with feature columns,
-        while ``"long"`` yields one row per collected feature value without synthesising missing columns.
+        Shape of the returned dataframe. ``"wide"`` retains one row per file with derivative columns,
+        while ``"long"`` yields one row per collected derivative value without synthesising missing columns.
     preserve_complex_values : bool, optional
-        When True, feature artifacts keep their original (potentially nested) Python structures
+        When True, derivative artifacts keep their original (potentially nested) Python structures
         instead of being flattened or coerced into simple dataframe columns.
     raise_on_error : bool, optional
-        Re-raise exceptions encountered while collecting features; defaults to False.
+        Re-raise exceptions encountered while collecting derivatives; defaults to False.
 
     Returns
     -------
     pandas.DataFrame
-        A dataframe with one row per processed file and columns derived from collected feature artifacts.
+        A dataframe with one row per processed file and columns derived from collected derivative artifacts.
     """
 
-    log.debug("build_feature_dataframe: called", pipeline_configuration=pipeline_configuration)
+    log.debug("build_derivative_dataframe: called", pipeline_configuration=pipeline_configuration)
 
     config_dict = load_configuration(pipeline_configuration) if isinstance(pipeline_configuration, str) else pipeline_configuration
 
-    if "FeatureDefinitions" not in config_dict:
-        log.warning("No 'FeatureDefinitions' found in the configuration. Returning empty dataframe.")
+    if "DerivativeDefinitions" not in config_dict:
+        log.warning("No 'DerivativeDefinitions' found in the configuration. Returning empty dataframe.")
         return pd.DataFrame()
 
-    register_features_from_dict(config_dict)
+    register_derivatives_from_dict(config_dict)
 
-    feature_definitions: dict[str, dict] = config_dict.get("FeatureDefinitions", {}) or {}
-    selected_features: list[str] = []
+    derivative_definitions: dict[str, dict] = config_dict.get("DerivativeDefinitions", {}) or {}
+    selected_derivatives: list[str] = []
     
-    include_features = config_dict.get("FeatureList", []) if include_features is None else include_features
+    include_derivatives = config_dict.get("DerivativeList", []) if include_derivatives is None else include_derivatives
 
-    for feature_name, feature_def in feature_definitions.items():
-        if include_features is not None and feature_name not in include_features:
+    for derivative_name, derivative_def in derivative_definitions.items():
+        if include_derivatives is not None and derivative_name not in include_derivatives:
             continue
-        if not feature_def.get("for_dataframe", True):
+        if not derivative_def.get("for_dataframe", True):
             continue
-        selected_features.append(feature_name)
-    if include_features:
-        missing_features = sorted(set(include_features) - set(selected_features))
-        if missing_features:
-            log.warning("Some requested features are either undefined or flagged out of dataframe collection.", missing_features=missing_features)
+        selected_derivatives.append(derivative_name)
+    if include_derivatives:
+        missing_derivatives = sorted(set(include_derivatives) - set(selected_derivatives))
+        if missing_derivatives:
+            log.warning("Some requested derivatives are either undefined or flagged out of dataframe collection.", missing_derivatives=missing_derivatives)
 
-    if not selected_features:
-        log.warning("No features eligible for dataframe collection were found. Returning empty dataframe.")
+    if not selected_derivatives:
+        log.warning("No derivatives eligible for dataframe collection were found. Returning empty dataframe.")
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
@@ -489,7 +489,7 @@ def build_feature_dataframe(
     )
 
 
-    log.debug("build_feature_dataframe: enumerated files", total_files=len(all_files), per_dataset=files_per_dataset)
+    log.debug("build_derivative_dataframe: enumerated files", total_files=len(all_files), per_dataset=files_per_dataset)
 
     if only_index is not None:
         index_filter = only_index if isinstance(only_index, list) else [only_index]
@@ -517,12 +517,12 @@ def build_feature_dataframe(
                 "dataset": dataset_name,
                 "file_path": file_path,
             }
-            for feature_name in selected_features:
-                feature_def = feature_definitions.get(feature_name, {}) or {}
+            for derivative_name in selected_derivatives:
+                derivative_def = derivative_definitions.get(derivative_name, {}) or {}
                 try:
-                    feature_values = collect_feature_for_dataframe(
-                        feature_def,
-                        feature_name,
+                    derivative_values = collect_derivative_for_dataframe(
+                        derivative_def,
+                        derivative_name,
                         file_path,
                         reference_base=reference_base,
                         dataset_config=dataset_config,
@@ -530,40 +530,40 @@ def build_feature_dataframe(
                         preserve_complex_values=preserve_complex_values,
                         flatten_xarray_artifacts=not preserve_complex_values,
                     )
-                    if feature_values:
-                        row.update(feature_values)
+                    if derivative_values:
+                        row.update(derivative_values)
                         if collect_long_rows:
-                            for column_name, value in feature_values.items():
+                            for column_name, value in derivative_values.items():
                                 long_rows.append(
                                     {
                                         "index": index,
                                         "dataset": dataset_name,
                                         "file_path": file_path,
-                                        "feature": column_name,
+                                        "derivative": column_name,
                                         "value": value,
                                     }
                                 )
-                except Exception as feature_error:
+                except Exception as derivative_error:
                     log.error(
-                        "Error collecting feature for dataframe",
-                        feature=feature_name,
+                        "Error collecting derivative for dataframe",
+                        derivative=derivative_name,
                         index=index,
                         dataset=dataset_name,
                         file_path=file_path,
-                        error=str(feature_error),
+                        error=str(derivative_error),
                         exc_info=True,
                     )
                     if raise_on_error:
                         raise
-                    row[f"{feature_name}__error"] = str(feature_error)
+                    row[f"{derivative_name}__error"] = str(derivative_error)
                     if collect_long_rows:
                         long_rows.append(
                             {
                                 "index": index,
                                 "dataset": dataset_name,
                                 "file_path": file_path,
-                                "feature": f"{feature_name}__error",
-                                "value": str(feature_error),
+                                "derivative": f"{derivative_name}__error",
+                                "value": str(derivative_error),
                             }
                         )
             rows.append(row)
@@ -572,7 +572,7 @@ def build_feature_dataframe(
                 index=index,
                 dataset=dataset_name,
                 file_path=file_path,
-                collected_features=len(selected_features),
+                collected_derivatives=len(selected_derivatives),
             )
         except Exception as error:
             log.error(
@@ -588,7 +588,7 @@ def build_feature_dataframe(
 
     if output_format == "long":
         if not long_rows:
-            return pd.DataFrame(columns=["index", "dataset", "file_path", "feature", "value"])
+            return pd.DataFrame(columns=["index", "dataset", "file_path", "derivative", "value"])
         return pd.DataFrame(long_rows)
 
     return pd.DataFrame(rows)
@@ -601,9 +601,9 @@ def _build_reference_base(
     return reference_base_path
 
 if __name__ == "__main__":
-    # Parse args and run iterate_feature_pipeline
+    # Parse args and run iterate_derivative_pipeline
     import argparse
-    parser = argparse.ArgumentParser(description="Iterate feature pipeline.")
+    parser = argparse.ArgumentParser(description="Iterate derivative pipeline.")
     parser.add_argument("config", type=str, help="Path to the pipeline configuration file (YAML or JSON).")
     parser.add_argument("--max_files_per_dataset", type=int, default=None, help="Maximum number of files to process per dataset.")
     parser.add_argument("--dry_run", action="store_true", help="If set, perform a dry run without actual processing.")
@@ -612,7 +612,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-jobs", dest="n_jobs", type=int, default=None, help="Number of parallel workers to use (joblib semantics; default serial).")
     parser.add_argument("--joblib-backend", dest="joblib_backend", type=str, default=None, help="Joblib backend to use (e.g. 'loky', 'threading').")
     parser.add_argument("--joblib-prefer", dest="joblib_prefer", type=str, default=None, help="Joblib execution preference hint (e.g. 'processes', 'threads').")
-    parser.add_argument("--make_final_dataframe", action="store_true", help="If set, build the final feature dataframe after processing.")
+    parser.add_argument("--make_final_dataframe", action="store_true", help="If set, build the final derivative dataframe after processing.")
     parser.add_argument(
         "--dataframe_output",
         type=str,
@@ -620,41 +620,41 @@ if __name__ == "__main__":
         help="Optional path where the dataframe should be written (CSV by default, or Parquet if the extension is .parquet).",
     )
     parser.add_argument(
-        "--dataframe_features",
+        "--dataframe_derivatives",
         nargs="*",
         default=None,
-        help="Optional subset of feature names to include when building the dataframe.",
+        help="Optional subset of derivative names to include when building the dataframe.",
     )
     parser.add_argument(
         "--dataframe_format",
         choices=("wide", "long"),
         default="wide",
-        help="Layout of the generated dataframe; 'long' emits one row per collected feature value.",
+        help="Layout of the generated dataframe; 'long' emits one row per collected derivative value.",
     )
     parser.add_argument(
         "--preserve_complex_values",
         action="store_true",
-        help="Retain complex feature artifacts without flattening or converting them for dataframe storage.",
+        help="Retain complex derivative artifacts without flattening or converting them for dataframe storage.",
     )
     args = parser.parse_args()
 
-    from cocofeats.loaders import load_configuration
+    from neurodags.loaders import load_configuration
     pipeline_configuration = load_configuration(args.config)
 
-    feature_list = pipeline_configuration.get("FeatureList", [])
-    if not feature_list:
-        log.error("No features specified in the pipeline configuration under 'FeatureList'. Exiting.")
+    derivative_list = pipeline_configuration.get("DerivativeList", [])
+    if not derivative_list:
+        log.error("No derivatives specified in the pipeline configuration under 'DerivativeList'. Exiting.")
         exit(1)
 
     if args.dry_run:
-        log.info("Performing dry run of feature pipeline", features=feature_list)
+        log.info("Performing dry run of derivative pipeline", derivatives=derivative_list)
         dry_run_results = []
 
     if not args.make_final_dataframe:  # and args.dataframe_output:
-        for feature in feature_list:
-            output = iterate_feature_pipeline(
+        for derivative in derivative_list:
+            output = iterate_derivative_pipeline(
                 pipeline_configuration=pipeline_configuration,
-                feature=feature,
+                derivative=derivative,
                 max_files_per_dataset=args.max_files_per_dataset,
                 dry_run=args.dry_run,
                 only_index=args.only_index,
@@ -664,7 +664,7 @@ if __name__ == "__main__":
                 joblib_prefer=args.joblib_prefer,
             )
             if args.dry_run and output is not None:
-                dry_run_results.append((feature, output))
+                dry_run_results.append((derivative, output))
         if args.dry_run:
             # merge dry run results
             # simple concatenation for now
@@ -699,10 +699,10 @@ if __name__ == "__main__":
 
 
     if args.make_final_dataframe:
-        log.info("Building feature dataframe", features=args.dataframe_features)
-        dataframe = build_feature_dataframe(
+        log.info("Building derivative dataframe", derivatives=args.dataframe_derivatives)
+        dataframe = build_derivative_dataframe(
             pipeline_configuration=pipeline_configuration,
-            include_features=args.dataframe_features,
+            include_derivatives=args.dataframe_derivatives,
             max_files_per_dataset=args.max_files_per_dataset,
             only_index=args.only_index,
             output_format=args.dataframe_format,
@@ -723,12 +723,12 @@ if __name__ == "__main__":
                     )
                     csv_fallback = output_path.with_suffix(".csv")
                     dataframe.to_csv(csv_fallback, index=False)
-                    log.info("Saved feature dataframe", path=str(csv_fallback), rows=len(dataframe), columns=list(dataframe.columns))
+                    log.info("Saved derivative dataframe", path=str(csv_fallback), rows=len(dataframe), columns=list(dataframe.columns))
                 else:
-                    log.info("Saved feature dataframe", path=str(output_path), rows=len(dataframe), columns=list(dataframe.columns))
+                    log.info("Saved derivative dataframe", path=str(output_path), rows=len(dataframe), columns=list(dataframe.columns))
             else:
                 dataframe.to_csv(output_path, index=False)
-                log.info("Saved feature dataframe", path=str(output_path), rows=len(dataframe), columns=list(dataframe.columns))
+                log.info("Saved derivative dataframe", path=str(output_path), rows=len(dataframe), columns=list(dataframe.columns))
         else:
-            log.info("Feature dataframe built (not saved to disk)", rows=len(dataframe), columns=list(dataframe.columns))
+            log.info("Derivative dataframe built (not saved to disk)", rows=len(dataframe), columns=list(dataframe.columns))
             print(dataframe)

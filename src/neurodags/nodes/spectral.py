@@ -13,14 +13,14 @@ import numpy as np
 import xarray as xr
 from fooof import FOOOF
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.loaders import load_meeg
-from cocofeats.loggers import get_logger
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.loaders import load_meeg
+from neurodags.loggers import get_logger
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 from . import register_node
-from cocofeats.writers import _json_safe
-from cocofeats.utils import _resolve_eval_strings
+from neurodags.writers import _json_safe
+from neurodags.utils import _resolve_eval_strings
 
 log = get_logger(__name__)
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Iterable
 
-from cocofeats.loggers import get_logger
+from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
 
@@ -15,7 +15,7 @@ _LOADED_SOURCES: set[Path] = set()
 
 def _unique_module_name(path: Path) -> str:
     digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
-    return f"_cocofeats_nodes_{digest}"
+    return f"_neurodags_nodes_{digest}"
 
 
 def load_node_definitions(paths: Iterable[str | Path], base_dir: Path | None = None) -> list[ModuleType]:
