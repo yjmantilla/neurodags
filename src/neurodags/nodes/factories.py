@@ -35,12 +35,12 @@ import numpy as np
 import xarray as xr
 import time
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.loggers import get_logger
-from cocofeats.nodes import register_node
-from cocofeats.utils import _resolve_eval_strings
-from cocofeats.writers import _json_safe
-from cocofeats.loaders import load_meeg
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.loggers import get_logger
+from neurodags.nodes import register_node
+from neurodags.utils import _resolve_eval_strings
+from neurodags.writers import _json_safe
+from neurodags.loaders import load_meeg
 
 log = get_logger(__name__)
 

@@ -16,9 +16,9 @@ import mne
 import numpy as np
 from mne.export import export_raw
 
-from cocofeats.definitions import DatasetConfig, PathLike
-from cocofeats.loaders import load_configuration
-from cocofeats.utils import get_num_digits, get_path
+from neurodags.definitions import DatasetConfig, PathLike
+from neurodags.loaders import load_configuration
+from neurodags.utils import get_num_digits, get_path
 
 
 def get_datasets_and_mount_point_from_pipeline_configuration(
@@ -697,13 +697,13 @@ def generate_dummy_dataset(data_params: dict[str, Any] | None = None, generation
     This function prepares an example file set (a BrainVision trio: ``.vhdr``,
     ``.vmrk``, ``.eeg``) if the caller does not supply one, then replicates it
     across a directory structure defined by a placeholder pattern using
-    :func:`cocofeats.datasets.make_dummy_dataset`.
+    :func:`neurodags.datasets.make_dummy_dataset`.
 
     Parameters
     ----------
     data_params : dict, optional
         Parameters that control dataset generation. Recognized keys are forwarded
-        to :func:`cocofeats.datasets.make_dummy_dataset`, including (but not limited to):
+        to :func:`neurodags.datasets.make_dummy_dataset`, including (but not limited to):
 
         - ``PATTERN`` : str
             Pattern with placeholders (``%dataset%``, ``%task%``, ``%session%``,
@@ -721,7 +721,7 @@ def generate_dummy_dataset(data_params: dict[str, Any] | None = None, generation
             automatically and used as the example.
 
     generation_args : dict, optional
-        Keyword arguments forwarded to :func:`cocofeats.datasets.get_dummy_raw`
+        Keyword arguments forwarded to :func:`neurodags.datasets.get_dummy_raw`
         when creating the example BrainVision trio if ``EXAMPLE`` is not provided.
         Possible keys include ``NCHANNELS``, ``SFREQ``, ``STOP``, ``NUMEVENTS``,
         ``random_state``, etc. If ``None``, sensible defaults from :func:`get_dummy_raw`

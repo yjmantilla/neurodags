@@ -8,17 +8,17 @@ from typing import Any, List, Literal
 
 from joblib import Parallel, delayed
 
-from cocofeats.datasets import get_datasets_and_mount_point_from_pipeline_configuration
-from cocofeats.iterators import get_all_files_from_pipeline_configuration
-from cocofeats.loggers import get_logger
-from cocofeats.utils import get_path
-from cocofeats.nodes import get_node, list_nodes
-from cocofeats.nodes.loader import load_node_definitions
-from cocofeats.derivatives import get_derivative, list_derivatives
-from cocofeats.dag import collect_derivative_for_dataframe, run_derivative
-from cocofeats.loaders import load_configuration
-from cocofeats.derivatives.pipeline import register_derivatives_from_dict
-from cocofeats.definitions import DatasetConfig
+from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.iterators import get_all_files_from_pipeline_configuration
+from neurodags.loggers import get_logger
+from neurodags.utils import get_path
+from neurodags.nodes import get_node, list_nodes
+from neurodags.nodes.loader import load_node_definitions
+from neurodags.derivatives import get_derivative, list_derivatives
+from neurodags.dag import collect_derivative_for_dataframe, run_derivative
+from neurodags.loaders import load_configuration
+from neurodags.derivatives.pipeline import register_derivatives_from_dict
+from neurodags.definitions import DatasetConfig
 import pandas as pd
 
 log = get_logger(__name__)
@@ -638,7 +638,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    from cocofeats.loaders import load_configuration
+    from neurodags.loaders import load_configuration
     pipeline_configuration = load_configuration(args.config)
 
     derivative_list = pipeline_configuration.get("DerivativeList", [])

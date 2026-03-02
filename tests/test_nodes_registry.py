@@ -1,8 +1,8 @@
 import pytest
 
-import cocofeats.nodes as nodes
-from cocofeats.nodes.preprocessing import basic_preprocessing
-from cocofeats.nodes.spectral import mne_spectrum
+import neurodags.nodes as nodes
+from neurodags.nodes.preprocessing import basic_preprocessing
+from neurodags.nodes.spectral import mne_spectrum
 
 
 def test_known_nodes_registered():

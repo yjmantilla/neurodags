@@ -1,5 +1,5 @@
-from cocofeats.datasets import generate_dummy_dataset
-from cocofeats.orchestrators import (
+from neurodags.datasets import generate_dummy_dataset
+from neurodags.orchestrators import (
     get_all_files_from_pipeline_configuration,
     get_datasets_and_mount_point_from_pipeline_configuration,
     iterate_derivative_pipeline,
@@ -59,7 +59,7 @@ print("All files with indices:", all_files)
 print("Common roots:", common_roots)
 
 # Now run the derivative extraction
-from cocofeats.nodes import get_node, list_nodes
+from neurodags.nodes import get_node, list_nodes
 
 print("Registered nodes:", list_nodes())
 

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from importlib import import_module
 from typing import Any
 
-from cocofeats.loggers import get_logger
+from neurodags.loggers import get_logger
 
 NodeCallable = Callable[..., Any]
 

@@ -1,4 +1,4 @@
-from cocofeats.definitions import Artifact, NodeResult
+from neurodags.definitions import Artifact, NodeResult
 
 from . import register_node
 

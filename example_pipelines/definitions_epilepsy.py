@@ -5,9 +5,9 @@ import scipy
 import scipy.io as sio
 import mat73
 import mne
-from cocofeats.loaders import load_meeg
-from cocofeats.nodes import register_node,register_node_with_name
-from cocofeats.definitions import Artifact, NodeResult
+from neurodags.loaders import load_meeg
+from neurodags.nodes import register_node,register_node_with_name
+from neurodags.definitions import Artifact, NodeResult
 import xarray as xr
 
 def parse_bids(bidsname):

@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
-from cocofeats.definitions import PathLike
-from cocofeats.loggers import get_logger
+from neurodags.definitions import PathLike
+from neurodags.loggers import get_logger
 from typing import Any
 
 log = get_logger(__name__)

@@ -3,11 +3,11 @@ import os
 
 import mne
 
-from cocofeats.definitions import Artifact, NodeResult, PathLike
-from cocofeats.loggers import get_logger
-from cocofeats.writers import save_dict_to_json
+from neurodags.definitions import Artifact, NodeResult, PathLike
+from neurodags.loggers import get_logger
+from neurodags.writers import save_dict_to_json
 
-from cocofeats.nodes import register_node
+from neurodags.nodes import register_node
 import xarray as xr
 import numpy as np
 

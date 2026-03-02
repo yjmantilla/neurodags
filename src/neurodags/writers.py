@@ -1,6 +1,6 @@
 import json
 
-from cocofeats.loggers import get_logger
+from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
 

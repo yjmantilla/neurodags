@@ -35,7 +35,7 @@ pre-commit install
 
 ## Releases
 
-- Bump version in `src/cocofeats/_version.py` and `pyproject.toml`
+- Bump version in `src/neurodags/_version.py` and `pyproject.toml`
 - Create a tag `vX.Y.Z`
 - Publish to PyPI (example):
 

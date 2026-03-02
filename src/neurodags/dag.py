@@ -19,15 +19,15 @@ except ImportError:  # pragma: no cover - optional dependency
 
 import yaml
 
-from cocofeats.definitions import NodeResult
-from cocofeats.derivatives import (
+from neurodags.definitions import NodeResult
+from neurodags.derivatives import (
     get_derivative as get_derivative_definition,
     list_derivatives as list_derivative_definitions,
     register_derivative_with_name,
 )
-from cocofeats.nodes import get_node
-from cocofeats.loggers import get_logger
-from cocofeats.utils import snake_to_camel
+from neurodags.nodes import get_node
+from neurodags.loggers import get_logger
+from neurodags.utils import snake_to_camel
 
 log = get_logger(__name__)
 _ID_REF = re.compile(r"^id\.(\d+)$")

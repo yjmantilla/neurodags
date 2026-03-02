@@ -1,6 +1,6 @@
 """Node wrappers for the ``neurokit2`` derivative functions.
 
-The wrappers delegate numerical computation to :func:`cocofeats.nodes.factories.apply_1d`
+The wrappers delegate numerical computation to :func:`neurodags.nodes.factories.apply_1d`
 while collecting per-slice metadata and optional Matplotlib figures returned by
 ``neurokit2`` routines.  Results are packaged into an ``xarray.Dataset`` that
 contains:
@@ -27,7 +27,7 @@ try:  # pragma: no cover - optional dependency guidance
     import neurokit2 as nk
 except ImportError as exc:  # pragma: no cover - optional dependency guidance
     raise ImportError(
-        "The 'neurokit2' extra is required for cocofeats.nodes.neurokit. Install it via 'pip install neurokit2'."
+        "The 'neurokit2' extra is required for neurodags.nodes.neurokit. Install it via 'pip install neurokit2'."
     ) from exc
 
 try:  # pragma: no cover - optional dependency guidance
@@ -35,10 +35,10 @@ try:  # pragma: no cover - optional dependency guidance
 except ImportError:  # pragma: no cover - optional dependency guidance
     pd = None  # type: ignore[assignment]
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.nodes import register_node
-from cocofeats.nodes.factories import apply_1d
-from cocofeats.writers import _json_safe
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.nodes import register_node
+from neurodags.nodes.factories import apply_1d
+from neurodags.writers import _json_safe
 
 
 FigureEncoding = str | None

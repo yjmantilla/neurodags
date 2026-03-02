@@ -8,11 +8,11 @@ from importlib.metadata import version as _v
 from pathlib import Path
 import importlib
 import inspect
-project = "cocofeats"
+project = "neurodags"
 
 # Full version from installed dist (hatch-vcs stamps this)
 try:
-    release = _v("cocofeats")
+    release = _v("neurodags")
 except PackageNotFoundError:
     release = "0+unknown"
 
@@ -71,7 +71,7 @@ exclude_patterns = [
 # -- AutoAPI configuration -----------------------------------------------
 # Point to your actual source root (adjust if your package lives elsewhere)
 autoapi_type = "python"
-autoapi_dirs = ["../src"]  # or ["../src/cocofeats"] to target just the package
+autoapi_dirs = ["../src"]  # or ["../src/neurodags"] to target just the package
 autoapi_root = "api"  # generated top-level folder under docs
 autoapi_add_toctree_entry = True  # add an "API Reference" entry automatically
 autoapi_generate_api_docs = True
@@ -121,7 +121,7 @@ sphinx_gallery_conf = {
 
 # Adjust these to your org/repo/default branch
 GITHUB_USER = "yjmantilla"
-GITHUB_REPO = "cocofeats"
+GITHUB_REPO = "neurodags"
 GITHUB_BRANCH = "main"  # or "master"
 
 def linkcode_resolve(domain, info):

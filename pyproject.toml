@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25", "hatch-vcs>=0.4"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cocofeats"
+name = "neurodags"
 dynamic = ["version"]
 description = "A slurm friendly MEEG derivative extraction package leveraging bids-like data organization and DAG processing."
 readme = "README.md"
@@ -50,10 +50,10 @@ dependencies = ["mne",
 allow-direct-references = true
 
 [project.urls]
-Homepage = "https://github.com/yjmantilla/cocofeats"
-Documentation = "https://yjmantilla.github.io/cocofeats/"
-Repository = "https://github.com/yjmantilla/cocofeats"
-Issues = "https://github.com/yjmantilla/cocofeats/issues"
+Homepage = "https://github.com/yjmantilla/neurodags"
+Documentation = "https://yjmantilla.github.io/neurodags/"
+Repository = "https://github.com/yjmantilla/neurodags"
+Issues = "https://github.com/yjmantilla/neurodags/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -87,7 +87,7 @@ target-version = ["py310"]
 line-length = 100
 target-version = "py310"
 exclude = [
-    "src/cocofeats/_version.py",
+    "src/neurodags/_version.py",
 ]
 
 [tool.ruff.lint]
@@ -114,7 +114,7 @@ check_untyped_defs = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra --cov=cocofeats --cov-report=term-missing"
+addopts = "-ra --cov=neurodags --cov-report=term-missing"
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.sdist]
@@ -123,11 +123,11 @@ include = [
   "README.md", 
   "LICENSE", 
   "pyproject.toml",
-  "src/cocofeats/py.typed"
+  "src/neurodags/py.typed"
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cocofeats"]
+packages = ["src/neurodags"]
 
 # --- VCS-based versioning (hatch-vcs) ---
 [tool.hatch.version]
@@ -135,7 +135,7 @@ source = "vcs"
 
 # Write the resolved version into a module at build time so consumers can import __version__ if desired
 [tool.hatch.build.hooks.vcs]
-version-file = "src/cocofeats/_version.py"
+version-file = "src/neurodags/_version.py"
 
 # Optional: tweak how local (non-tag) versions are rendered. This keeps the commit hash and date
 # See setuptools-scm docs for options: node-and-date (default), node-and-timestamp, no-local-version, etc.

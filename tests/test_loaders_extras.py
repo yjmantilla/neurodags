@@ -4,7 +4,7 @@ import types
 import pytest
 import yaml
 
-import cocofeats.loaders as loaders
+import neurodags.loaders as loaders
 
 
 def test_fallback_to_safe_loader(monkeypatch):
@@ -12,7 +12,7 @@ def test_fallback_to_safe_loader(monkeypatch):
     monkeypatch.delattr(yaml, "CSafeLoader", raising=False)
     # Reload the module to trigger the import-time try/except
     import importlib
-    import cocofeats.loaders as loaders_mod
+    import neurodags.loaders as loaders_mod
 
     importlib.reload(loaders_mod)
     # Should have picked SafeLoader

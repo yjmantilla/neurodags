@@ -5,8 +5,8 @@ from dash import Dash, dcc, html, Input, Output
 import webbrowser
 import json
 import numpy as np
-from cocofeats.loaders import load_meeg
-from cocofeats.nodes.descriptive import meeg_to_xarray
+from neurodags.loaders import load_meeg
+from neurodags.nodes.descriptive import meeg_to_xarray
 # ---------- Load Data ----------
 filename = sys.argv[1]   # <--- uncomment to accept from command line
 

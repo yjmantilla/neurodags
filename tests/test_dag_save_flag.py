@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from cocofeats.dag import run_derivative
-from cocofeats.definitions import NodeResult
+from neurodags.dag import run_derivative
+from neurodags.definitions import NodeResult
 
 
 def _build_derivative_def(*, save: bool | None = None) -> dict:

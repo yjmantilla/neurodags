@@ -1,4 +1,4 @@
-"""cocofeats: A modern Python package template."""
+"""neurodags: A modern Python package template."""
 
 from .example import add
 

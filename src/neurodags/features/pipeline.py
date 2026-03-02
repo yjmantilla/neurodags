@@ -1,7 +1,7 @@
 import yaml
 
-from cocofeats.derivatives import register_derivative_with_name
-from cocofeats.loggers import get_logger
+from neurodags.derivatives import register_derivative_with_name
+from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
 
@@ -25,7 +25,7 @@ def register_derivatives_from_dict(yaml_definitions: dict):
             ):
                 from pathlib import Path
 
-                from cocofeats.dag import run_derivative
+                from neurodags.dag import run_derivative
 
                 return run_derivative(
                     chain,

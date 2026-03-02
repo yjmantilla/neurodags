@@ -1,4 +1,4 @@
-# cocofeats
+# neurodags
 
 A slurm friendly MEEG derivative extraction package leveraging bids-like data organization and DAG processing.
 
@@ -64,7 +64,7 @@ pip install --no-binary=h5py h5py
 
 ## Documentation
 
-- [Docs](https://yjmantilla.github.io/cocofeats/)
+- [Docs](https://yjmantilla.github.io/neurodags/)
 
 ## Custom node definitions
 
@@ -102,7 +102,7 @@ The CLI mirrors these options via `--n-jobs`, `--joblib-backend`, and `--joblib-
 You can visualize `.fif` or `.nc` files using the built-in visualization tool:
 
 ```bash
-python -m cocofeats.visualization path/to/your_file.fif
+python -m neurodags.visualization path/to/your_file.fif
 ```
 
 ## Contributing

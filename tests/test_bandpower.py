@@ -5,8 +5,8 @@ import xarray as xr
 
 from numpy.testing import assert_allclose
 
-from cocofeats.definitions import Artifact, NodeResult
-from cocofeats.nodes.spectral import bandpower, band_ratios
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.nodes.spectral import bandpower, band_ratios
 
 
 def _make_psd() -> xr.DataArray:

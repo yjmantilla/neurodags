@@ -9,8 +9,8 @@ from typing import Any, Union
 import mne
 import yaml
 
-from cocofeats.definitions import RulesLike
-from cocofeats.loggers import get_logger
+from neurodags.definitions import RulesLike
+from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
 

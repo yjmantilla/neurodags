@@ -166,7 +166,7 @@ def configure_logging(
     #
     # # Bind common context once (service name, version, etc.):
     # # import structlog
-    # # structlog.contextvars.bind_contextvars(service="cocofeats", version="1.2.3")
+    # # structlog.contextvars.bind_contextvars(service="neurodags", version="1.2.3")
     #
     # # Emit JSON in local dev too:
     # # configure_logging(json=True)

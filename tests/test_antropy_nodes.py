@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from cocofeats.nodes import get_node
+from neurodags.nodes import get_node
 
 antropy = pytest.importorskip("antropy")
 
