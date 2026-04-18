@@ -1,0 +1,1 @@
+aws s3 sync --no-sign-request s3://openneuro.org/ds004504/ ds004504-download/ --exclude "*" --include "dataset_description.json" --include "participants.tsv" --include "participants.json" --include "README" --include "CHANGES" --include "sub-001/*" --include "sub-002/*" --include "sub-003/*"
