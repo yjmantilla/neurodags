@@ -195,7 +195,7 @@ def mne_spectrum_array(
         log.debug("MNEReport: loaded MNE object from file", input=meeg)
 
     if isinstance(meeg, mne.io.BaseRaw):
-        data_values = meeg.get_data(return_times=True)
+        data_values = meeg.get_data()
         times = meeg.times
         sfreq = meeg.info["sfreq"]
         time_dim = "times"
