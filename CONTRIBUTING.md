@@ -1,47 +1,55 @@
 # Contributing
 
-Thanks for your interest in contributing! This document describes how to set up your environment and make changes.
-
 ## Setup
 
-1. Fork and clone the repo
-2. Create a virtual environment and install dev dependencies:
+Fork and clone the repo, then let uv handle the environment:
 
 ```bash
-python -m venv .venv
-.venv\\Scripts\\activate  # Windows
-# source .venv/bin/activate  # macOS/Linux
-pip install -U pip
-pip install -e .[dev,test,docs]
-pre-commit install
+git clone https://github.com/yjmantilla/neurodags
+cd neurodags
+uv sync --all-extras        # creates .venv, installs dev + test + docs deps
+uv run pre-commit install
 ```
 
-## Development workflow
+> **No uv?** `pip install uv` or see [uv docs](https://docs.astral.sh/uv/).  
+> Without uv: `python -m venv .venv && source .venv/bin/activate && pip install -e .[dev,test,docs] && pre-commit install`
 
-- Run linters and type checks: `ruff check . && black --check . && mypy src`
-- Run tests: `pytest -q`
-- Format code: `black .`
-- Fix lint issues: `ruff check --fix .`
+## Development Workflow
+
+```bash
+uv run ruff check src/              # lint
+uv run ruff check src/ --fix        # lint + autofix
+uv run black --check .              # format check
+uv run black .                      # format
+uv run mypy src                     # type check
+uv run pytest -q                    # run tests
+uv run pytest -s -q --no-cov --pdb  # debug a test
+```
 
 ## Docs
 
-- Build docs locally: `sphinx-build -b html docs docs/_build/html -W --keep-going`
-- Examples for the gallery live in `docs/examples` and must start with `plot_*.py`.
+Examples in `docs/examples/` must be named `plot_*.py` (sphinx-gallery convention).
 
-## Commit style
+```bash
+uv run sphinx-build -b html docs docs/_build/html -W --keep-going  # build
+rm -rf docs/_build                                                   # clean
+```
 
-- Use clear, imperative commit messages
+## Commit Style
+
+- Imperative, concise commit messages
 - Keep changes small and focused
 
 ## Releases
 
-- Bump version in `src/neurodags/_version.py` and `pyproject.toml`
-- Create a tag `vX.Y.Z`
-- Publish to PyPI (example):
+Version is derived automatically from git tags via `hatch-vcs` — no manual version bump needed.
 
 ```bash
-python -m build
-python -m twine upload dist/*
+git tag vX.Y.Z
+git push origin vX.Y.Z
+
+uv run python -m build
+uv run twine upload dist/*
 ```
 
 ## Code of Conduct

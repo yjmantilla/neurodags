@@ -34,16 +34,56 @@ Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes
 pip install neurodags
 ```
 
-For development:
+With [uv](https://docs.astral.sh/uv/) (recommended):
+
+```bash
+uv add neurodags
+```
+
+## Quickstart
+
+Run a full synthetic pipeline — no real data required:
+
+```bash
+# pip
+pip install neurodags jupyter
+jupyter notebook notebooks/quickstart_synthetic.ipynb
+
+# uv
+uv run jupyter notebook notebooks/quickstart_synthetic.ipynb
+```
+
+Or run the example script directly:
+
+```bash
+uv run python docs/examples/plot_quickstart_synthetic.py
+```
+
+The quickstart generates 1/f-noise EEG, runs preprocessing → spectral analysis → band power, builds a dataframe, and plots relative power per subject.
+
+## Development
 
 ```bash
 git clone https://github.com/yjmantilla/neurodags
 cd neurodags
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e .[dev,test,docs]
-pre-commit install
+uv sync --all-extras    # creates .venv and installs all deps incl. dev/test/docs
+uv run pre-commit install
 ```
+
+Key commands (all via `uv run`):
+
+```bash
+uv run ruff check src/              # lint  (fix: uv run ruff check src/ --fix)
+uv run black --check .              # format check  (fix: uv run black .)
+uv run pytest -q                    # run tests
+uv run pytest -s -q --no-cov --pdb  # debug a failing test
+
+uv run sphinx-build -b html docs docs/_build/html -W --keep-going  # build docs
+rm -rf docs/_build                                                   # clean docs
+```
+
+> **No uv?** Install it with `pip install uv` or `curl -Ls https://astral.sh/uv/install.sh | sh`.
+> All commands above work with plain `python`/`pip` too — swap `uv run` → activate `.venv`, `uv sync` → `pip install -e .[dev,test,docs]`.
 
 ## Project Structure
 
@@ -191,14 +231,6 @@ Returns a dataframe describing the execution plan without running any nodes. `.e
 | `overwrite` | `False` | Force recompute even if output exists. |
 | `for_dataframe` | `False` | Include this derivative in `build_derivative_dataframe`. |
 
-## HDF5 / NetCDF Note
-
-If you encounter `RuntimeError: NetCDF: HDF error`:
-
-```bash
-pip install --no-binary=h5py h5py
-```
-
 ## Custom Node Definitions
 
 Point `new_definitions` to one or more Python files:
@@ -215,15 +247,14 @@ Relative paths are resolved from the pipeline YAML location.
 
 [https://yjmantilla.github.io/neurodags/](https://yjmantilla.github.io/neurodags/)
 
-## For Developers
+## HDF5 / NetCDF Note
+
+If you encounter `RuntimeError: NetCDF: HDF error`:
 
 ```bash
-ruff check src/          # lint (fix: ruff check src/ --fix)
-black --check .           # format check (fix: black .)
-pytest -q                 # run tests
-
-sphinx-build -b html docs docs/_build/html -W --keep-going  # build docs
-rm -rf docs/_build                                           # clean docs
+uv run pip install --no-binary=h5py h5py
+# or without uv:
+pip install --no-binary=h5py h5py
 ```
 
 ## Contributing
