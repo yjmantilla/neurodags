@@ -21,6 +21,10 @@ auto_examples/index
 changelog
 ```
 
+## Poster
+
+[View the NeuroDAGs conference poster](https://canva.link/c2b2fm0mk2wotwq) — overview of motivation, design, and format.
+
 ## Get Started
 
 - {doc}`user_guide/installation` — install neurodags

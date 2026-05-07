@@ -28,6 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import yaml
 
 from neurodags.datasets import generate_dummy_dataset
 from neurodags.orchestrators import build_derivative_dataframe, iterate_derivative_pipeline
@@ -81,103 +82,101 @@ for f in source_files:
     print(f"  {f.relative_to(WORKDIR)}")
 
 # %%
-# Step 2 — Define the Pipeline
-# ------------------------------
-# Pipelines are pure Python dicts — no YAML file needed (though YAML works too).
+# Step 2 — Datasets config as YAML
+# ----------------------------------
+# In real workflows, save this string to ``datasets.yml`` and point
+# ``load_configuration`` at that file for version-controlled, reproducible runs.
+# Paths are injected from Python so the notebook remains runnable.
+
+DATASETS_YAML = f"""\
+quickstart:
+  name: Quickstart
+  file_pattern: "{DATA_DIR / '**' / '*.vhdr'}"
+  derivatives_path: "{OUT_DIR}"
+"""
+
+datasets = yaml.safe_load(DATASETS_YAML)
+print("Datasets:", list(datasets))
+
+# %%
+# Step 3 — Pipeline config as YAML
+# ----------------------------------
+# The pipeline below is defined entirely in YAML — the format used in
+# ``pipeline.yml`` files checked into version control.
 #
 # This pipeline has three derivatives:
 #
 # - **BasicPrep**: band-pass filter → 2-second epochs.
 # - **Spectrum**: Welch PSD on each epoch.
 # - **BandPower**: relative power in δ, θ, α, β bands, averaged across epochs
-#   (``save=False`` — computed but not written to disk; ``for_dataframe=True``
-#   — included in the aggregated dataframe).
+#   (``save: false`` — computed but not written to disk;
+#   ``for_dataframe: true`` — included in the aggregated dataframe).
 
-datasets = {
-    "quickstart": {
-        "name": "Quickstart",
-        "file_pattern": str(DATA_DIR / "**" / "*.vhdr"),
-        "derivatives_path": str(OUT_DIR),
-    }
-}
+PIPELINE_YAML = """\
+mount_point: null
 
-pipeline_config = {
-    "datasets": datasets,
-    "mount_point": None,
-    "DerivativeDefinitions": {
-        "BasicPrep": {
-            "overwrite": False,
-            "nodes": [
-                {"id": 0, "derivative": "SourceFile"},
-                {
-                    "id": 1,
-                    "node": "basic_preprocessing",
-                    "args": {
-                        "mne_object": "id.0",
-                        "filter_args": {"l_freq": 1.0, "h_freq": 80.0},
-                        "epoch_config": {"duration": 2.0, "overlap": 0.0},
-                    },
-                },
-            ],
-        },
-        "Spectrum": {
-            "overwrite": False,
-            "nodes": [
-                {"id": 0, "derivative": "BasicPrep.fif"},
-                {
-                    "id": 1,
-                    "node": "mne_spectrum_array",
-                    "args": {
-                        "meeg": "id.0",
-                        "method": "welch",
-                        "method_kwargs": {"n_per_seg": 200},
-                    },
-                },
-            ],
-        },
-        "BandPower": {
-            "save": False,
-            "for_dataframe": True,
-            "nodes": [
-                {"id": 0, "derivative": "Spectrum.nc"},
-                {
-                    "id": 1,
-                    "node": "extract_data_var",
-                    "args": {"dataset_like": "id.0", "data_var": "spectrum"},
-                },
-                {
-                    "id": 2,
-                    "node": "bandpower",
-                    "args": {
-                        "psd_like": "id.1",
-                        "relative": True,
-                        "bands": {
-                            "delta": [1.0, 4.0],
-                            "theta": [4.0, 8.0],
-                            "alpha": [8.0, 13.0],
-                            "beta":  [13.0, 30.0],
-                        },
-                    },
-                },
-                {
-                    "id": 3,
-                    "node": "aggregate_across_dimension",
-                    "args": {
-                        "xarray_data": "id.2",
-                        "dim": "epochs",
-                        "operation": "mean",
-                    },
-                },
-            ],
-        },
-    },
-    "DerivativeList": ["BasicPrep", "Spectrum", "BandPower"],
-}
+DerivativeDefinitions:
+
+  BasicPrep:
+    overwrite: false
+    nodes:
+      - id: 0
+        derivative: SourceFile
+      - id: 1
+        node: basic_preprocessing
+        args:
+          mne_object: id.0
+          filter_args: {l_freq: 1.0, h_freq: 80.0}
+          epoch_config: {duration: 2.0, overlap: 0.0}
+
+  Spectrum:
+    overwrite: false
+    nodes:
+      - id: 0
+        derivative: BasicPrep.fif
+      - id: 1
+        node: mne_spectrum_array
+        args:
+          meeg: id.0
+          method: welch
+          method_kwargs: {n_per_seg: 200}
+
+  BandPower:
+    save: false
+    for_dataframe: true
+    nodes:
+      - id: 0
+        derivative: Spectrum.nc
+      - id: 1
+        node: extract_data_var
+        args: {dataset_like: id.0, data_var: spectrum}
+      - id: 2
+        node: bandpower
+        args:
+          psd_like: id.1
+          relative: true
+          bands:
+            delta: [1.0,  4.0]
+            theta: [4.0,  8.0]
+            alpha: [8.0, 13.0]
+            beta:  [13.0, 30.0]
+      - id: 3
+        node: aggregate_across_dimension
+        args: {xarray_data: id.2, dim: epochs, operation: mean}
+
+DerivativeList:
+  - BasicPrep
+  - Spectrum
+  - BandPower
+"""
+
+pipeline_config = yaml.safe_load(PIPELINE_YAML)
+pipeline_config["datasets"] = datasets  # inject dynamic dataset paths
 
 print("Pipeline defined with derivatives:", pipeline_config["DerivativeList"])
 
 # %%
-# Step 3 — Dry Run
+# Step 4 — Dry Run
 # -----------------
 # Inspect the execution plan for ``BasicPrep`` without running any computation.
 # The returned dataframe shows which outputs are cached and which would be computed.
@@ -191,7 +190,7 @@ for _, row in plan.iterrows():
 print(pd.DataFrame(steps)[["file", "id", "kind", "cached"]].to_string(index=False))
 
 # %%
-# Step 4 — Execute the Pipeline
+# Step 5 — Execute the Pipeline
 # ------------------------------
 # Run each derivative in order. Already-cached outputs are skipped automatically.
 
@@ -206,7 +205,7 @@ for f in produced:
     print(f"  {f.relative_to(WORKDIR)}")
 
 # %%
-# Step 5 — Assemble Dataframe
+# Step 6 — Assemble Dataframe
 # ----------------------------
 # :func:`~neurodags.orchestrators.build_derivative_dataframe` collects every
 # ``for_dataframe=True`` derivative into a single dataframe.
@@ -227,7 +226,7 @@ print(f"DataFrame shape: {df.shape}")
 print(df.head())
 
 # %%
-# Step 6 — Visualise Band Power
+# Step 7 — Visualise Band Power
 # ------------------------------
 # Group by subject and plot mean relative band power per frequency band.
 
@@ -278,8 +277,8 @@ else:
 # ------------
 # - Swap ``generate_dummy_dataset`` for real BIDS data by pointing ``file_pattern``
 #   at your raw EEG files.
-# - Move the config dict to a ``pipeline.yml`` and ``datasets.yml`` for
-#   version-controlled, reproducible workflows.
+# - Save ``PIPELINE_YAML`` / ``DATASETS_YAML`` to ``pipeline.yml`` and
+#   ``datasets.yml`` for version-controlled, reproducible workflows.
 # - Add custom nodes via ``new_definitions: my_nodes.py``.
 # - Scale up: set ``n_jobs=-1`` for file-level parallelism via joblib.
 # - Inspect any ``.nc`` file interactively with the built-in Dash explorer::
