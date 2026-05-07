@@ -44,16 +44,6 @@ uv add neurodags
 
 Run a full synthetic pipeline — no real data required:
 
-```bash
-# pip
-pip install neurodags jupyter
-jupyter notebook notebooks/quickstart_synthetic.ipynb
-
-# uv
-uv run jupyter notebook notebooks/quickstart_synthetic.ipynb
-```
-
-Or run the example script directly:
 
 ```bash
 uv run python docs/examples/plot_quickstart_synthetic.py

@@ -55,5 +55,3 @@ docs/auto_examples/
 .DS_Store
 Thumbs.db
 
-# Jupyter Notebook
-.ipynb_checkpoints/
