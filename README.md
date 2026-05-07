@@ -1,108 +1,229 @@
-# neurodags
+# NeuroDAGs
 
-A slurm friendly MEEG derivative extraction package leveraging bids-like data organization and DAG processing.
+**An Extensible and Declarative DAG Framework for Reproducible Neuroscience Workflows**
 
-- Agnostic to data organization
-- Slurm friendly
-- Reusage of existing derivatives through DAG processing.
-- Yaml-based configuration
-- Extensible without needing to fork the repository  
+M/EEG studies generate many interdependent intermediate derivatives. Recomputing full pipelines is wasteful; reusing valid intermediates is non-trivial. Large-scale studies require reproducible, extensible, and efficient workflows. NeuroDAGs addresses this with a declarative, graph-based framework for scalable and reusable derivative computation.
 
-## Basic Example
+## Core Idea
 
-Let's say you are exploring 
+Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes that output reusable derivatives, executed for each input file.
 
+## Design Principles
 
-## Quickstart
+- **Reproducible, transparent workflows** defined declaratively in YAML — version-controllable and LLM-friendly.
+- **Uniform node abstraction** — preprocessing, features, and any custom nodes are treated identically.
+- **Directory-agnostic** — outputs mirror inputs' organization. Derivatives are labeled with a `@DerivativeName` suffix.
+- **xarray-centered outputs** — derivatives stored as language-agnostic, metadata-rich, dimension-aware xarray → NetCDF.
+- **Graph-based reuse** — if a derivative is already computed and `overwrite=False`, it is skipped automatically.
 
+## Features
 
-## For developers
+- Agnostic to data organization / directory hierarchy
+- SLURM / HPC friendly with file-level parallelism via joblib
+- Graph-based caching: skip already-computed derivatives
+- Extensible node system — add nodes without forking the package
+- YAML-based declarative configuration
+- Built-in nodes for preprocessing, spectral analysis, entropy, complexity, and data transformations
+- Dataframe assembly (wide or long format) from derivative artifacts
+- Dry-run mode — inspect planned computations without executing
+- Built-in Dash-Plotly explorer for `.fif` and `.nc` files
+
+## Installation
 
 ```bash
-# Clone the repository
+pip install neurodags
+```
 
+For development:
+
+```bash
+git clone https://github.com/yjmantilla/neurodags
+cd neurodags
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e .[dev,test,docs]
-
-# Run quality checks
-ruff check src/ (fix with `ruff check src/ --fix` if needed)
-black --check . (fix with `black .` if needed)
-pytest -q
-
-# To debug pytest, use:
-pytest -q --pdb
-pytest -s -q --no-cov --pdb
-
-# Build docs
-sphinx-build -b html docs docs/_build/html -W --keep-going
-
-# Clean docs
-sphinx-build -M clean docs docs/_build/html
-
-or
-
-rm -rf docs/_build
-
+pre-commit install
 ```
 
+## Project Structure
 
-# HDF5 and NetCDF4
+```
+my_project/
+├── datasets.yml      # Dataset sources and paths
+├── pipeline.yml      # Derivative definitions and execution list
+└── custom_nodes.py   # Optional custom node definitions
+```
 
-If you get an error like:
+## Quick Example
+
+**`datasets.yml`**
+```yaml
+my_dataset:
+  name: MyDataset
+  file_pattern:
+    local: data/**/*.vhdr
+    hpc: /cluster/BIDS/**/*.vhdr
+  derivatives_path:
+    local: outputs/
+    hpc: /cluster/scratch/out
+```
+
+**`pipeline.yml`**
+```yaml
+datasets: datasets.yml
+mount_point: local
+new_definitions: custom_nodes.py  # optional
+
+DerivativeDefinitions:
+  CleanedEEG:
+    nodes:
+      - id: 0
+        derivative: SourceFile
+      - id: 1
+        node: basic_preprocessing
+        args:
+          mne_object: id.0
+          resample: 256
+          filter_args:
+            l_freq: 0.5
+            h_freq: 110
+
+  PowerSpectrum:
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: CleanedEEG.fif
+      - id: 1
+        node: mne_spectrum_array
+        args:
+          meeg: id.0
+          method: multitaper
+
+DerivativeList:
+  - CleanedEEG
+  - PowerSpectrum
+```
+
+**Python**
+```python
+from neurodags.loaders import load_configuration
+from neurodags.orchestrators import iterate_derivative_pipeline
+
+config = load_configuration("pipeline.yml")
+iterate_derivative_pipeline(config, "CleanedEEG")
+iterate_derivative_pipeline(config, "PowerSpectrum")
+```
+
+## Custom Nodes
+
+Add nodes without modifying or forking the package:
+
+```python
+# custom_nodes.py
+from neurodags.nodes import register_node
+from neurodags.definitions import Artifact, NodeResult
+
+@register_node
+def my_node(data) -> NodeResult:
+    result = compute(data)
+    return NodeResult(
+        artifacts={
+            ".nc": Artifact(
+                item=result,
+                writer=lambda path: result.to_netcdf(path),
+            ),
+        },
+    )
+```
+
+Key rules:
+1. A node is a function decorated with `@register_node`.
+2. It returns a `NodeResult`.
+3. A `NodeResult` contains `artifacts` — a dict mapping file extension to `Artifact(item, writer)`.
+
+## Dataframe Assembly
+
+```python
+from neurodags.orchestrators import build_derivative_dataframe
+
+df = build_derivative_dataframe("pipeline.yml", output_format="wide")
+```
+
+Derivatives marked `for_dataframe: True` are collected automatically. Supports `"wide"` (one row per file) and `"long"` (one row per value) formats.
+
+## Parallel Execution
+
+```yaml
+# pipeline.yml
+n_jobs: 4           # -1 = all cores, 1 or null = serial
+joblib_backend: loky
+joblib_prefer: processes
+```
+
+Or via Python:
+
+```python
+iterate_derivative_pipeline(config, "MyDerivative", n_jobs=4)
+```
+
+## Visualization
 
 ```bash
-  File "src/netCDF4/_netCDF4.pyx", line 5645, in netCDF4._netCDF4.Variable.__setitem__
-  File "src/netCDF4/_netCDF4.pyx", line 5961, in netCDF4._netCDF4.Variable._put
-  File "src/netCDF4/_netCDF4.pyx", line 2160, in netCDF4._netCDF4._ensure_nc_success
-RuntimeError: NetCDF: HDF error
+python -m neurodags.visualization path/to/file.fif
+python -m neurodags.visualization path/to/file.nc
 ```
 
-You may need to install hdf5 in your system and built from source:
+Built-in Dash-Plotly explorer with dimension-aware UI — dropdown per axis, plot types: Line, Scatter, Bar, Heatmap.
+
+## Inspection (Dry Run)
+
+```python
+iterate_derivative_pipeline(config, "MyDerivative", dry_run=True)
+```
+
+Returns a dataframe describing the execution plan without running any nodes. `.error` marker files prevent silent retry of failed runs.
+
+## Derivative Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `save` | `True` | Persist artifacts to disk. `False` = compute but don't write. |
+| `overwrite` | `False` | Force recompute even if output exists. |
+| `for_dataframe` | `False` | Include this derivative in `build_derivative_dataframe`. |
+
+## HDF5 / NetCDF Note
+
+If you encounter `RuntimeError: NetCDF: HDF error`:
 
 ```bash
 pip install --no-binary=h5py h5py
 ```
 
+## Custom Node Definitions
+
+Point `new_definitions` to one or more Python files:
+
+```yaml
+new_definitions:
+  - custom_nodes/my_nodes.py
+  - /abs/path/to/other_nodes.py
+```
+
+Relative paths are resolved from the pipeline YAML location.
+
 ## Documentation
 
-- [Docs](https://yjmantilla.github.io/neurodags/)
+[https://yjmantilla.github.io/neurodags/](https://yjmantilla.github.io/neurodags/)
 
-## Custom node definitions
-
-Pipelines can import additional node definitions before registering derivatives by pointing `new_definitions` to one or more Python files:
-
-```yaml
-datasets: example_pipelines/datasets_epilepsy.yml
-mount_point: local
-new_definitions:
-  - custom_nodes/artifacts.py
-  - /abs/path/to/local_nodes.py
-DerivativeDefinitions:
-  MyCustomDerivative:
-    nodes:
-      - id: 0
-        node: my_custom_node  # registered inside the imported modules
-```
-
-Relative paths are resolved from the pipeline YAML location. Each module is executed once and may call `@register_node` as part of its import.
-
-## Parallel execution
-
-`iterate_derivative_pipeline` can fan out across files using joblib. You can enable it either by passing `n_jobs` (and optionally `joblib_backend` / `joblib_prefer`) when calling the orchestrator or by adding the keys to your pipeline YAML:
-
-```yaml
-n_jobs: 4           # -1 to use all cores, 1 or null keeps it serial
-joblib_backend: loky
-joblib_prefer: processes
-```
-
-The CLI mirrors these options via `--n-jobs`, `--joblib-backend`, and `--joblib-prefer`.
-
-## Visualization
-
-You can visualize `.fif` or `.nc` files using the built-in visualization tool:
+## For Developers
 
 ```bash
-python -m neurodags.visualization path/to/your_file.fif
+ruff check src/          # lint (fix: ruff check src/ --fix)
+black --check .           # format check (fix: black .)
+pytest -q                 # run tests
+
+sphinx-build -b html docs docs/_build/html -W --keep-going  # build docs
+rm -rf docs/_build                                           # clean docs
 ```
 
 ## Contributing
