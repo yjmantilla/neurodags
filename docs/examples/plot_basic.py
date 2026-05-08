@@ -21,7 +21,7 @@ Pipeline graph::
     id.1: extract_data_var
        ╱ ╲
   id.2   id.3          ← fan-out: same upstream, two parallel branches
-(abs)   (rel)
+  (abs)   (rel)
      ╲ ╱
     id.4: concat_bandpower  ← fan-in: depends on BOTH id.2 and id.3
 """
