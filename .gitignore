@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+
+
 # C extensions
 *.so
 
@@ -19,6 +21,7 @@ src/*/_version.py
 _data/
 _outputs/
 data/
+*.html
 
 # Virtual environments
 .venv/
@@ -54,4 +57,3 @@ docs/auto_examples/
 # OS files
 .DS_Store
 Thumbs.db
-
