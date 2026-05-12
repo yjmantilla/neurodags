@@ -230,9 +230,7 @@ def _build_figure_dataarrays(
     data_vars: dict[str, xr.DataArray] = {}
 
     if any(payload is not None for payload in png_payloads):
-        strings = [
-            "" if payload is None else payload.tobytes().hex() for payload in png_payloads
-        ]
+        strings = ["" if payload is None else payload.tobytes().hex() for payload in png_payloads]
         max_len = max((len(s) for s in strings), default=1)
         array = np.array(strings, dtype=f"<U{max_len}")
         reshaped = array.reshape(value_da.shape)
