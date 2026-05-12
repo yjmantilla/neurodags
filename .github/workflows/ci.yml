@@ -13,6 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10"] #, "3.11", "3.12"]
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +46,7 @@ jobs:
         run: sphinx-build -b html docs docs/_build/html -W --keep-going
 
       - name: Upload coverage to codecov (optional)
-        if: ${{ env.CODECOV_TOKEN }}
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
