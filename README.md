@@ -48,14 +48,7 @@ uv add neurodags
 
 ## Quickstart
 
-Run a full synthetic pipeline — no real data required:
-
-
-```bash
-uv run python docs/examples/plot_quickstart_synthetic.py
-```
-
-The quickstart generates 1/f-noise EEG, runs preprocessing → spectral analysis → band power, builds a dataframe, and plots relative power per subject.
+See the [quickstart example](https://yjmantilla.github.io/neurodags/auto_examples/plot_quickstart_synthetic.html) — full synthetic pipeline, no real data required.
 
 ## Development
 

@@ -28,7 +28,7 @@ changelog
 ## Get Started
 
 - {doc}`user_guide/installation` — install neurodags
-- {doc}`user_guide/quickstart` — minimal working pipeline in minutes
+- {doc}`auto_examples/plot_quickstart_synthetic` — minimal working pipeline in minutes
 - {doc}`user_guide/concepts` — understand DAGs, derivatives, nodes, and artifacts
 - {doc}`user_guide/pipeline_yaml` — full `pipeline.yml` reference
 - {doc}`user_guide/datasets_yaml` — full `datasets.yml` reference
