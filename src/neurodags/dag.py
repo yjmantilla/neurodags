@@ -134,7 +134,11 @@ def _is_step_cached(
     # prefix = f"{reference_base}@{snake_to_camel(step_derivative_name)}"
     postfix = f"@{step_derivative_name}"
     # return any(reference_base.parent.glob(Path(prefix).name + ".*"))
-    candidates = glob.glob(reference_base.as_posix() + postfix if isinstance(reference_base, Path) else reference_base + postfix)  # or use
+    candidates = glob.glob(
+        reference_base.as_posix() + postfix
+        if isinstance(reference_base, Path)
+        else reference_base + postfix
+    )  # or use
     if len(candidates) > 1:
         if not accept_ambiguous:
             log.error(
@@ -195,9 +199,8 @@ def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
     return registered
 
 
-
 def _artifact_candidates_for(prefix: str) -> list[str]:
-    #TODO: How to add option to skip derivatives that previously failed? (.error files)
+    # TODO: How to add option to skip derivatives that previously failed? (.error files)
     return [x for x in sorted(glob.glob(prefix + ".*")) if not x.endswith(".error")]
 
 
@@ -210,6 +213,7 @@ def _split_derivative_ref(derivative_ref: str) -> tuple[str, str | None]:
         base, ext = derivative_ref.split(".", 1)
         return base, ext
     return derivative_ref, None
+
 
 # ---------- executor ----------
 
@@ -249,7 +253,9 @@ def run_derivative(
             plan.append(kwargs)
 
     # In dry-run, also check the final output of the derivative upfront
-    base_reference = reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
+    base_reference = (
+        reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
+    )
     final_prefix = base_reference + "@" + snake_to_camel(derivative_name) if save else None
     if dry_run:
         if save:
@@ -298,7 +304,11 @@ def run_derivative(
                 continue
 
             base_name, ext = _split_derivative_ref(derivative_ref)
-            prefix = reference_base.as_posix() + "@" + snake_to_camel(base_name) if isinstance(reference_base, Path) else reference_base + "@" + snake_to_camel(base_name)
+            prefix = (
+                reference_base.as_posix() + "@" + snake_to_camel(base_name)
+                if isinstance(reference_base, Path)
+                else reference_base + "@" + snake_to_camel(base_name)
+            )
             candidates = _artifact_candidates_for(prefix)
             if ext:
                 candidates = [p for p in candidates if p.endswith("." + ext)]
@@ -350,7 +360,11 @@ def run_derivative(
                 continue
 
             if base_name in list_derivative_definitions():
-                log.debug("Recurse into sub-derivative", parent_derivative=derivative_name, child_derivative=base_name)
+                log.debug(
+                    "Recurse into sub-derivative",
+                    parent_derivative=derivative_name,
+                    child_derivative=base_name,
+                )
                 sub_result = run_derivative(
                     get_derivative_definition(base_name).definition,
                     base_name,
@@ -364,8 +378,15 @@ def run_derivative(
                 store[sid] = sub_result
                 last_result = sub_result if isinstance(sub_result, NodeResult) else last_result
             else:
-                log.error("Unknown derivative reference", derivative=derivative_name, id=sid, child_derivative=derivative_ref)
-                raise ValueError(f"Unknown derivative '{derivative_ref}' in derivative '{derivative_name}'")
+                log.error(
+                    "Unknown derivative reference",
+                    derivative=derivative_name,
+                    id=sid,
+                    child_derivative=derivative_ref,
+                )
+                raise ValueError(
+                    f"Unknown derivative '{derivative_ref}' in derivative '{derivative_name}'"
+                )
 
         # 2) 'node' step
         elif "node" in step:
@@ -394,7 +415,9 @@ def run_derivative(
                 extra_args["mount_point"] = mount_point
 
             kwargs = _prep_kwargs(step.get("args", {}), store)
-            log.debug("Execute node", derivative=derivative_name, id=sid, node=node_name, kwargs=kwargs)
+            log.debug(
+                "Execute node", derivative=derivative_name, id=sid, node=node_name, kwargs=kwargs
+            )
             try:
                 res = fn(**kwargs, **extra_args)
                 if not isinstance(res, NodeResult):
@@ -454,7 +477,9 @@ def run_derivative(
         return {
             "derivative": derivative_name,
             "file": file_path,
-            "reference_base": reference_base.as_posix() if isinstance(reference_base, Path) else reference_base,
+            "reference_base": (
+                reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
+            ),
             "overwrite": overwrite,
             "plan": plan,
         }
@@ -521,9 +546,9 @@ def collect_derivative_for_dataframe(
             "Skipping derivative during dataframe collection because cached artifacts are missing",
             derivative=derivative_name,
             file=file_path,
-            reference_base=reference_base.as_posix()
-            if isinstance(reference_base, Path)
-            else reference_base,
+            reference_base=(
+                reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
+            ),
         )
         return {}
 
@@ -566,7 +591,9 @@ def _resolve_derivative_artifacts(
     precomputed_only: bool = False,
 ) -> dict[str, Any]:
     save = bool(derivative_def.get("save", True))
-    base_reference = reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
+    base_reference = (
+        reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
+    )
     prefix = base_reference + "@" + snake_to_camel(derivative_name)
 
     payloads: dict[str, Any] = {}
@@ -609,7 +636,9 @@ def _resolve_derivative_artifacts(
             payloads[suffix] = Path(path)
         return payloads
 
-    raise RuntimeError(f"Unexpected result type when collecting derivative '{derivative_name}': {type(result)!r}")
+    raise RuntimeError(
+        f"Unexpected result type when collecting derivative '{derivative_name}': {type(result)!r}"
+    )
 
 
 def _simplify_artifact_payload(
@@ -626,9 +655,7 @@ def _simplify_artifact_payload(
         return value
 
     if flatten_xarray and xr is not None and isinstance(value, xr.DataArray):
-        return _flatten_dataarray_payload(
-            value, sort_dims_alphabetically=sort_dims_alphabetically
-        )
+        return _flatten_dataarray_payload(value, sort_dims_alphabetically=sort_dims_alphabetically)
 
     return _simplify_value(value)
 
@@ -652,7 +679,12 @@ def _load_from_path(path: Path, *, suffix: str) -> Any:
         if suffix.endswith(".txt") or suffix.endswith(".log"):
             return path.read_text(encoding="utf-8")
     except Exception:
-        log.warning("Failed to load artifact payload, falling back to path", path=str(path), suffix=suffix, exc_info=True)
+        log.warning(
+            "Failed to load artifact payload, falling back to path",
+            path=str(path),
+            suffix=suffix,
+            exc_info=True,
+        )
     return path.as_posix()
 
 
@@ -741,8 +773,8 @@ def _format_coord_value(value: Any) -> str:
         except Exception:
             pass
     "NA" if value is None else str(value)
-    #sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
-    #sanitized = sanitized.strip("-")
+    # sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
+    # sanitized = sanitized.strip("-")
     value = str(value)
 
     if isinstance(value, str):

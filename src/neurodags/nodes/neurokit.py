@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
-matplotlib.use("Agg", force=True) # avoid GUI backends for figure generation
+matplotlib.use("Agg", force=True)  # avoid GUI backends for figure generation
 
 try:  # pragma: no cover - optional dependency guidance
     import neurokit2 as nk
@@ -46,7 +46,7 @@ FigureEncoding = str | None
 CallableLike = Callable[[np.ndarray], Any]
 
 
-@dataclass(slots=False) # breaks parallelization?
+@dataclass(slots=False)  # breaks parallelization?
 class _CallRecord:
     metadata: Any | None
     figure: dict[str, np.ndarray] | None
@@ -234,10 +234,12 @@ def _build_figure_dataarrays(
         lengths = {payload.size for payload in valid_png}
         if len(lengths) == 1:
             png_len = lengths.pop()
-            stacked = np.stack([
-                payload if payload is not None else np.zeros(png_len, dtype=np.uint8)
-                for payload in png_payloads
-            ])
+            stacked = np.stack(
+                [
+                    payload if payload is not None else np.zeros(png_len, dtype=np.uint8)
+                    for payload in png_payloads
+                ]
+            )
             reshaped = stacked.reshape((*value_da.shape, png_len))
             coords = dict(value_da.coords)
             coords["png_byte"] = np.arange(png_len)
@@ -248,8 +250,7 @@ def _build_figure_dataarrays(
             )
         else:  # pragma: no cover - differing figure sizes are unexpected but handled
             strings = [
-                "" if payload is None else payload.tobytes().hex()
-                for payload in png_payloads
+                "" if payload is None else payload.tobytes().hex() for payload in png_payloads
             ]
             max_len = max((len(s) for s in strings), default=1)
             array = np.array(strings, dtype=f"<U{max_len}")
@@ -265,10 +266,16 @@ def _build_figure_dataarrays(
         shapes = {payload.shape for payload in valid_rgba}
         if len(shapes) == 1:
             height, width, channels = next(iter(shapes))
-            stacked = np.stack([
-                payload if payload is not None else np.zeros((height, width, channels), dtype=np.uint8)
-                for payload in rgba_payloads
-            ])
+            stacked = np.stack(
+                [
+                    (
+                        payload
+                        if payload is not None
+                        else np.zeros((height, width, channels), dtype=np.uint8)
+                    )
+                    for payload in rgba_payloads
+                ]
+            )
             reshaped = stacked.reshape((*value_da.shape, height, width, channels))
             coords = dict(value_da.coords)
             coords["figure_y"] = np.arange(height)
@@ -281,8 +288,7 @@ def _build_figure_dataarrays(
             )
         else:  # pragma: no cover - differing figure sizes are unexpected but handled
             strings = [
-                "" if payload is None else payload.tobytes().hex()
-                for payload in rgba_payloads
+                "" if payload is None else payload.tobytes().hex() for payload in rgba_payloads
             ]
             max_len = max((len(s) for s in strings), default=1)
             array = np.array(strings, dtype=f"<U{max_len}")
@@ -317,13 +323,15 @@ def _build_node(name: str, func: CallableLike) -> None:
         **function_kwargs: Any,
     ) -> NodeResult:
         if mode.lower() != "iterative":
-            raise ValueError("neurokit nodes currently require mode='iterative' to capture metadata and figures.")
+            raise ValueError(
+                "neurokit nodes currently require mode='iterative' to capture metadata and figures."
+            )
 
         resolved_kwargs = dict(function_kwargs)
         resolved_args = tuple(function_args or ())
 
         capture_requested = figure_encoding not in {None, "none", ""}
-        #if capture_requested and "show" not in resolved_kwargs:
+        # if capture_requested and "show" not in resolved_kwargs:
         #    resolved_kwargs["show"] = True
         if force_show is not None:
             resolved_kwargs["show"] = bool(force_show)

@@ -18,7 +18,9 @@ def _unique_module_name(path: Path) -> str:
     return f"_neurodags_nodes_{digest}"
 
 
-def load_node_definitions(paths: Iterable[str | Path], base_dir: Path | None = None) -> list[ModuleType]:
+def load_node_definitions(
+    paths: Iterable[str | Path], base_dir: Path | None = None
+) -> list[ModuleType]:
     """
     Load and execute node definition files.
 
@@ -35,7 +37,9 @@ def load_node_definitions(paths: Iterable[str | Path], base_dir: Path | None = N
             continue
 
         candidate = Path(raw_path)
-        resolved = (base / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        resolved = (
+            (base / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        )
 
         if resolved in _LOADED_SOURCES:
             log.debug("Skipping node definition; already loaded", path=str(resolved))

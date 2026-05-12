@@ -35,7 +35,7 @@ DEFAULT_BANDS: dict[str, tuple[float, float]] = {
 
 
 def _resolve_psd_dataarray(
-    psd_like: NodeResult | xr.DataArray | str | os.PathLike[str]
+    psd_like: NodeResult | xr.DataArray | str | os.PathLike[str],
 ) -> xr.DataArray:
     if isinstance(psd_like, xr.DataArray):
         return psd_like
@@ -215,7 +215,6 @@ def mne_spectrum_array(
     # data_values shape is (..., time)
     if data_values.shape[-1] != len(times):
         raise ValueError("Data last dimension must be time")
-
 
     psd_func = {
         "welch": mne.time_frequency.psd_array_welch,
@@ -526,7 +525,9 @@ def fooof(
 
             signal_to_fit = signal[::downsample_step]
             if signal_to_fit.size != freq_values_downsampled.size:
-                raise ValueError("Downsampled signal and frequency vectors must be the same length.")
+                raise ValueError(
+                    "Downsampled signal and frequency vectors must be the same length."
+                )
 
             fm = FOOOF(verbose=False, **fooof_init_kwargs)
             fm.fit(freq_values_downsampled, signal_to_fit, **fit_kwargs)
@@ -546,11 +547,13 @@ def fooof(
             duration = time.perf_counter() - start
             timings[flat_idx] = duration
             fooof_payloads[flat_idx] = fallback_value
-            failure_records.append({
-                "index": int(flat_idx),
-                "coords": coord_mapping,
-                "error": repr(exc),
-            })
+            failure_records.append(
+                {
+                    "index": int(flat_idx),
+                    "coords": coord_mapping,
+                    "error": repr(exc),
+                }
+            )
             log.warning("FOOOF fit failed", coords=coord_mapping, error=str(exc))
             continue
 
@@ -625,8 +628,6 @@ def fooof(
     return NodeResult(artifacts=artifacts)
 
 
-
-
 @register_node
 def fooof_scalars(
     fooof_like: NodeResult | xr.DataArray | str | os.PathLike[str],
@@ -657,7 +658,9 @@ def fooof_scalars(
     component = component.lower()
     valid_components = {"aperiodic_params", "r_squared", "error", "all"}
     if component not in valid_components:
-        raise ValueError("component must be one of {'aperiodic_params', 'r_squared', 'error', 'all'}")
+        raise ValueError(
+            "component must be one of {'aperiodic_params', 'r_squared', 'error', 'all'}"
+        )
 
     fooof_xr = _resolve_psd_dataarray(fooof_like)
     other_dims = list(fooof_xr.dims)
@@ -739,7 +742,9 @@ def fooof_scalars(
 
     coords = {
         dim: (
-            fooof_xr.coords[dim].values if dim in fooof_xr.coords else np.arange(fooof_xr.sizes[dim])
+            fooof_xr.coords[dim].values
+            if dim in fooof_xr.coords
+            else np.arange(fooof_xr.sizes[dim])
         )
         for dim in other_dims
     }
@@ -792,6 +797,7 @@ def fooof_scalars(
     )
 
     return NodeResult(artifacts={".nc": artifact})
+
 
 @register_node
 def fooof_component(
@@ -930,7 +936,9 @@ def fooof_component(
             )
 
             if mode == "fooof-api":
-                aperiodic = _ensure_shape(fm.get_data("aperiodic", space=space), "aperiodic spectrum")
+                aperiodic = _ensure_shape(
+                    fm.get_data("aperiodic", space=space), "aperiodic spectrum"
+                )
                 periodic = _ensure_shape(fm.get_data("peak", space=space), "peak spectrum")
                 # if space == "linear":
                 #     periodic = np.clip(periodic, a_min=0.0, a_max=None)
@@ -945,7 +953,7 @@ def fooof_component(
                 aperiodic = _log_to_space(ap_fit_log, "aperiodic fit")
                 if space == "linear":
                     periodic = model_in_space - aperiodic
-                    #periodic = np.clip(periodic, a_min=0.0, a_max=None)
+                    # periodic = np.clip(periodic, a_min=0.0, a_max=None)
                 else:
                     periodic = peak_log
 
@@ -1057,7 +1065,9 @@ def bandpower(
     psd_xr = _resolve_psd_dataarray(psd_like)
 
     if freq_dim not in psd_xr.dims:
-        raise ValueError(f"Frequency dimension '{freq_dim}' not present in input dims: {psd_xr.dims}")
+        raise ValueError(
+            f"Frequency dimension '{freq_dim}' not present in input dims: {psd_xr.dims}"
+        )
 
     bands_dict = dict(bands or DEFAULT_BANDS)
     if not bands_dict:
@@ -1082,7 +1092,9 @@ def bandpower(
             raise ValueError(f"Band '{label}' must be a (low, high) pair.")
 
         low, high = map(float, band_range)
-        if not np.isfinite(low) or not np.isfinite(high): #TODO: maybe we should allow inf? (as get everything below or above a threshold)
+        if not np.isfinite(low) or not np.isfinite(
+            high
+        ):  # TODO: maybe we should allow inf? (as get everything below or above a threshold)
             raise ValueError(f"Band '{label}' has non-finite boundaries: {band_range}.")
         if high <= low:
             raise ValueError(f"Band '{label}' must have high > low (got {band_range}).")
@@ -1119,7 +1131,8 @@ def bandpower(
 
     metadata: dict[str, Any] = {
         "bands": {
-            label: {"low": float(low), "high": float(high)} for label, (low, high) in bands_dict.items()
+            label: {"low": float(low), "high": float(high)}
+            for label, (low, high) in bands_dict.items()
         },
         "relative": relative,
         "freq_dim": freq_dim,

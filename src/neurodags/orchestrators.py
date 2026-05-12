@@ -24,7 +24,7 @@ from neurodags.utils import get_path
 log = get_logger(__name__)
 
 
-@dataclass(slots=False) # slots=True seems to break parallelization
+@dataclass(slots=False)  # slots=True seems to break parallelization
 class _FileJob:
     index: int
     dataset: str
@@ -41,7 +41,7 @@ class _FileJob:
     custom_node_paths: tuple[str, ...] = ()
 
 
-@dataclass(slots=False) # break parallelization?
+@dataclass(slots=False)  # break parallelization?
 class _FileResult:
     index: int
     dataset: str
@@ -65,9 +65,7 @@ def _resolve_reference_base(
     if derivatives_path:
         derivatives_path = get_path(derivatives_path, mount_point=mount_point)
         os.makedirs(derivatives_path, exist_ok=True)
-        reference_base = (
-            os.path.relpath(file_path, start=common_root) if common_root else file_path
-        )
+        reference_base = os.path.relpath(file_path, start=common_root) if common_root else file_path
         reference_base = os.path.join(derivatives_path, reference_base)
         os.makedirs(os.path.dirname(reference_base), exist_ok=True)
     else:
@@ -295,7 +293,7 @@ def iterate_derivative_pipeline(
         if derivative_entry.definition["save"] is False:
             log.info(
                 "Derivative is marked with save=False; skipping execution.",
-                derivative=derivative_label
+                derivative=derivative_label,
             )
             return None
     effective_n_jobs = n_jobs if n_jobs is not None else config_dict.get("n_jobs")
@@ -330,7 +328,9 @@ def iterate_derivative_pipeline(
                 is_node=node_callable is not None,
                 node_name=derivative_label if node_callable is not None else None,
                 derivative_name=derivative_entry.name if derivative_entry is not None else None,
-                derivative_definition=derivative_entry.definition if derivative_entry is not None else None,
+                derivative_definition=(
+                    derivative_entry.definition if derivative_entry is not None else None
+                ),
                 derivative_label=derivative_label or "<unknown>",
                 dry_run=dry_run,
                 custom_node_paths=custom_node_paths,
@@ -379,9 +379,7 @@ def iterate_derivative_pipeline(
                 dry_run_collection.append(entry)
         else:
             message = (
-                "Error running derivative"
-                if result.stage == "run"
-                else "Error processing file"
+                "Error running derivative" if result.stage == "run" else "Error processing file"
             )
             log.error(
                 message,
@@ -448,10 +446,16 @@ def build_derivative_dataframe(
 
     log.debug("build_derivative_dataframe: called", pipeline_configuration=pipeline_configuration)
 
-    config_dict = load_configuration(pipeline_configuration) if isinstance(pipeline_configuration, str) else pipeline_configuration
+    config_dict = (
+        load_configuration(pipeline_configuration)
+        if isinstance(pipeline_configuration, str)
+        else pipeline_configuration
+    )
 
     if "DerivativeDefinitions" not in config_dict:
-        log.warning("No 'DerivativeDefinitions' found in the configuration. Returning empty dataframe.")
+        log.warning(
+            "No 'DerivativeDefinitions' found in the configuration. Returning empty dataframe."
+        )
         return pd.DataFrame()
 
     register_derivatives_from_dict(config_dict)
@@ -459,7 +463,11 @@ def build_derivative_dataframe(
     derivative_definitions: dict[str, dict] = config_dict.get("DerivativeDefinitions", {}) or {}
     selected_derivatives: list[str] = []
 
-    include_derivatives = config_dict.get("DerivativeList", []) if include_derivatives is None else include_derivatives
+    include_derivatives = (
+        config_dict.get("DerivativeList", [])
+        if include_derivatives is None
+        else include_derivatives
+    )
 
     for derivative_name, derivative_def in derivative_definitions.items():
         if include_derivatives is not None and derivative_name not in include_derivatives:
@@ -470,10 +478,15 @@ def build_derivative_dataframe(
     if include_derivatives:
         missing_derivatives = sorted(set(include_derivatives) - set(selected_derivatives))
         if missing_derivatives:
-            log.warning("Some requested derivatives are either undefined or flagged out of dataframe collection.", missing_derivatives=missing_derivatives)
+            log.warning(
+                "Some requested derivatives are either undefined or flagged out of dataframe collection.",
+                missing_derivatives=missing_derivatives,
+            )
 
     if not selected_derivatives:
-        log.warning("No derivatives eligible for dataframe collection were found. Returning empty dataframe.")
+        log.warning(
+            "No derivatives eligible for dataframe collection were found. Returning empty dataframe."
+        )
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
@@ -488,8 +501,11 @@ def build_derivative_dataframe(
         pipeline_configuration, max_files_per_dataset=max_files_per_dataset
     )
 
-
-    log.debug("build_derivative_dataframe: enumerated files", total_files=len(all_files), per_dataset=files_per_dataset)
+    log.debug(
+        "build_derivative_dataframe: enumerated files",
+        total_files=len(all_files),
+        per_dataset=files_per_dataset,
+    )
 
     if only_index is not None:
         index_filter = only_index if isinstance(only_index, list) else [only_index]
@@ -497,7 +513,11 @@ def build_derivative_dataframe(
         if len(filtered) != len(index_filter):
             detected = [item[0] for item in filtered]
             missing = list(set(index_filter) - set(detected))
-            log.warning("Some indices requested for dataframe collection were not found.", requested=index_filter, missing=missing)
+            log.warning(
+                "Some indices requested for dataframe collection were not found.",
+                requested=index_filter,
+                missing=missing,
+            )
         all_files = filtered
 
     if output_format not in {"wide", "long"}:
@@ -511,7 +531,9 @@ def build_derivative_dataframe(
         try:
             dataset_config = datasets_configs[dataset_name]
             common_root = common_roots.get(dataset_name)
-            reference_base = _build_reference_base(file_path, dataset_config, common_root, mount_point)
+            reference_base = _build_reference_base(
+                file_path, dataset_config, common_root, mount_point
+            )
             row: dict[str, Any] = {
                 "index": index,
                 "dataset": dataset_name,
@@ -597,22 +619,69 @@ def build_derivative_dataframe(
 def _build_reference_base(
     file_path: str, dataset_config, common_root: str | None, mount_point: Path | None
 ) -> Path:
-    _, reference_base_path = _resolve_reference_base(file_path, dataset_config, common_root, mount_point)
+    _, reference_base_path = _resolve_reference_base(
+        file_path, dataset_config, common_root, mount_point
+    )
     return reference_base_path
+
 
 if __name__ == "__main__":
     # Parse args and run iterate_derivative_pipeline
     import argparse
+
     parser = argparse.ArgumentParser(description="Iterate derivative pipeline.")
-    parser.add_argument("config", type=str, help="Path to the pipeline configuration file (YAML or JSON).")
-    parser.add_argument("--max_files_per_dataset", type=int, default=None, help="Maximum number of files to process per dataset.")
-    parser.add_argument("--dry_run", action="store_true", help="If set, perform a dry run without actual processing.")
-    parser.add_argument("--only_index", type=int, nargs="*", default=None, help="Only process files with these indices.")
-    parser.add_argument("--raise_on_error", action="store_true", help="If set, raise exceptions on errors instead of logging them.")
-    parser.add_argument("--n-jobs", dest="n_jobs", type=int, default=None, help="Number of parallel workers to use (joblib semantics; default serial).")
-    parser.add_argument("--joblib-backend", dest="joblib_backend", type=str, default=None, help="Joblib backend to use (e.g. 'loky', 'threading').")
-    parser.add_argument("--joblib-prefer", dest="joblib_prefer", type=str, default=None, help="Joblib execution preference hint (e.g. 'processes', 'threads').")
-    parser.add_argument("--make_final_dataframe", action="store_true", help="If set, build the final derivative dataframe after processing.")
+    parser.add_argument(
+        "config", type=str, help="Path to the pipeline configuration file (YAML or JSON)."
+    )
+    parser.add_argument(
+        "--max_files_per_dataset",
+        type=int,
+        default=None,
+        help="Maximum number of files to process per dataset.",
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="If set, perform a dry run without actual processing.",
+    )
+    parser.add_argument(
+        "--only_index",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Only process files with these indices.",
+    )
+    parser.add_argument(
+        "--raise_on_error",
+        action="store_true",
+        help="If set, raise exceptions on errors instead of logging them.",
+    )
+    parser.add_argument(
+        "--n-jobs",
+        dest="n_jobs",
+        type=int,
+        default=None,
+        help="Number of parallel workers to use (joblib semantics; default serial).",
+    )
+    parser.add_argument(
+        "--joblib-backend",
+        dest="joblib_backend",
+        type=str,
+        default=None,
+        help="Joblib backend to use (e.g. 'loky', 'threading').",
+    )
+    parser.add_argument(
+        "--joblib-prefer",
+        dest="joblib_prefer",
+        type=str,
+        default=None,
+        help="Joblib execution preference hint (e.g. 'processes', 'threads').",
+    )
+    parser.add_argument(
+        "--make_final_dataframe",
+        action="store_true",
+        help="If set, build the final derivative dataframe after processing.",
+    )
     parser.add_argument(
         "--dataframe_output",
         type=str,
@@ -639,11 +708,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     from neurodags.loaders import load_configuration
+
     pipeline_configuration = load_configuration(args.config)
 
     derivative_list = pipeline_configuration.get("DerivativeList", [])
     if not derivative_list:
-        log.error("No derivatives specified in the pipeline configuration under 'DerivativeList'. Exiting.")
+        log.error(
+            "No derivatives specified in the pipeline configuration under 'DerivativeList'. Exiting."
+        )
         exit(1)
 
     if args.dry_run:
@@ -685,18 +757,35 @@ if __name__ == "__main__":
                         )
                         csv_fallback = output_path.with_suffix(".csv")
                         df.to_csv(csv_fallback, index=False)
-                        log.info("Saved dry run results", path=str(csv_fallback), rows=len(df), columns=list(df.columns))
+                        log.info(
+                            "Saved dry run results",
+                            path=str(csv_fallback),
+                            rows=len(df),
+                            columns=list(df.columns),
+                        )
                     else:
-                        log.info("Saved dry run results", path=str(output_path), rows=len(df), columns=list(df.columns))
+                        log.info(
+                            "Saved dry run results",
+                            path=str(output_path),
+                            rows=len(df),
+                            columns=list(df.columns),
+                        )
                 else:
                     df.to_csv(output_path, index=False)
-                    log.info("Saved dry run results", path=str(output_path), rows=len(df), columns=list(df.columns))
+                    log.info(
+                        "Saved dry run results",
+                        path=str(output_path),
+                        rows=len(df),
+                        columns=list(df.columns),
+                    )
             else:
                 df.to_csv("dry_run_results.csv", index=False)
-                log.info("Saved dry run results to dry_run_results.csv", rows=len(df), columns=list(df.columns))
+                log.info(
+                    "Saved dry run results to dry_run_results.csv",
+                    rows=len(df),
+                    columns=list(df.columns),
+                )
             log.info("Dry run completed", total_rows=len(df))
-
-
 
     if args.make_final_dataframe:
         log.info("Building derivative dataframe", derivatives=args.dataframe_derivatives)
@@ -723,12 +812,31 @@ if __name__ == "__main__":
                     )
                     csv_fallback = output_path.with_suffix(".csv")
                     dataframe.to_csv(csv_fallback, index=False)
-                    log.info("Saved derivative dataframe", path=str(csv_fallback), rows=len(dataframe), columns=list(dataframe.columns))
+                    log.info(
+                        "Saved derivative dataframe",
+                        path=str(csv_fallback),
+                        rows=len(dataframe),
+                        columns=list(dataframe.columns),
+                    )
                 else:
-                    log.info("Saved derivative dataframe", path=str(output_path), rows=len(dataframe), columns=list(dataframe.columns))
+                    log.info(
+                        "Saved derivative dataframe",
+                        path=str(output_path),
+                        rows=len(dataframe),
+                        columns=list(dataframe.columns),
+                    )
             else:
                 dataframe.to_csv(output_path, index=False)
-                log.info("Saved derivative dataframe", path=str(output_path), rows=len(dataframe), columns=list(dataframe.columns))
+                log.info(
+                    "Saved derivative dataframe",
+                    path=str(output_path),
+                    rows=len(dataframe),
+                    columns=list(dataframe.columns),
+                )
         else:
-            log.info("Derivative dataframe built (not saved to disk)", rows=len(dataframe), columns=list(dataframe.columns))
+            log.info(
+                "Derivative dataframe built (not saved to disk)",
+                rows=len(dataframe),
+                columns=list(dataframe.columns),
+            )
             print(dataframe)

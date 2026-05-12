@@ -123,7 +123,12 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
         dims = ["times", "spaces"]
         n_times = mne_object.n_times
         shape = (n_times, len(info_dict["ch_names"]))
-        coords["times"] = {"start": float(mne_object.times[0]), "stop": float(mne_object.times[-1]), "n_times": n_times, "delta": float(mne_object.times[1] - mne_object.times[0])}
+        coords["times"] = {
+            "start": float(mne_object.times[0]),
+            "stop": float(mne_object.times[-1]),
+            "n_times": n_times,
+            "delta": float(mne_object.times[1] - mne_object.times[0]),
+        }
         coords["spaces"] = info_dict["ch_names"]
 
     elif isinstance(mne_object, mne.BaseEpochs):
@@ -131,7 +136,12 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
         n_epochs, n_channels, n_times = mne_object.get_data().shape
         shape = (n_epochs, n_times, n_channels)
         coords["epochs"] = list(range(n_epochs))
-        coords["times"] = {"start": float(mne_object.times[0]), "stop": float(mne_object.times[-1]), "n_times": n_times, "delta": float(mne_object.times[1] - mne_object.times[0])}
+        coords["times"] = {
+            "start": float(mne_object.times[0]),
+            "stop": float(mne_object.times[-1]),
+            "n_times": n_times,
+            "delta": float(mne_object.times[1] - mne_object.times[0]),
+        }
         coords["spaces"] = info_dict["ch_names"]
 
         # Add event info if available
@@ -147,7 +157,11 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
     # Optional: add annotations if present
     if hasattr(mne_object, "annotations") and len(mne_object.annotations) > 0:
         info_dict["annotations"] = [
-            {"onset": float(ann["onset"]), "duration": float(ann["duration"]), "description": ann["description"]}
+            {
+                "onset": float(ann["onset"]),
+                "duration": float(ann["duration"]),
+                "description": ann["description"],
+            }
             for ann in mne_object.annotations
         ]
 
@@ -237,15 +251,21 @@ def meeg_to_xarray(mne_object) -> NodeResult:
             metadata_payload["epoch_metadata"] = mne_object.metadata.to_dict(orient="list")
 
     else:
-        raise TypeError(
-            "Input must be a path to a MEEG file, an MNE Raw, or an MNE Epochs object."
-        )
+        raise TypeError("Input must be a path to a MEEG file, an MNE Raw, or an MNE Epochs object.")
 
     xarray_data = xr.DataArray(data, dims=dims, coords=coords)
     xarray_data.attrs["kind"] = metadata_payload.get("kind")
     xarray_data.attrs["time_unit"] = "s"
 
-    for attr_name in ("sfreq", "n_channels", "n_times", "n_epochs", "line_freq", "lowpass", "highpass"):
+    for attr_name in (
+        "sfreq",
+        "n_channels",
+        "n_times",
+        "n_epochs",
+        "line_freq",
+        "lowpass",
+        "highpass",
+    ):
         value = metadata_payload.get(attr_name)
         if value is not None:
             xarray_data.attrs[attr_name] = value

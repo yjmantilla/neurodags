@@ -690,7 +690,9 @@ def save_dummy_vhdr(fpath: PathLike, dummy_args: dict[str, Any] | None = None) -
     return None
 
 
-def generate_dummy_dataset(data_params: dict[str, Any] | None = None, generation_args: dict[str, Any] | None = None) -> None:
+def generate_dummy_dataset(
+    data_params: dict[str, Any] | None = None, generation_args: dict[str, Any] | None = None
+) -> None:
     """
     Generate a dummy dataset on disk.
 
@@ -771,9 +773,7 @@ def generate_dummy_dataset(data_params: dict[str, Any] | None = None, generation
             tmp_vhdr = Path(td) / f"{dataset_name}_template.vhdr"
             if generation_args is None:
                 generation_args = {"NCHANNELS": 2, "SFREQ": 100.0, "STOP": 10.0, "NUMEVENTS": 5}
-            trio = save_dummy_vhdr(
-                tmp_vhdr, dummy_args=generation_args
-            )
+            trio = save_dummy_vhdr(tmp_vhdr, dummy_args=generation_args)
             if not trio:
                 raise RuntimeError("Failed to create example BrainVision files for dummy dataset.")
             example = trio

@@ -11,6 +11,7 @@ from . import register_node
 
 log = get_logger(__name__)
 
+
 @register_node
 def keep_channels(mne_object, channel_names, save=False) -> NodeResult:
     if isinstance(mne_object, (str, os.PathLike)):
@@ -20,18 +21,19 @@ def keep_channels(mne_object, channel_names, save=False) -> NodeResult:
     mne_object = mne_object.copy().pick(channel_names)
 
     if save:
+
         def writer(path):
             return mne_object.save(path, overwrite=True)
+
     else:
         writer = None
 
-    artifacts = {
-        ".fif": Artifact(item=mne_object, writer=writer)
-    }
+    artifacts = {".fif": Artifact(item=mne_object, writer=writer)}
 
     out = NodeResult(artifacts=artifacts)
 
     return out
+
 
 @register_node
 def basic_preprocessing(
@@ -52,7 +54,6 @@ def basic_preprocessing(
     if isinstance(mne_object, str | os.PathLike):
         mne_object = load_meeg(mne_object)
         log.debug("MNEReport: loaded MNE object from file", input=mne_object)
-
 
     mne_object = mne_object.copy()
 

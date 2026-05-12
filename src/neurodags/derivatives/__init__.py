@@ -65,7 +65,11 @@ def register_derivative(
 
     def decorator(target: DerivativeCallable) -> DerivativeCallable:
         key = name or target.__name__
-        if not override and key in _DERIVATIVE_REGISTRY and _DERIVATIVE_REGISTRY[key].func is not target:
+        if (
+            not override
+            and key in _DERIVATIVE_REGISTRY
+            and _DERIVATIVE_REGISTRY[key].func is not target
+        ):
             raise ValueError(f"Derivative '{key}' is already registered")
         elif override and key in _DERIVATIVE_REGISTRY:
             log.info(f"Overriding existing derivative registration for '{key}'")

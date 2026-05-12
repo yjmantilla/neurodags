@@ -97,7 +97,12 @@ def _build_node(
 
 
 _build_node(app_entropy, name="antropy_app_entropy")
-_build_node(hjorth_params, name="antropy_hjorth_params", default_result_dim=_HJORTH_RESULT_DIM, default_result_coords=_HJORTH_RESULT_LABELS)
+_build_node(
+    hjorth_params,
+    name="antropy_hjorth_params",
+    default_result_dim=_HJORTH_RESULT_DIM,
+    default_result_coords=_HJORTH_RESULT_LABELS,
+)
 _build_node(lziv_complexity, name="antropy_lziv_complexity")
 _build_node(num_zerocross, name="antropy_num_zerocross")
 _build_node(perm_entropy, name="antropy_perm_entropy")
@@ -110,4 +115,3 @@ _build_node(katz_fd, name="antropy_katz_fd")
 _build_node(petrosian_fd, name="antropy_petrosian_fd")
 
 __all__: list[str] = []  # nodes registered via _build_node; no module-level names exported
-

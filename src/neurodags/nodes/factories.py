@@ -69,7 +69,7 @@ class _FactoryError(ValueError):
     """Internal helper error for consistent exception types."""
 
 
-@dataclass(slots=False) # break parallelization?
+@dataclass(slots=False)  # break parallelization?
 class _SliceParameterCache:
     """Cached view of a per-slice argument or keyword value."""
 
@@ -96,7 +96,7 @@ class _SliceParameterCache:
         }
 
 
-@dataclass(slots=False) # Breaks parallelization?
+@dataclass(slots=False)  # Breaks parallelization?
 class _ArgumentSpec:
     """Descriptor for positional/keyword arguments resolved per slice."""
 
@@ -369,7 +369,9 @@ def _prepare_argument_specs(
             arg_specs.append(_ArgumentSpec(name=None, provider=None, constant_value=value))
         else:
             has_per_slice = True
-            arg_specs.append(_ArgumentSpec(name=provider.name, provider=provider, constant_value=None))
+            arg_specs.append(
+                _ArgumentSpec(name=provider.name, provider=provider, constant_value=None)
+            )
             detail = provider.describe()
             detail["position"] = idx
             arg_details.append(detail)
@@ -645,7 +647,9 @@ def _iterative_apply(
 
         if not first_checked:
             if scalar_flag != is_scalar:
-                raise _FactoryError("Pure function returned inconsistent scalar/non-scalar outputs.")
+                raise _FactoryError(
+                    "Pure function returned inconsistent scalar/non-scalar outputs."
+                )
             if not scalar_flag and result_array.shape != first_array.shape:
                 raise _FactoryError("Pure function returned sequences of varying length.")
             first_checked = True
@@ -754,8 +758,8 @@ def apply_1d(
 
     data_xr = _ensure_dataarray(data_like, context="apply_1d")
     other_dims = [d for d in data_xr.dims if d != dim]
-    #data_xr_orig_coords = data_xr.coords.copy(deep=True)
-    #data_xr_orig_dims = data_xr.dims.copy()
+    # data_xr_orig_coords = data_xr.coords.copy(deep=True)
+    # data_xr_orig_dims = data_xr.dims.copy()
 
     arg_specs, kwarg_specs, per_slice_details, has_per_slice = _prepare_argument_specs(
         args,
@@ -821,8 +825,6 @@ def apply_1d(
 
     result_da.attrs["metadata"] = json.dumps(combined_metadata, indent=2, default=_json_safe)
 
-
-
     return result_da
 
 
@@ -868,5 +870,6 @@ def xarray_factory(
         )
     }
     return NodeResult(artifacts=artifacts)
+
 
 __all__ = ["apply_1d", "xarray_factory"]

@@ -9,6 +9,7 @@ from neurodags.nodes import register_node
 
 log = get_logger(__name__)
 
+
 @register_node(name="binarize_with_median", override=True)
 def binarize_with_median(data: xr.DataArray, dim: str) -> xr.DataArray:
     """
@@ -41,7 +42,12 @@ def binarize_with_median(data: xr.DataArray, dim: str) -> xr.DataArray:
     median_values = data.median(dim=dim, keep_attrs=True)
     binarized_data = (data > median_values).astype(int)
 
-    return NodeResult(artifacts={".nc": Artifact(item=binarized_data, writer=lambda path: binarized_data.to_netcdf(path))})
+    return NodeResult(
+        artifacts={
+            ".nc": Artifact(item=binarized_data, writer=lambda path: binarized_data.to_netcdf(path))
+        }
+    )
+
 
 @register_node(name="mean_across_dimension", override=True)
 def mean_across_dimension(xarray_data, dim):
@@ -65,7 +71,6 @@ def mean_across_dimension(xarray_data, dim):
     if isinstance(xarray_data, (str, os.PathLike)):
         xarray_data = xr.open_dataarray(xarray_data)
         log.debug("Loaded xarray DataArray from file", input=xarray_data)
-
 
     if not isinstance(xarray_data, xr.DataArray):
         raise ValueError("Input must be an xarray DataArray.")
@@ -125,7 +130,9 @@ def extract_data_var(dataset_like, data_var: str):
     else:
         raise ValueError("dataset_like must be a NodeResult, Dataset, DataArray, or path.")
 
-    artifacts = {".nc": Artifact(item=target_array, writer=lambda path: target_array.to_netcdf(path))}
+    artifacts = {
+        ".nc": Artifact(item=target_array, writer=lambda path: target_array.to_netcdf(path))
+    }
     return NodeResult(artifacts=artifacts)
 
 
@@ -195,6 +202,7 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
     artifacts = {".nc": Artifact(item=sliced_data, writer=lambda path: sliced_data.to_netcdf(path))}
     return NodeResult(artifacts=artifacts)
 
+
 @register_node(name="aggregate_across_dimension", override=True)
 def aggregate_across_dimension(xarray_data, dim, operation="mean", args=None):
     """
@@ -240,18 +248,22 @@ def aggregate_across_dimension(xarray_data, dim, operation="mean", args=None):
     aggregated_data = agg_func(dim=dim, **args)
 
     # return the new xarray in ncdf4 format
-    artifacts = {".nc": Artifact(item=aggregated_data, writer=lambda path: aggregated_data.to_netcdf(path))}
+    artifacts = {
+        ".nc": Artifact(item=aggregated_data, writer=lambda path: aggregated_data.to_netcdf(path))
+    }
     return NodeResult(artifacts=artifacts)
+
 
 if __name__ == "__main__":
     import numpy as np
+
     # Example usage
     # Example usage
-    data = xr.DataArray(np.random.rand(4, 3, 2), dims=("times", "channel", "frequency"), coords={
-        "times": np.arange(4),
-        "channel": ["Cz", "Pz", "Fz"],
-        "frequency": [10, 20]
-    })
+    data = xr.DataArray(
+        np.random.rand(4, 3, 2),
+        dims=("times", "channel", "frequency"),
+        coords={"times": np.arange(4), "channel": ["Cz", "Pz", "Fz"], "frequency": [10, 20]},
+    )
     result = mean_across_dimension(data, dim="times")
     print(result)
 

@@ -10,7 +10,7 @@ from neurodags.loaders import load_meeg
 from neurodags.nodes.descriptive import meeg_to_xarray
 
 # ---------- Load Data ----------
-filename = sys.argv[1]   # <--- uncomment to accept from command line
+filename = sys.argv[1]  # <--- uncomment to accept from command line
 
 
 if filename.endswith(".fif"):
@@ -29,6 +29,7 @@ coords = {dim: ds.coords[dim].values for dim in dims}
 # ---------- Build App ----------
 app = Dash(__name__)
 
+
 def make_dropdown(name, options):
     return dcc.Dropdown(
         id=f"dropdown-{name}",
@@ -37,78 +38,78 @@ def make_dropdown(name, options):
         clearable=False,
     )
 
+
 # Dropdowns for dimension values
 value_dropdowns = []
 for dim in dims:
     value_dropdowns.append(html.Label(dim))
     value_dropdowns.append(make_dropdown(dim, coords[dim]))
 
-app.layout = html.Div([
-    html.H2(f"Explorer for {filename}"),
-    html.Div(value_dropdowns, style={"marginBottom": "20px"}),
-
-    html.Label("X-axis dimension"),
-    dcc.Dropdown(
-        id="x-dim",
-        options=[{"label": d, "value": d} for d in dims],
-        value=dims[-1],
-        clearable=False
-    ),
-
-    html.Label("Y-axis dimension (optional)"),
-    dcc.Dropdown(
-        id="y-dim",
-        options=[{"label": "None", "value": "none"}] + [{"label": d, "value": d} for d in dims],
-        value="none",
-        clearable=False
-    ),
-
-    html.Label("Plot type"),
-    dcc.Dropdown(
-        id="plot-type",
-        options=[
-            {"label": "Line", "value": "line"},
-            {"label": "Scatter (points)", "value": "scatter"},
-            {"label": "Bar", "value": "bar"},
-            {"label": "Heatmap (2D only)", "value": "heatmap"},
-        ],
-        value="line",
-        clearable=False
-    ),
-
-    html.Label("X-axis transform"),
-    dcc.Dropdown(
-        id="x-transform",
-        options=[
-            {"label": "None", "value": "none"},
-            {"label": "Log10", "value": "log10"},
-            {"label": "Square", "value": "square"},
-            {"label": "Log20", "value": "log20"}
-        ],
-        value="none",
-        clearable=False
-    ),
-
-    html.Label("Y-axis transform"),
-    dcc.Dropdown(
-        id="y-transform",
-        options=[
-            {"label": "None", "value": "none"},
-            {"label": "Log10", "value": "log10"},
-            {"label": "Square", "value": "square"},
-            {"label": "Log20", "value": "log20"}
-        ],
-        value="none",
-        clearable=False
-    ),
-
-    dcc.Graph(id="plot"),
-
-    html.H3("Debug info"),
-    html.Pre(id="debug-output", style={"whiteSpace": "pre-wrap", "border": "1px solid #ccc", "padding": "10px"})
-])
+app.layout = html.Div(
+    [
+        html.H2(f"Explorer for {filename}"),
+        html.Div(value_dropdowns, style={"marginBottom": "20px"}),
+        html.Label("X-axis dimension"),
+        dcc.Dropdown(
+            id="x-dim",
+            options=[{"label": d, "value": d} for d in dims],
+            value=dims[-1],
+            clearable=False,
+        ),
+        html.Label("Y-axis dimension (optional)"),
+        dcc.Dropdown(
+            id="y-dim",
+            options=[{"label": "None", "value": "none"}] + [{"label": d, "value": d} for d in dims],
+            value="none",
+            clearable=False,
+        ),
+        html.Label("Plot type"),
+        dcc.Dropdown(
+            id="plot-type",
+            options=[
+                {"label": "Line", "value": "line"},
+                {"label": "Scatter (points)", "value": "scatter"},
+                {"label": "Bar", "value": "bar"},
+                {"label": "Heatmap (2D only)", "value": "heatmap"},
+            ],
+            value="line",
+            clearable=False,
+        ),
+        html.Label("X-axis transform"),
+        dcc.Dropdown(
+            id="x-transform",
+            options=[
+                {"label": "None", "value": "none"},
+                {"label": "Log10", "value": "log10"},
+                {"label": "Square", "value": "square"},
+                {"label": "Log20", "value": "log20"},
+            ],
+            value="none",
+            clearable=False,
+        ),
+        html.Label("Y-axis transform"),
+        dcc.Dropdown(
+            id="y-transform",
+            options=[
+                {"label": "None", "value": "none"},
+                {"label": "Log10", "value": "log10"},
+                {"label": "Square", "value": "square"},
+                {"label": "Log20", "value": "log20"},
+            ],
+            value="none",
+            clearable=False,
+        ),
+        dcc.Graph(id="plot"),
+        html.H3("Debug info"),
+        html.Pre(
+            id="debug-output",
+            style={"whiteSpace": "pre-wrap", "border": "1px solid #ccc", "padding": "10px"},
+        ),
+    ]
+)
 
 # ---------- Utils ----------
+
 
 def safe_sel(arr, slice_dict):
     for dim, val in slice_dict.items():
@@ -118,6 +119,7 @@ def safe_sel(arr, slice_dict):
         else:
             arr = arr.sel({dim: val})
     return arr
+
 
 def apply_transform(data, transform):
     # Convert to numpy array
@@ -135,25 +137,30 @@ def apply_transform(data, transform):
         return np.log10(np.where(arr**2 > 0, arr**2, np.nan))  # log10(x^2)
     return arr
 
+
 # ---------- Callbacks ----------
 
+
 @app.callback(
-    [Output("plot", "figure"),
-     Output("debug-output", "children")],
-    [Input(f"dropdown-{dim}", "value") for dim in dims] +
-    [Input("x-dim", "value"),
-     Input("y-dim", "value"),
-     Input("plot-type", "value"),
-     Input("x-transform", "value"),
-     Input("y-transform", "value")]
+    [Output("plot", "figure"), Output("debug-output", "children")],
+    [Input(f"dropdown-{dim}", "value") for dim in dims]
+    + [
+        Input("x-dim", "value"),
+        Input("y-dim", "value"),
+        Input("plot-type", "value"),
+        Input("x-transform", "value"),
+        Input("y-transform", "value"),
+    ],
 )
 def update_plot(*vals):
-    values = vals[:len(dims)]
-    xdim, ydim, plot_type, x_transform, y_transform = vals[len(dims):]
+    values = vals[: len(dims)]
+    xdim, ydim, plot_type, x_transform, y_transform = vals[len(dims) :]
     if ydim == "none":
         ydim = None
     # freeze all dims except xdim, ydim
-    slice_dict = {dim: val for dim, val in zip(dims, values, strict=False) if dim not in (xdim, ydim)}
+    slice_dict = {
+        dim: val for dim, val in zip(dims, values, strict=False) if dim not in (xdim, ydim)
+    }
     arr = safe_sel(ds, slice_dict)
 
     fig = go.Figure()
@@ -186,7 +193,9 @@ def update_plot(*vals):
     else:
         fig.add_annotation(
             text=f"Unsupported shape after slicing: {arr.shape}, ndim={arr.ndim}",
-            x=0.5, y=0.5, showarrow=False
+            x=0.5,
+            y=0.5,
+            showarrow=False,
         )
 
     debug_info = {
@@ -204,6 +213,7 @@ def update_plot(*vals):
     }
 
     return fig, json.dumps(debug_info, indent=2)
+
 
 # ---------- Launch ----------
 if __name__ == "__main__":

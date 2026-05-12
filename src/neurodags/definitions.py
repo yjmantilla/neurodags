@@ -10,6 +10,7 @@ RulesLike = Mapping[str, Any] | PathLike | IO[str]
 
 class DatasetConfig(BaseModel):
     """Configuration for a dataset."""
+
     name: str
     file_pattern: str | dict[str, str]  # path or mountpoint mapping
     exclude_pattern: str | None = None
@@ -22,12 +23,14 @@ class DatasetConfig(BaseModel):
 
 class Artifact(NamedTuple):
     """An artifact produced by a node, with its associated writer."""
+
     item: Any
     writer: Callable[[str], None]  # how to save it
 
 
 class NodeResult(NamedTuple):
     """The result of a node execution."""
+
     artifacts: dict[str, Artifact]  # Objects with writers
 
 
