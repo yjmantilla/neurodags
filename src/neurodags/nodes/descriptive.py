@@ -1,14 +1,15 @@
 import json
 import os
+
 import mne
 import xarray as xr
 
 from neurodags.definitions import Artifact, NodeResult
 from neurodags.loaders import load_meeg
 from neurodags.loggers import get_logger
-from . import register_node
-
 from neurodags.writers import _json_safe
+
+from . import register_node
 
 log = get_logger(__name__)
 
@@ -122,7 +123,7 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
         dims = ["times", "spaces"]
         n_times = mne_object.n_times
         shape = (n_times, len(info_dict["ch_names"]))
-        coords["times"] = {'start': float(mne_object.times[0]), 'stop': float(mne_object.times[-1]), 'n_times': n_times, 'delta': float(mne_object.times[1] - mne_object.times[0])}
+        coords["times"] = {"start": float(mne_object.times[0]), "stop": float(mne_object.times[-1]), "n_times": n_times, "delta": float(mne_object.times[1] - mne_object.times[0])}
         coords["spaces"] = info_dict["ch_names"]
 
     elif isinstance(mne_object, mne.BaseEpochs):
@@ -130,7 +131,7 @@ def extract_meeg_metadata(mne_object) -> NodeResult:
         n_epochs, n_channels, n_times = mne_object.get_data().shape
         shape = (n_epochs, n_times, n_channels)
         coords["epochs"] = list(range(n_epochs))
-        coords["times"] = {'start': float(mne_object.times[0]), 'stop': float(mne_object.times[-1]), 'n_times': n_times, 'delta': float(mne_object.times[1] - mne_object.times[0])}
+        coords["times"] = {"start": float(mne_object.times[0]), "stop": float(mne_object.times[-1]), "n_times": n_times, "delta": float(mne_object.times[1] - mne_object.times[0])}
         coords["spaces"] = info_dict["ch_names"]
 
         # Add event info if available

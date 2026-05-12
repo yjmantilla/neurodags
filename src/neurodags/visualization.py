@@ -1,25 +1,27 @@
-import sys
-import xarray as xr
-import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output
-import webbrowser
 import json
+import sys
+
 import numpy as np
+import plotly.graph_objects as go
+import xarray as xr
+from dash import Dash, Input, Output, dcc, html
+
 from neurodags.loaders import load_meeg
 from neurodags.nodes.descriptive import meeg_to_xarray
+
 # ---------- Load Data ----------
 filename = sys.argv[1]   # <--- uncomment to accept from command line
 
 
-if filename.endswith('.fif'):
+if filename.endswith(".fif"):
     meeg = load_meeg(filename)
-    ds = meeg_to_xarray(meeg).artifacts['.nc'].item
+    ds = meeg_to_xarray(meeg).artifacts[".nc"].item
 
-if filename.endswith('.nc'):
+if filename.endswith(".nc"):
     try:
         ds = xr.open_dataarray(filename)
     except Exception as e:
-        raise ValueError(f"Failed to open {filename} as xarray DataArray: {e}")
+        raise ValueError(f"Failed to open {filename} as xarray DataArray: {e}") from e
 
 dims = list(ds.dims)
 coords = {dim: ds.coords[dim].values for dim in dims}
@@ -151,7 +153,7 @@ def update_plot(*vals):
     if ydim == "none":
         ydim = None
     # freeze all dims except xdim, ydim
-    slice_dict = {dim: val for dim, val in zip(dims, values) if dim not in (xdim, ydim)}
+    slice_dict = {dim: val for dim, val in zip(dims, values, strict=False) if dim not in (xdim, ydim)}
     arr = safe_sel(ds, slice_dict)
 
     fig = go.Figure()

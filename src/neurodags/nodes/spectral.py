@@ -16,11 +16,10 @@ from fooof import FOOOF
 from neurodags.definitions import Artifact, NodeResult
 from neurodags.loaders import load_meeg
 from neurodags.loggers import get_logger
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from neurodags.utils import _resolve_eval_strings
+from neurodags.writers import _json_safe
 
 from . import register_node
-from neurodags.writers import _json_safe
-from neurodags.utils import _resolve_eval_strings
 
 log = get_logger(__name__)
 
@@ -233,7 +232,7 @@ def mne_spectrum_array(
     sample_dims = list(base_dims)
     psd_dims = list(sample_dims)
     psd_coords = dict(base_coords)
-    dimension_origins = {dim: "input" for dim in sample_dims}
+    dimension_origins = dict.fromkeys(sample_dims, "input")
 
     dimension_details: list[dict[str, Any]] = []
     for idx, dim in enumerate(sample_dims):
@@ -318,7 +317,7 @@ def mne_spectrum_array(
         "sampling_frequency": sfreq,
         "input": {
             "shape": [int(v) for v in data_values.shape],
-            "dims": sample_dims + [time_dim],
+            "dims": [*sample_dims, time_dim],
         },
         "output": {
             "shape": [int(v) for v in psds.shape],
@@ -368,7 +367,7 @@ def mne_spectrum_array(
     artifacts: dict[str, Artifact] = {
         ".nc": Artifact(
             item=psd_dataset,
-            writer=lambda path: psd_dataset.to_netcdf(path, engine='netcdf4', format='NETCDF4'),
+            writer=lambda path: psd_dataset.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
         ),
     }
 
@@ -475,14 +474,14 @@ def fooof(
                 available=current_res,
             )
         else:
-            downsample_step = max(1, int(math.ceil(freq_res / current_res)))
+            downsample_step = max(1, math.ceil(freq_res / current_res))
 
     freq_values_downsampled = freq_values[::downsample_step]
     if freq_values_downsampled.size == 0:
         raise ValueError("Downsampling removed all frequency points; check freq_res setting.")
 
     other_dims = [dim for dim in psd_xr.dims if dim != freq_dim]
-    transposed = psd_xr.transpose(*(other_dims + [freq_dim]))
+    transposed = psd_xr.transpose(*([*other_dims, freq_dim]))
     psd_values = np.asarray(transposed.values)
     if psd_values.ndim == 1:
         psd_values = psd_values[np.newaxis, :]
@@ -543,7 +542,7 @@ def fooof(
             )
             payload = buffer.getvalue() or json.dumps({}, indent=2)
             fooof_payloads[flat_idx] = payload
-        except Exception as exc:  # noqa: BLE001 - domain specific fallbacks are required
+        except Exception as exc:
             duration = time.perf_counter() - start
             timings[flat_idx] = duration
             fooof_payloads[flat_idx] = fallback_value
@@ -685,7 +684,7 @@ def fooof_scalars(
             fm.load(io.StringIO(payload))
             if not fm.has_model:
                 raise ValueError("FOOOF object missing model")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("Failed to load FOOOF payload for scalars", index=idx, error=str(exc))
             invalid_indices.append(idx)
             continue
@@ -719,19 +718,19 @@ def fooof_scalars(
             scalar_arrays["aperiodic_params"][idx] = ap_params.tolist()
 
             if ap_params.size == 2:
-                scalar_arrays['aperiodic_offset'][idx] = float(ap_params[0])
-                scalar_arrays['aperiodic_knee'][idx] = np.nan
-                scalar_arrays['aperiodic_exponent'][idx] = float(ap_params[1])
+                scalar_arrays["aperiodic_offset"][idx] = float(ap_params[0])
+                scalar_arrays["aperiodic_knee"][idx] = np.nan
+                scalar_arrays["aperiodic_exponent"][idx] = float(ap_params[1])
             else:
-                scalar_arrays['aperiodic_offset'][idx] = float(ap_params[0])
-                scalar_arrays['aperiodic_knee'][idx] = float(ap_params[1])
-                scalar_arrays['aperiodic_exponent'][idx] = float(ap_params[2])
+                scalar_arrays["aperiodic_offset"][idx] = float(ap_params[0])
+                scalar_arrays["aperiodic_knee"][idx] = float(ap_params[1])
+                scalar_arrays["aperiodic_exponent"][idx] = float(ap_params[2])
 
             scalar_arrays["r_squared"][idx] = float(
                 getattr(fm, "r_squared_", getattr(fm, "r_squared", np.nan))
             )
             scalar_arrays["error"][idx] = float(getattr(fm, "error_", getattr(fm, "error", np.nan)))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("Failed to compute FOOOF scalar", index=idx, error=str(exc))
             invalid_indices.append(idx)
             scalar_arrays["aperiodic_params"][idx] = None
@@ -872,7 +871,7 @@ def fooof_component(
             fm.load(io.StringIO(payload))
             if not fm.has_model:
                 raise ValueError("FOOOF object missing model")
-        except Exception as exc:  # noqa: BLE001 - domain specific fallbacks are required
+        except Exception as exc:
             log.warning("Failed to load FOOOF payload", index=idx, error=str(exc))
             invalid_indices.append(idx)
             continue
@@ -955,14 +954,14 @@ def fooof_component(
             component_arrays["aperiodic"][idx] = aperiodic
             component_arrays["periodic"][idx] = periodic
             component_arrays["residual"][idx] = residual
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("Failed to compute FOOOF component", index=idx, error=str(exc))
             invalid_indices.append(idx)
             for key in ("aperiodic", "periodic", "residual"):
                 component_arrays[key][idx] = np.nan
 
-    output_shape = tuple(other_shape + [freq_len]) if other_dims else (freq_len,)
-    output_dims = other_dims + [freq_dim]
+    output_shape = (*other_shape, freq_len) if other_dims else (freq_len,)
+    output_dims = [*other_dims, freq_dim]
 
     coords: dict[str, Any] = {}
     for dim in other_dims:
@@ -970,7 +969,6 @@ def fooof_component(
         coords[dim] = coord.values if coord is not None else np.arange(fooof_xr.sizes[dim])
     coords[freq_dim] = freq_values_model
 
-    suffix = "linear" if space == "linear" else "log"
     # name_map = {
     #     "aperiodic": f"fooof_aperiodic_{suffix}",
     #     "periodic": f"fooof_periodic_{suffix}",
@@ -978,7 +976,7 @@ def fooof_component(
     # }
     name_map = {
         "aperiodic": "aperiodic",
-        "periodic": "periodic", 
+        "periodic": "periodic",
         "residual": "residual",
     }
 

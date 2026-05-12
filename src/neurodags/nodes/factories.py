@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
-import time
+from typing import TYPE_CHECKING, Any
 
 try:  # pragma: no cover - optional dependency
     import mne
@@ -33,14 +34,13 @@ except ImportError:  # pragma: no cover - optional dependency
 
 import numpy as np
 import xarray as xr
-import time
 
 from neurodags.definitions import Artifact, NodeResult
+from neurodags.loaders import load_meeg
 from neurodags.loggers import get_logger
 from neurodags.nodes import register_node
 from neurodags.utils import _resolve_eval_strings
 from neurodags.writers import _json_safe
-from neurodags.loaders import load_meeg
 
 log = get_logger(__name__)
 
@@ -196,11 +196,11 @@ def _ensure_dataarray(data_like: DataLike, *, context: str) -> xr.DataArray:
         return xr.DataArray(data_like, dims=dims)
 
     if isinstance(data_like, (str, os.PathLike)):
-        if '.nc' in str(data_like).lower():
+        if ".nc" in str(data_like).lower():
             path = os.fspath(data_like)
             log.debug("Loading DataArray from path", path=path)
             return xr.load_dataarray(path)
-        elif '.fif' in str(data_like).lower() and mne is not None:
+        elif ".fif" in str(data_like).lower() and mne is not None:
             log.debug("Loading MNE Raw from path", path=os.fspath(data_like))
             data_like = load_meeg(data_like)
         else:
@@ -266,7 +266,7 @@ def _align_candidate_dims(
         return candidate
 
     if len(candidate.dims) == len(other_dims):
-        rename_map = {old: new for old, new in zip(candidate.dims, other_dims)}
+        rename_map = dict(zip(candidate.dims, other_dims, strict=False))
         renamed = candidate.rename(rename_map)
         if set(renamed.dims).issubset(allowed):
             return renamed
@@ -451,7 +451,7 @@ def _vectorised_apply(
                 f"Input dimension '{axis}' has size zero; cannot evaluate pure function across slices."
             )
 
-    selector = {d: 0 for d in other_dims}
+    selector = dict.fromkeys(other_dims, 0)
     sample_vector = np.asarray(data_xr.isel(selector).data)
     if sample_vector.ndim != 1:
         sample_vector = sample_vector.reshape(-1)
@@ -580,7 +580,7 @@ def _iterative_apply(
 
     input_dims = list(data_xr.dims)
     other_dims = [d for d in input_dims if d != dim]
-    ordered_dims = other_dims + [dim]
+    ordered_dims = [*other_dims, dim]
     target_length = data_xr.sizes[dim]
 
     arr = data_xr.transpose(*ordered_dims).values
@@ -635,7 +635,7 @@ def _iterative_apply(
         index_iter = iter([()])
 
     first_checked = False
-    for flat_idx, (base_index, vector) in enumerate(zip(index_iter, flat)):
+    for flat_idx, (base_index, vector) in enumerate(zip(index_iter, flat, strict=False)):
         call_args = tuple(spec.value_at(flat_idx) for spec in arg_specs)
         call_kwargs = {key: spec.value_at(flat_idx) for key, spec in kwarg_specs.items()}
         start = time.perf_counter()
@@ -650,7 +650,7 @@ def _iterative_apply(
                 raise _FactoryError("Pure function returned sequences of varying length.")
             first_checked = True
 
-        index_by_dim = {name: idx for name, idx in zip(other_dims, base_index)}
+        index_by_dim = dict(zip(other_dims, base_index, strict=False))
         target_index: list[Any] = []
         for dim_name in target_dims:
             if dim_name == result_dim_name:

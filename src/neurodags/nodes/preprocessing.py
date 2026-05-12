@@ -20,7 +20,8 @@ def keep_channels(mne_object, channel_names, save=False) -> NodeResult:
     mne_object = mne_object.copy().pick(channel_names)
 
     if save:
-        writer = lambda path: mne_object.save(path, overwrite=True)
+        def writer(path):
+            return mne_object.save(path, overwrite=True)
     else:
         writer = None
 

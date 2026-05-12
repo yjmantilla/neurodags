@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any
 
 try:
     import numpy as np
@@ -22,11 +22,15 @@ import yaml
 from neurodags.definitions import NodeResult
 from neurodags.derivatives import (
     get_derivative as get_derivative_definition,
+)
+from neurodags.derivatives import (
     list_derivatives as list_derivative_definitions,
+)
+from neurodags.derivatives import (
     register_derivative_with_name,
 )
-from neurodags.nodes import get_node
 from neurodags.loggers import get_logger
+from neurodags.nodes import get_node
 from neurodags.utils import snake_to_camel
 
 log = get_logger(__name__)
@@ -53,9 +57,9 @@ def _resolve_refs(obj: Any, store: dict[int, Any]) -> Any:
     return obj
 
 
-def _collect_id_refs(obj: Any) -> Set[int]:
+def _collect_id_refs(obj: Any) -> set[int]:
     """Find every `id.<n>` string embedded in the given object."""
-    refs: Set[int] = set()
+    refs: set[int] = set()
     if isinstance(obj, str):
         match = _ID_REF.match(obj)
         if match:
@@ -95,7 +99,7 @@ def _prep_kwargs(raw_kwargs: dict[str, Any], store: dict[int, Any]) -> dict[str,
 
 def _topo_order(nodes: list[dict[str, Any]]) -> list[int]:
     steps = {s["id"]: s for s in nodes}
-    dependencies: dict[int, Set[int]] = {}
+    dependencies: dict[int, set[int]] = {}
     for sid, step in steps.items():
         declared = step.get("depends_on") or []
         deps = set(declared)
@@ -194,7 +198,7 @@ def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
 
 def _artifact_candidates_for(prefix: str) -> list[str]:
     #TODO: How to add option to skip derivatives that previously failed? (.error files)
-    return [x for x in sorted(glob.glob(prefix + ".*")) if not x.endswith('.error')]
+    return [x for x in sorted(glob.glob(prefix + ".*")) if not x.endswith(".error")]
 
 
 class _MissingPrecomputedArtifacts(RuntimeError):
@@ -218,7 +222,7 @@ def run_derivative(
     dataset_config: Any = None,
     mount_point: Path | None = None,
     dry_run: bool = False,
-) -> NodeResult | Dict[str, Any]:
+) -> NodeResult | dict[str, Any]:
     """
     Evaluate (or dry-run) a derivative on a single file.
 
@@ -238,7 +242,7 @@ def run_derivative(
 
     store: dict[int, Any] = {}
     last_result: NodeResult | None = None
-    plan: List[Dict[str, Any]] = [] if dry_run else None
+    plan: list[dict[str, Any]] = [] if dry_run else None
 
     def _record(**kwargs):
         if plan is not None:
@@ -300,7 +304,7 @@ def run_derivative(
                 candidates = [p for p in candidates if p.endswith("." + ext)]
 
             if dry_run:
-                entry: Dict[str, Any] = {
+                entry: dict[str, Any] = {
                     "id": sid,
                     "kind": "derivative",
                     "name": derivative_ref,
@@ -432,7 +436,7 @@ def run_derivative(
                         error_path = final_prefix + ".error"
                         with open(error_path, "w", encoding="utf-8") as ef:
                             ef.write(
-                                f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{str(e)}\n"
+                                f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{e!s}\n"
                             )
                         log.info("Wrote error marker file", path=error_path)
                     except Exception as ee:
@@ -632,7 +636,7 @@ def _simplify_artifact_payload(
 def _load_from_path(path: Path, *, suffix: str) -> Any:
     try:
         if suffix.endswith(".json"):
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, encoding="utf-8") as handle:
                 return json.load(handle)
         if suffix.endswith(".nc") and xr is not None:
             try:
@@ -673,7 +677,7 @@ def _flatten_dataarray_payload(
     flattened: dict[str, Any] = {}
     for index_tuple in index_iterator:
         dims_with_values = []
-        for dim, idx in zip(dims, index_tuple):
+        for dim, idx in zip(dims, index_tuple, strict=False):
             coord_value = None
             if dim in data_array.indexes:
                 try:
@@ -736,16 +740,16 @@ def _format_coord_value(value: Any) -> str:
             value = value.item()
         except Exception:
             pass
-    text = "NA" if value is None else str(value)
+    "NA" if value is None else str(value)
     #sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
     #sanitized = sanitized.strip("-")
     value = str(value)
 
     if isinstance(value, str):
-        value = value.replace('-', '~')
-        value = value.replace('_', '|')
-        value = value.replace('@', '$')
-        value = value.replace(',', '.')
+        value = value.replace("-", "~")
+        value = value.replace("_", "|")
+        value = value.replace("@", "$")
+        value = value.replace(",", ".")
     sanitized = value
 
     return sanitized or "NA"
@@ -776,7 +780,7 @@ def _simplify_value(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_simplify_value(v) for v in value]
 
-    if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+    if hasattr(value, "to_dict") and callable(value.to_dict):
         try:
             return _simplify_value(value.to_dict())
         except Exception:

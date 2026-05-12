@@ -1,16 +1,11 @@
-import json
 import os
 
-import mne
-
-from neurodags.definitions import Artifact, NodeResult, PathLike
-from neurodags.loggers import get_logger
-from neurodags.writers import save_dict_to_json
-
-from neurodags.nodes import register_node
-import xarray as xr
 import numpy as np
+import xarray as xr
 
+from neurodags.definitions import Artifact, NodeResult
+from neurodags.loggers import get_logger
+from neurodags.nodes import register_node
 
 log = get_logger(__name__)
 
@@ -38,7 +33,7 @@ def binarize_with_median(data: xr.DataArray, dim: str) -> xr.DataArray:
             log.debug("Loaded xarray DataArray from file", input=data)
         except Exception as e:
             log.error("Failed to load xarray DataArray from file", input=data, error=e)
-            raise ValueError("Failed to load xarray DataArray from file")
+            raise ValueError("Failed to load xarray DataArray from file") from e
 
     if not isinstance(data, xr.DataArray):
         raise ValueError("Input must be an xarray DataArray.")
@@ -66,7 +61,6 @@ def mean_across_dimension(xarray_data, dim):
         A derivative result containing the mean as a netcdf4 artifact.
     """
     import xarray as xr
-    import numpy as np
 
     if isinstance(xarray_data, (str, os.PathLike)):
         xarray_data = xr.open_dataarray(xarray_data)
@@ -202,7 +196,7 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
     return NodeResult(artifacts=artifacts)
 
 @register_node(name="aggregate_across_dimension", override=True)
-def aggregate_across_dimension(xarray_data, dim, operation='mean', args=None):
+def aggregate_across_dimension(xarray_data, dim, operation="mean", args=None):
     """
     Aggregate data across a specified dimension of an xarray DataArray using a given operation.
 
@@ -262,7 +256,7 @@ if __name__ == "__main__":
     print(result)
 
     # test aggregate
-    result_agg = aggregate_across_dimension(data, dim="channel", operation='sum')
+    result_agg = aggregate_across_dimension(data, dim="channel", operation="sum")
     print(result_agg)
 
     # test slice

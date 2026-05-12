@@ -5,8 +5,8 @@ while collecting per-slice metadata and optional Matplotlib figures returned by
 ``neurokit2`` routines.  Results are packaged into an ``xarray.Dataset`` that
 contains:
 
-* ``value`` – the direct numerical output of the ``neurokit2`` function,
-* ``metadata`` – JSON-serialisable metadata associated with each slice, and
+* ``value`` - the direct numerical output of the ``neurokit2`` function,
+* ``metadata`` - JSON-serialisable metadata associated with each slice, and
 * optional ``figure_*`` variables that hold the encoded Matplotlib output.
 """
 
@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
-import matplotlib.pyplot as plt
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
 matplotlib.use("Agg", force=True) # avoid GUI backends for figure generation
 
 try:  # pragma: no cover - optional dependency guidance
@@ -39,7 +41,6 @@ from neurodags.definitions import Artifact, NodeResult
 from neurodags.nodes import register_node
 from neurodags.nodes.factories import apply_1d
 from neurodags.writers import _json_safe
-
 
 FigureEncoding = str | None
 CallableLike = Callable[[np.ndarray], Any]
@@ -203,14 +204,14 @@ def _build_metadata_array(
         max_length = 1
 
     flat_array = np.array(flat_rows, dtype=f"<U{max_length}")
-    reshaped = flat_array.reshape(value_da.shape + (len(ordered_keys),))
+    reshaped = flat_array.reshape((*value_da.shape, len(ordered_keys)))
 
     coords = {name: value_da.coords[name] for name in value_da.coords}
     coords["metadata_fields"] = list(ordered_keys)
 
     metadata_da = xr.DataArray(
         reshaped,
-        dims=value_da.dims + ("metadata_fields",),
+        dims=(*value_da.dims, "metadata_fields"),
         coords=coords,
     )
     metadata_da.attrs["metadata_keys"] = json.dumps(ordered_keys)
@@ -237,12 +238,12 @@ def _build_figure_dataarrays(
                 payload if payload is not None else np.zeros(png_len, dtype=np.uint8)
                 for payload in png_payloads
             ])
-            reshaped = stacked.reshape(value_da.shape + (png_len,))
+            reshaped = stacked.reshape((*value_da.shape, png_len))
             coords = dict(value_da.coords)
             coords["png_byte"] = np.arange(png_len)
             data_vars["figure_png"] = xr.DataArray(
                 reshaped,
-                dims=value_da.dims + ("png_byte",),
+                dims=(*value_da.dims, "png_byte"),
                 coords=coords,
             )
         else:  # pragma: no cover - differing figure sizes are unexpected but handled
@@ -268,14 +269,14 @@ def _build_figure_dataarrays(
                 payload if payload is not None else np.zeros((height, width, channels), dtype=np.uint8)
                 for payload in rgba_payloads
             ])
-            reshaped = stacked.reshape(value_da.shape + (height, width, channels))
+            reshaped = stacked.reshape((*value_da.shape, height, width, channels))
             coords = dict(value_da.coords)
             coords["figure_y"] = np.arange(height)
             coords["figure_x"] = np.arange(width)
             coords["figure_channel"] = np.arange(channels)
             data_vars["figure_rgba"] = xr.DataArray(
                 reshaped,
-                dims=value_da.dims + ("figure_y", "figure_x", "figure_channel"),
+                dims=(*value_da.dims, "figure_y", "figure_x", "figure_channel"),
                 coords=coords,
             )
         else:  # pragma: no cover - differing figure sizes are unexpected but handled
@@ -373,4 +374,4 @@ for _name, _func in _NEUROKIT_FUNCTIONS.items():  # pragma: no cover - registrat
     _build_node(_name, _func)
 
 
-__all__ = ["neurokit_complexity_delay"]
+__all__: list[str] = []  # nodes registered via _build_node; no module-level names exported

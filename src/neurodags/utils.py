@@ -4,11 +4,12 @@ import os
 import posixpath
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Literal
+from typing import Any, Literal
+
+import numpy as np
 
 from neurodags.definitions import PathLike
 from neurodags.loggers import get_logger
-from typing import Any
 
 log = get_logger(__name__)
 
@@ -125,7 +126,7 @@ def _resolve_eval_strings(value: Any) -> Any:
     if isinstance(value, str) and value.startswith("eval%"):
         expression = value.removeprefix("eval%")
         namespace = {"np": np, "math": math}
-        return eval(expression, namespace)  # noqa: S307 - explicit request for dynamic evaluation
+        return eval(expression, namespace)
     return value
 
 

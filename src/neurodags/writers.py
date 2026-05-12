@@ -1,4 +1,12 @@
 import json
+from typing import Any
+
+import numpy as np
+
+try:
+    import xarray as xr
+except ImportError:
+    xr = None
 
 from neurodags.loggers import get_logger
 
@@ -9,21 +17,6 @@ def save_dict_to_json(jsonfile, data):
     with open(jsonfile, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
     log.debug("Saved JSON file", file=jsonfile)
-
-
-import json
-import numpy as np
-import xarray as xr
-
-from typing import Any
-
-from typing import Any
-import numpy as np
-
-try:
-    import xarray as xr
-except ImportError:
-    xr = None
 
 
 def _json_safe(value: Any) -> Any:

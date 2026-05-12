@@ -4,22 +4,22 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Literal
+from typing import Any, Literal
 
+import pandas as pd
 from joblib import Parallel, delayed
 
+from neurodags.dag import collect_derivative_for_dataframe, run_derivative
 from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.definitions import DatasetConfig
+from neurodags.derivatives import get_derivative, list_derivatives
+from neurodags.derivatives.pipeline import register_derivatives_from_dict
 from neurodags.iterators import get_all_files_from_pipeline_configuration
+from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
-from neurodags.utils import get_path
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
-from neurodags.derivatives import get_derivative, list_derivatives
-from neurodags.dag import collect_derivative_for_dataframe, run_derivative
-from neurodags.loaders import load_configuration
-from neurodags.derivatives.pipeline import register_derivatives_from_dict
-from neurodags.definitions import DatasetConfig
-import pandas as pd
+from neurodags.utils import get_path
 
 log = get_logger(__name__)
 
@@ -153,7 +153,7 @@ def iterate_derivative_pipeline(
     derivative: Callable | str,
     max_files_per_dataset: int | None = None,
     dry_run: bool = False,
-    only_index: int | List[int] | None = None,
+    only_index: int | list[int] | None = None,
     raise_on_error: bool = False,
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
@@ -198,7 +198,7 @@ def iterate_derivative_pipeline(
         load_configuration(pipeline_configuration) if is_path_like else pipeline_configuration
     )
 
-    custom_node_paths: tuple[str, ...] = tuple()
+    custom_node_paths: tuple[str, ...] = ()
     new_definitions = config_dict.get("new_definitions")
     if new_definitions:
         if isinstance(new_definitions, (str, os.PathLike)):
@@ -254,7 +254,7 @@ def iterate_derivative_pipeline(
 
     if max_files_per_dataset is not None:
         filtered_files = []
-        dataset_file_count = {dataset: 0 for dataset in files_per_dataset.keys()}
+        dataset_file_count = dict.fromkeys(files_per_dataset.keys(), 0)
         for item in all_files:
             dataset_name = item[1]
             if dataset_file_count[dataset_name] < max_files_per_dataset:
@@ -291,8 +291,8 @@ def iterate_derivative_pipeline(
             "derivative must be a registered derivative name, node name, DerivativeEntry, or callable node"
         )
     # skip save=False derivatives
-    if 'save' in derivative_entry.definition:
-        if derivative_entry.definition['save'] is False:
+    if "save" in derivative_entry.definition:
+        if derivative_entry.definition["save"] is False:
             log.info(
                 "Derivative is marked with save=False; skipping execution.",
                 derivative=derivative_label
@@ -411,9 +411,9 @@ def iterate_derivative_pipeline(
 def build_derivative_dataframe(
     pipeline_configuration: dict | str,
     *,
-    include_derivatives: List[str] | None = None,
+    include_derivatives: list[str] | None = None,
     max_files_per_dataset: int | None = None,
-    only_index: int | List[int] | None = None,
+    only_index: int | list[int] | None = None,
     output_format: Literal["wide", "long"] = "wide",
     preserve_complex_values: bool = False,
     raise_on_error: bool = False,
@@ -458,7 +458,7 @@ def build_derivative_dataframe(
 
     derivative_definitions: dict[str, dict] = config_dict.get("DerivativeDefinitions", {}) or {}
     selected_derivatives: list[str] = []
-    
+
     include_derivatives = config_dict.get("DerivativeList", []) if include_derivatives is None else include_derivatives
 
     for derivative_name, derivative_def in derivative_definitions.items():
@@ -607,7 +607,7 @@ if __name__ == "__main__":
     parser.add_argument("config", type=str, help="Path to the pipeline configuration file (YAML or JSON).")
     parser.add_argument("--max_files_per_dataset", type=int, default=None, help="Maximum number of files to process per dataset.")
     parser.add_argument("--dry_run", action="store_true", help="If set, perform a dry run without actual processing.")
-    parser.add_argument("--only_index", type=int, nargs='*', default=None, help="Only process files with these indices.")
+    parser.add_argument("--only_index", type=int, nargs="*", default=None, help="Only process files with these indices.")
     parser.add_argument("--raise_on_error", action="store_true", help="If set, raise exceptions on errors instead of logging them.")
     parser.add_argument("--n-jobs", dest="n_jobs", type=int, default=None, help="Number of parallel workers to use (joblib semantics; default serial).")
     parser.add_argument("--joblib-backend", dest="joblib_backend", type=str, default=None, help="Joblib backend to use (e.g. 'loky', 'threading').")
@@ -695,7 +695,7 @@ if __name__ == "__main__":
                 df.to_csv("dry_run_results.csv", index=False)
                 log.info("Saved dry run results to dry_run_results.csv", rows=len(df), columns=list(df.columns))
             log.info("Dry run completed", total_rows=len(df))
-            
+
 
 
     if args.make_final_dataframe:
