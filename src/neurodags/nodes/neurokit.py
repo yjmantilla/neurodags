@@ -230,36 +230,17 @@ def _build_figure_dataarrays(
     data_vars: dict[str, xr.DataArray] = {}
 
     if any(payload is not None for payload in png_payloads):
-        valid_png = [payload for payload in png_payloads if payload is not None]
-        lengths = {payload.size for payload in valid_png}
-        if len(lengths) == 1:
-            png_len = lengths.pop()
-            stacked = np.stack(
-                [
-                    payload if payload is not None else np.zeros(png_len, dtype=np.uint8)
-                    for payload in png_payloads
-                ]
-            )
-            reshaped = stacked.reshape((*value_da.shape, png_len))
-            coords = dict(value_da.coords)
-            coords["png_byte"] = np.arange(png_len)
-            data_vars["figure_png"] = xr.DataArray(
-                reshaped,
-                dims=(*value_da.dims, "png_byte"),
-                coords=coords,
-            )
-        else:  # pragma: no cover - differing figure sizes are unexpected but handled
-            strings = [
-                "" if payload is None else payload.tobytes().hex() for payload in png_payloads
-            ]
-            max_len = max((len(s) for s in strings), default=1)
-            array = np.array(strings, dtype=f"<U{max_len}")
-            reshaped = array.reshape(value_da.shape)
-            data_vars["figure_png_hex"] = xr.DataArray(
-                reshaped,
-                dims=value_da.dims,
-                coords=value_da.coords,
-            )
+        strings = [
+            "" if payload is None else payload.tobytes().hex() for payload in png_payloads
+        ]
+        max_len = max((len(s) for s in strings), default=1)
+        array = np.array(strings, dtype=f"<U{max_len}")
+        reshaped = array.reshape(value_da.shape)
+        data_vars["figure_png_hex"] = xr.DataArray(
+            reshaped,
+            dims=value_da.dims,
+            coords=value_da.coords,
+        )
 
     if any(payload is not None for payload in rgba_payloads):
         valid_rgba = [payload for payload in rgba_payloads if payload is not None]
@@ -331,8 +312,8 @@ def _build_node(name: str, func: CallableLike) -> None:
         resolved_args = tuple(function_args or ())
 
         capture_requested = figure_encoding not in {None, "none", ""}
-        # if capture_requested and "show" not in resolved_kwargs:
-        #    resolved_kwargs["show"] = True
+        if capture_requested and "show" not in resolved_kwargs:
+            resolved_kwargs["show"] = True
         if force_show is not None:
             resolved_kwargs["show"] = bool(force_show)
 

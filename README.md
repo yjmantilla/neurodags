@@ -58,7 +58,7 @@ The quickstart generates 1/f-noise EEG, runs preprocessing → spectral analysis
 ```bash
 git clone https://github.com/yjmantilla/neurodags
 cd neurodags
-uv sync --all-extras    # creates .venv and installs all deps incl. dev/test/docs
+uv sync --all-extras --all-groups # creates .venv and installs all deps incl. dev/test/docs
 uv run pre-commit install
 ```
 
