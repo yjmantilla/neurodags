@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -234,7 +235,7 @@ band_cols = [c for c in df.columns if any(b in c for b in ["delta", "theta", "al
 
 if band_cols:
     # Melt to long form for plotting
-    df_long = df[["subject"] + band_cols].melt(
+    df_long = df[["subject", *band_cols]].melt(
         id_vars="subject", var_name="band_channel", value_name="relative_power"
     )
     # Extract band name from column label

@@ -27,6 +27,60 @@ This avoids wasting compute on repeatedly failing files in large batches.
 
 ## Visualization
 
+### DAG Visualization (Mermaid)
+
+NeuroDAGs can render pipeline and derivative graphs as interactive
+[Mermaid](https://mermaid.js.org/) diagrams saved to standalone HTML files.
+
+**Pipeline-level overview** — one node per derivative, edges show inter-derivative
+dependencies:
+
+```python
+import yaml
+from neurodags.mermaid import pipeline_to_html
+
+with open("pipeline.yml") as f:
+    config = yaml.safe_load(f)
+
+pipeline_to_html(config, output_path="pipeline_dag.html", auto_open=True)
+```
+
+**Derivative-level detail** — every computation node and data reference inside
+one derivative:
+
+```python
+from neurodags.mermaid import derivative_to_html
+
+derivative_to_html(
+    config["DerivativeDefinitions"]["BandPower"],
+    "BandPower",
+    output_path="bandpower_dag.html",
+    auto_open=True,
+)
+```
+
+Node shapes used in derivative diagrams:
+
+| Shape | Meaning |
+|-------|---------|
+| Circle `(((...)))` | `SourceFile` — raw input file |
+| Cylinder `[(...)]` | Upstream derivative artifact (cached on disk) |
+| Rectangle `[...]` | Computation node |
+
+To get the raw Mermaid string (e.g. for embedding in Jupyter or custom HTML):
+
+```python
+from neurodags.mermaid import pipeline_to_mermaid, derivative_to_mermaid
+
+print(pipeline_to_mermaid(config))
+print(derivative_to_mermaid(config["DerivativeDefinitions"]["BandPower"], "BandPower"))
+```
+
+See the {doc}`../auto_examples/plot_mermaid_visualization` example for a
+complete walkthrough.
+
+### Interactive File Explorer
+
 Built-in Dash-Plotly explorer for `.fif` (MNE) and `.nc` (NetCDF/xarray) files:
 
 ```bash

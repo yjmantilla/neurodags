@@ -1,4 +1,6 @@
 # conf.py
+import importlib
+import inspect
 import os
 import subprocess
 import sys
@@ -6,8 +8,7 @@ from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _v
 from pathlib import Path
-import importlib
-import inspect
+
 project = "neurodags"
 
 # Full version from installed dist (hatch-vcs stamps this)
@@ -86,8 +87,8 @@ autoapi_options = [
     "undoc-members",
     "private-members",  # include _private
     "special-members",  # e.g. __call__, __iter__
-    #"inherited-members",
-    #"show-inheritance",
+    # "inherited-members",
+    # "show-inheritance",
     "show-module-summary",
     # "imported-members",   # enable if you also want re-exported/imported names
 ]
@@ -123,6 +124,7 @@ sphinx_gallery_conf = {
 GITHUB_USER = "yjmantilla"
 GITHUB_REPO = "neurodags"
 GITHUB_BRANCH = "main"  # or "master"
+
 
 def linkcode_resolve(domain, info):
     if domain != "py":

@@ -34,11 +34,12 @@ import tempfile
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import yaml
 import xarray as xr
+import yaml
 
 from neurodags.datasets import generate_dummy_dataset
 from neurodags.definitions import Artifact, NodeResult
@@ -60,6 +61,7 @@ print(f"Working directory: {WORKDIR}")
 #
 # This is the key pattern: one node, two predecessor branches.
 
+
 @register_node(name="concat_bandpower", override=True)
 def concat_bandpower(absolute, relative) -> NodeResult:
     """Stack absolute and relative band power along a new 'normalization' axis."""
@@ -75,6 +77,7 @@ def concat_bandpower(absolute, relative) -> NodeResult:
     return NodeResult(
         artifacts={".nc": Artifact(item=combined, writer=lambda p: combined.to_netcdf(p))}
     )
+
 
 # %%
 # Step 1 — Generate Synthetic Dataset
@@ -228,27 +231,33 @@ fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 ax = axes[0]
 deriv_positions = {
     "SourceFile": (2, 4),
-    "BasicPrep":  (2, 3),
-    "Spectrum":   (2, 2),
+    "BasicPrep": (2, 3),
+    "Spectrum": (2, 2),
     "BandPowerBoth": (2, 1),
 }
 deriv_colors = {
-    "SourceFile":     "#bde0fe",
-    "BasicPrep":      "#a8dadc",
-    "Spectrum":       "#a8dadc",
-    "BandPowerBoth":  "#ffb347",
+    "SourceFile": "#bde0fe",
+    "BasicPrep": "#a8dadc",
+    "Spectrum": "#a8dadc",
+    "BandPowerBoth": "#ffb347",
 }
 for name, (x, y) in deriv_positions.items():
-    ax.scatter(x, y, s=3000, c=deriv_colors[name], zorder=3,
-               edgecolors="black", linewidths=1.2)
+    ax.scatter(x, y, s=3000, c=deriv_colors[name], zorder=3, edgecolors="black", linewidths=1.2)
     ax.text(x, y, name, ha="center", va="center", fontsize=8, zorder=4)
 
-for src, dst in [("SourceFile", "BasicPrep"), ("BasicPrep", "Spectrum"),
-                 ("Spectrum", "BandPowerBoth")]:
+for src, dst in [
+    ("SourceFile", "BasicPrep"),
+    ("BasicPrep", "Spectrum"),
+    ("Spectrum", "BandPowerBoth"),
+]:
     x0, y0 = deriv_positions[src]
     x1, y1 = deriv_positions[dst]
-    ax.annotate("", xy=(x1, y1 + 0.18), xytext=(x0, y0 - 0.18),
-                arrowprops=dict(arrowstyle="->", color="gray", lw=1.5))
+    ax.annotate(
+        "",
+        xy=(x1, y1 + 0.18),
+        xytext=(x0, y0 - 0.18),
+        arrowprops={"arrowstyle": "->", "color": "gray", "lw": 1.5},
+    )
 
 ax.set_xlim(0, 4)
 ax.set_ylim(0, 5)
@@ -275,22 +284,22 @@ node_colors = {0: "#bde0fe", 1: "#a8dadc", 2: "#cdb4db", 3: "#cdb4db", 4: "#ffb3
 node_edges = [(0, 1), (1, 2), (1, 3), (2, 4), (3, 4)]
 
 for nid, (x, y) in node_positions.items():
-    ax.scatter(x, y, s=2500, c=node_colors[nid], zorder=3,
-               edgecolors="black", linewidths=1.2)
-    ax.text(x, y, node_labels[nid], ha="center", va="center",
-            fontsize=7.5, zorder=4)
+    ax.scatter(x, y, s=2500, c=node_colors[nid], zorder=3, edgecolors="black", linewidths=1.2)
+    ax.text(x, y, node_labels[nid], ha="center", va="center", fontsize=7.5, zorder=4)
 
 for src, dst in node_edges:
     x0, y0 = node_positions[src]
     x1, y1 = node_positions[dst]
-    ax.annotate("", xy=(x1, y1 + 0.2), xytext=(x0, y0 - 0.2),
-                arrowprops=dict(arrowstyle="->", color="gray", lw=1.5))
+    ax.annotate(
+        "",
+        xy=(x1, y1 + 0.2),
+        xytext=(x0, y0 - 0.2),
+        arrowprops={"arrowstyle": "->", "color": "gray", "lw": 1.5},
+    )
 
 # annotate the fan-out and fan-in
-ax.text(0.5, 2.8, "fan-out\n(same id.1,\ntwo branches)",
-        fontsize=7, color="purple", va="center")
-ax.text(3.9, 1.55, "fan-in\n(id.2 + id.3\n→ id.4)",
-        fontsize=7, color="darkorange", va="center")
+ax.text(0.5, 2.8, "fan-out\n(same id.1,\ntwo branches)", fontsize=7, color="purple", va="center")
+ax.text(3.9, 1.55, "fan-in\n(id.2 + id.3\n→ id.4)", fontsize=7, color="darkorange", va="center")
 
 ax.set_xlim(0, 6)
 ax.set_ylim(0, 5.5)
@@ -354,6 +363,7 @@ if abs_cols and rel_cols:
         axes,
         [abs_cols, rel_cols],
         ["Absolute Band Power", "Relative Band Power"],
+        strict=False,
     ):
         for i, sub in enumerate(subjects):
             row = df[df["subject"] == sub]
