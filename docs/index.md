@@ -4,6 +4,8 @@ html_theme_sidebar_secondary: false
 
 # NeuroDAGs
 
+[![PyPI](https://img.shields.io/pypi/v/neurodags)](https://pypi.org/project/neurodags/)
+
 **An Extensible and Declarative DAG Framework for Reproducible Neuroscience Workflows**
 
 M/EEG studies generate many interdependent intermediate derivatives. Recomputing full pipelines is wasteful; reusing valid intermediates is non-trivial. NeuroDAGs solves this with a declarative, graph-based framework for scalable, reproducible derivative computation.
