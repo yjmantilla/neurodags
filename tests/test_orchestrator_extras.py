@@ -192,3 +192,44 @@ def test_build_dataframe_only_index_missing(dummy_pipeline):
 
     result = build_derivative_dataframe(cfg, only_index=[9999])
     assert isinstance(result, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# iterate_derivative_pipeline — new_definitions (str path)
+# ---------------------------------------------------------------------------
+
+def test_iterate_pipeline_new_definitions_str(dummy_pipeline, tmp_path):
+    from neurodags.nodes.preprocessing import basic_preprocessing
+
+    node_file = tmp_path / "extra_nodes.py"
+    node_file.write_text("MY_EXTRA = True\n")
+
+    cfg = {
+        **dummy_pipeline["config"],
+        "new_definitions": str(node_file),
+    }
+    iterate_derivative_pipeline(cfg, basic_preprocessing, max_files_per_dataset=1, raise_on_error=True)
+
+
+def test_iterate_pipeline_new_definitions_list(dummy_pipeline, tmp_path):
+    from neurodags.nodes.preprocessing import basic_preprocessing
+
+    node_file = tmp_path / "extra_nodes2.py"
+    node_file.write_text("MY_EXTRA2 = True\n")
+
+    cfg = {
+        **dummy_pipeline["config"],
+        "new_definitions": [str(node_file)],
+    }
+    iterate_derivative_pipeline(cfg, basic_preprocessing, max_files_per_dataset=1, raise_on_error=True)
+
+
+def test_iterate_pipeline_new_definitions_invalid_type_raises(dummy_pipeline):
+    from neurodags.nodes.preprocessing import basic_preprocessing
+
+    cfg = {
+        **dummy_pipeline["config"],
+        "new_definitions": 42,
+    }
+    with pytest.raises(TypeError, match="new_definitions must be"):
+        iterate_derivative_pipeline(cfg, basic_preprocessing, max_files_per_dataset=1)
