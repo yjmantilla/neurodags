@@ -2,6 +2,8 @@
 
 NeuroDAGs lets you define new computation nodes without modifying or forking the package. Custom nodes are registered at runtime via a Python module pointed to by `new_definitions` in `pipeline.yml`.
 
+The built-in nodes target EEG/MEG/ECG via MNE-Python and xarray, but the node system is domain-agnostic. If your data comes in files — audio, fMRI volumes, tabular CSVs, images, genomics — you can use NeuroDAGs orchestration with entirely custom nodes and loaders. The caching, dependency ordering, HPC templates, and dataframe assembly work identically regardless of what the nodes do.
+
 ## Key Ideas
 
 1. A node is a Python function.
@@ -134,3 +136,81 @@ fn = get_node("basic_preprocessing")
 for name, fn in iter_nodes():
     print(name, fn)
 ```
+
+## Using NeuroDAGs Beyond EEG/MEG
+
+Any per-file analysis pipeline works. You need:
+
+1. A glob pattern that discovers your input files (`file_pattern` in `datasets.yml`)
+2. Nodes that load and process your data and return a `NodeResult`
+
+The `SourceFile` pseudo-derivative gives each node the raw file path as a string — your loader node reads it however it likes.
+
+Example: CSV time-series files → per-file statistics → assembled dataframe.
+
+```python
+# custom_nodes.py
+import pandas as pd
+import xarray as xr
+from neurodags.nodes import register_node
+from neurodags.definitions import Artifact, NodeResult
+
+
+@register_node
+def load_csv_timeseries(file_path: str) -> NodeResult:
+    df = pd.read_csv(file_path, index_col="time")
+    da = xr.DataArray(df.values, dims=("time", "channel"),
+                      coords={"time": df.index, "channel": df.columns})
+    return NodeResult(
+        artifacts={".nc": Artifact(item=da, writer=lambda p: da.to_netcdf(p))}
+    )
+
+
+@register_node
+def channel_statistics(data) -> NodeResult:
+    da = data.artifacts[".nc"].item
+    stats = da.mean("time").to_dataset(name="mean")
+    stats["std"] = da.std("time")
+    return NodeResult(
+        artifacts={".nc": Artifact(item=stats, writer=lambda p: stats.to_netcdf(p))}
+    )
+```
+
+```yaml
+# datasets.yml
+my_study:
+  name: MyStudy
+  file_pattern: data/**/*.csv
+  derivatives_path: derivatives/
+```
+
+```yaml
+# pipeline.yml
+new_definitions: custom_nodes.py
+
+DerivativeList:
+  - Timeseries
+  - Stats
+
+DerivativeDefinitions:
+  Timeseries:
+    nodes:
+      - id: 0
+        derivative: SourceFile
+      - id: 1
+        node: load_csv_timeseries
+        args:
+          file_path: id.0
+
+  Stats:
+    for_dataframe: true
+    nodes:
+      - id: 0
+        derivative: Timeseries.nc
+      - id: 1
+        node: channel_statistics
+        args:
+          data: id.0
+```
+
+Everything else — caching, dependency ordering, joblib parallelism, SLURM templates, dataframe assembly — works identically to an EEG pipeline.

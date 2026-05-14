@@ -1,6 +1,11 @@
 # Comparison with Other Workflow Managers
 
-NeuroDAGs is designed specifically for neuroscience signal processing (EEG/MEG/ECG). While general-purpose tools like Snakemake or Pydra can be used for these tasks, NeuroDAGs provides a more ergonomic and domain-specific experience.
+NeuroDAGs has two layers with different scopes:
+
+- **Orchestration layer** — file discovery, caching, dependency ordering, HPC templates, dataframe assembly. This is fully domain-agnostic. Any per-file analysis pipeline (audio, fMRI, genomics, tabular time series, images) can use it by providing a custom loader and custom nodes.
+- **Built-in nodes** — target EEG/MEG/ECG via MNE-Python and xarray. These are optional; you do not need them to use the framework.
+
+If your data comes in files and you process each file independently, NeuroDAGs orchestration applies regardless of domain.
 
 ## Quick Comparison Table
 
@@ -49,7 +54,7 @@ Nodes are plain Python functions decorated with \`@register_node\`. They can be 
 - **Strict BIDS-App compliance required**: Snakebids has native BIDS validation and output layout enforcement. NeuroDAGs preserves input paths but does not validate against the BIDS spec.
 - **Production-grade cluster scheduling**: `neurodags slurm-script` generates submission templates but does not integrate with cluster schedulers. Snakemake and Pydra have native SLURM/SGE/PBS profiles with automatic job monitoring, resubmission, and resource accounting.
 - **Full provenance tracking**: NeuroDAGs has no provenance graph — it cannot tell you which version of a node produced a given file. If audit trails matter, Pydra's hash-based caching or DVC are better fits.
-- **Non-neuroscience / non-file-based pipelines**: NeuroDAGs assumes one input file → one set of derivative files. It is not designed for database records, streaming data, or large-scale generic ETL.
+- **Non-file-based pipelines**: NeuroDAGs assumes each unit of work is an input file discoverable via a glob pattern. Database records, streaming data, and large-scale generic ETL do not fit this model.
 - **Large, mature community support**: NeuroDAGs is early-stage with no ecosystem of reusable nodes. Snakemake and Nipype have years of community wrappers, tutorials, and battle-tested HPC configurations.
 
 ---
