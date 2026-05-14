@@ -126,3 +126,110 @@ def test_view_launches_visualization_subprocess():
     with patch("neurodags.cli.subprocess.Popen") as popen:
         assert main(["view", "result.nc"]) == 0
         popen.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# count command
+# ---------------------------------------------------------------------------
+
+
+def test_count_prints_unique_file_count(dummy_pipeline, capsys):
+    cfg = dummy_pipeline["config"]
+    fake_df = pd.DataFrame({"file_path": ["a", "a", "b"], "other": [1, 2, 3]})
+    with (
+        patch("neurodags.cli._load_pipeline_config", return_value=cfg),
+        patch("neurodags.cli.run_pipeline", return_value=fake_df),
+    ):
+        assert main(["count", "pipeline.yml"]) == 0
+    assert capsys.readouterr().out.strip() == "2"
+
+
+def test_count_prints_zero_on_empty_result(dummy_pipeline, capsys):
+    cfg = dummy_pipeline["config"]
+    with (
+        patch("neurodags.cli._load_pipeline_config", return_value=cfg),
+        patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
+    ):
+        assert main(["count", "pipeline.yml"]) == 0
+    assert capsys.readouterr().out.strip() == "0"
+
+
+# ---------------------------------------------------------------------------
+# slurm-script command
+# ---------------------------------------------------------------------------
+
+
+def _make_slurm_config(derivatives: list[str]) -> dict:
+    defs = {d: {"nodes": [{"id": 0, "derivative": "SourceFile"}]} for d in derivatives}
+    return {
+        "datasets": {},
+        "mount_point": None,
+        "DerivativeDefinitions": defs,
+        "DerivativeList": derivatives,
+    }
+
+
+def test_slurm_script_per_file_contains_derivative_names(capsys):
+    cfg = _make_slurm_config(["BasicPrep", "Spectrum"])
+    with patch("neurodags.cli._load_pipeline_config", return_value=cfg):
+        assert main(["slurm-script", "pipeline.yml", "--pattern", "per-file"]) == 0
+    out = capsys.readouterr().out
+    assert "BasicPrep" in out
+    assert "Spectrum" in out
+    assert "SLURM_ARRAY_TASK_ID" in out
+
+
+def test_slurm_script_flat_contains_n_derivatives(capsys):
+    cfg = _make_slurm_config(["A", "B", "C"])
+    with patch("neurodags.cli._load_pipeline_config", return_value=cfg):
+        assert main(["slurm-script", "pipeline.yml", "--pattern", "flat"]) == 0
+    out = capsys.readouterr().out
+    assert "N_DERIVATIVES=3" in out
+    assert '"A"' in out and '"B"' in out and '"C"' in out
+
+
+def test_slurm_script_chained_chains_dependencies(capsys):
+    cfg = _make_slurm_config(["BasicPrep", "Spectrum", "BandPower"])
+    with patch("neurodags.cli._load_pipeline_config", return_value=cfg):
+        assert main(["slurm-script", "pipeline.yml", "--pattern", "chained"]) == 0
+    out = capsys.readouterr().out
+    assert "--dependency=afterok:$JOB1" in out
+    assert "--dependency=afterok:$JOB2" in out
+    assert "submit_pipeline.sh" in out
+    assert "run_one_derivative.sh" in out
+
+
+def test_slurm_script_chained_writes_two_files(tmp_path):
+    cfg = _make_slurm_config(["BasicPrep", "Spectrum"])
+    submit_path = tmp_path / "submit.sh"
+    with patch("neurodags.cli._load_pipeline_config", return_value=cfg):
+        assert main(["slurm-script", "pipeline.yml", "--pattern", "chained", "--output", str(submit_path)]) == 0
+    assert submit_path.exists()
+    assert (tmp_path / "run_one_derivative.sh").exists()
+    assert "BasicPrep" in submit_path.read_text()
+
+
+def test_slurm_script_per_file_writes_file(tmp_path):
+    cfg = _make_slurm_config(["BasicPrep"])
+    out_path = tmp_path / "run_array.sh"
+    with patch("neurodags.cli._load_pipeline_config", return_value=cfg):
+        assert main(["slurm-script", "pipeline.yml", "--pattern", "per-file", "--output", str(out_path)]) == 0
+    assert out_path.exists()
+    assert "SLURM_ARRAY_TASK_ID" in out_path.read_text()
+
+
+def test_slurm_script_respects_topo_order(capsys):
+    # Spectrum depends on BasicPrep — BasicPrep must appear first in pattern 3
+    cfg = {
+        "datasets": {},
+        "mount_point": None,
+        "DerivativeDefinitions": {
+            "Spectrum": {"nodes": [{"id": 0, "derivative": "BasicPrep.fif"}]},
+            "BasicPrep": {"nodes": [{"id": 0, "derivative": "SourceFile"}]},
+        },
+        "DerivativeList": ["Spectrum", "BasicPrep"],
+    }
+    with patch("neurodags.cli._load_pipeline_config", return_value=cfg):
+        assert main(["slurm-script", "pipeline.yml", "--pattern", "chained"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("BasicPrep") < out.index("Spectrum")

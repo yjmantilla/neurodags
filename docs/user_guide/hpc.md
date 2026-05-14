@@ -6,32 +6,46 @@ The key parameter is `only_index`, which restricts a run to specific file indice
 
 ---
 
+## Generating submission scripts
+
+Use `neurodags slurm-script` to generate a ready-to-edit SLURM template populated with your pipeline's actual derivative names and dependency order:
+
+```bash
+# Pattern 3 (default) — chained per-derivative arrays
+neurodags slurm-script pipeline.yml --output submit_pipeline.sh
+
+# Pattern 1 — all derivatives per file
+neurodags slurm-script pipeline.yml --pattern 1 --output run_array.sh
+
+# Pattern 2 — file × derivative flat array
+neurodags slurm-script pipeline.yml --pattern 2 --output run_array_per_deriv.sh
+```
+
+Pattern 3 writes two files: `submit_pipeline.sh` (the submission script) and `run_one_derivative.sh` (the worker). Edit the `#SBATCH` resource lines before submitting.
+
+### Counting files
+
+`neurodags count` prints the number of unique files the pipeline will process — useful in submission scripts:
+
+```bash
+N=$(neurodags count pipeline.yml)
+sbatch --array=0-$((N - 1)) run_array.sh
+```
+
+---
+
 ## Pattern 1: One Array Task per File (All Derivatives)
 
 Each task runs all derivatives in dependency order for a single file.
 
-### Step 1 — Count files
-
-```python
-# count_files.py
-from neurodags.loaders import load_configuration
-from neurodags.orchestrators import run_pipeline
-
-config = load_configuration("pipeline.yml")
-plan = run_pipeline(config, dry_run=True)
-print(plan["file_path"].nunique())
-```
-
 ```bash
-N=$(python count_files.py)
-echo "Submitting array for $N files"
+N=$(neurodags count pipeline.yml)
 sbatch --array=0-$((N - 1)) run_array.sh
 ```
 
-### Step 2 — Array job script
-
 ```bash
 #!/bin/bash
+# run_array.sh
 #SBATCH --job-name=neurodags
 #SBATCH --time=02:00:00
 #SBATCH --mem=16G
@@ -47,18 +61,16 @@ from neurodags.loaders import load_configuration
 from neurodags.orchestrators import run_pipeline
 
 config = load_configuration("pipeline.yml")
-index = int(os.environ["SLURM_ARRAY_TASK_ID"])
-run_pipeline(config, only_index=index, raise_on_error=True)
+run_pipeline(
+    config,
+    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
+    raise_on_error=True,
+    skip_errors=True,
+)
 EOF
 ```
 
-`raise_on_error=True` makes the SLURM task exit with a non-zero code on failure, so `sacct` correctly reports failed tasks.
-
-On resubmission, already-cached files are skipped automatically. Add `--skip-errors` to also skip files whose previous run wrote a `.error` marker:
-
-```bash
-run_pipeline(config, only_index=index, raise_on_error=True, skip_errors=True)
-```
+`raise_on_error=True` makes the SLURM task exit with a non-zero code on failure, so `sacct` correctly reports failed tasks. `skip_errors=True` skips files whose previous run wrote a `.error` marker.
 
 ---
 
@@ -67,7 +79,15 @@ run_pipeline(config, only_index=index, raise_on_error=True, skip_errors=True)
 Use this when derivatives are independent (no inter-derivative dependencies) and you want maximum parallelism.
 
 ```bash
+N=$(neurodags count pipeline.yml)
+N_DERIVATIVES=3
+TOTAL=$(( N * N_DERIVATIVES ))
+sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
+```
+
+```bash
 #!/bin/bash
+# run_array_per_deriv.sh
 #SBATCH --job-name=neurodags
 #SBATCH --time=02:00:00
 #SBATCH --mem=8G
@@ -84,6 +104,8 @@ FILE_INDEX=$(( SLURM_ARRAY_TASK_ID / N_DERIVATIVES ))
 DERIV_INDEX=$(( SLURM_ARRAY_TASK_ID % N_DERIVATIVES ))
 DERIVATIVE=${DERIVATIVES[$DERIV_INDEX]}
 
+source activate myenv
+
 python - <<EOF
 from neurodags.loaders import load_configuration
 from neurodags.orchestrators import run_pipeline
@@ -98,15 +120,6 @@ run_pipeline(
 EOF
 ```
 
-Submit with:
-
-```bash
-N_FILES=$(python count_files.py)
-N_DERIVATIVES=3
-TOTAL=$(( N_FILES * N_DERIVATIVES ))
-sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
-```
-
 > **Note**: When derivatives have inter-dependencies (e.g. `Spectrum` reads `Preprocessed` output), this pattern requires `Preprocessed` to finish before `Spectrum` starts. Use SLURM `--dependency=afterok` between derivative-level job arrays, or use Pattern 1 which respects dependency order automatically.
 
 ---
@@ -119,7 +132,7 @@ Run derivatives one at a time in dependency order, with all files parallelised w
 #!/bin/bash
 # submit_pipeline.sh
 
-N=$(python count_files.py)
+N=$(neurodags count pipeline.yml)
 ARRAY="0-$((N - 1))"
 
 JOB1=$(sbatch --parsable --array=$ARRAY \
@@ -144,6 +157,8 @@ sbatch --array=$ARRAY \
 #SBATCH --time=01:00:00
 #SBATCH --mem=8G
 #SBATCH --output=logs/%x_%A_%a.out
+
+source activate myenv
 
 python - <<EOF
 import os

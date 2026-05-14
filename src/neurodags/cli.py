@@ -19,6 +19,7 @@ from neurodags.mermaid import (
     pipeline_to_mermaid,
 )
 from neurodags.orchestrators import (
+    _derivative_topo_order,
     build_derivative_dataframe,
     run_pipeline,
 )
@@ -106,6 +107,149 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Joblib preference hint (for example: processes, threads).",
     )
+
+
+def _slurm_pattern1(config_path: str, derivatives: list[str]) -> str:
+    deriv_names = ", ".join(derivatives)
+    return f"""\
+#!/bin/bash
+# Pattern 1: one array task per file — all derivatives run in dependency order per task.
+# Derivatives: {deriv_names}
+#
+# Submit:
+#   N=$(neurodags count {config_path})
+#   sbatch --array=0-$((N - 1)) run_array.sh
+#
+#SBATCH --job-name=neurodags
+#SBATCH --time=02:00:00    # TODO: adjust per file
+#SBATCH --mem=16G          # TODO: adjust
+#SBATCH --cpus-per-task=1
+#SBATCH --output=logs/neurodags_%A_%a.out
+#SBATCH --error=logs/neurodags_%A_%a.err
+
+source activate myenv  # TODO: activate your environment
+
+python - <<'EOF'
+import os
+from neurodags.loaders import load_configuration
+from neurodags.orchestrators import run_pipeline
+
+config = load_configuration("{config_path}")
+run_pipeline(
+    config,
+    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
+    raise_on_error=True,
+    skip_errors=True,
+)
+EOF
+"""
+
+
+def _slurm_pattern2(config_path: str, derivatives: list[str]) -> str:
+    n = len(derivatives)
+    deriv_arr = "(" + " ".join(f'"{d}"' for d in derivatives) + ")"
+    return f"""\
+#!/bin/bash
+# Pattern 2: one array task per file x derivative (maximum parallelism).
+# WARNING: use only when derivatives are independent (no inter-derivative dependencies).
+#
+# Submit:
+#   N=$(neurodags count {config_path})
+#   TOTAL=$(( N * {n} ))
+#   sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
+#
+#SBATCH --job-name=neurodags
+#SBATCH --time=01:00:00    # TODO: adjust per derivative
+#SBATCH --mem=8G           # TODO: adjust
+#SBATCH --output=logs/neurodags_%A_%a.out
+#SBATCH --error=logs/neurodags_%A_%a.err
+
+DERIVATIVES={deriv_arr}
+N_DERIVATIVES={n}
+
+FILE_INDEX=$(( SLURM_ARRAY_TASK_ID / N_DERIVATIVES ))
+DERIV_INDEX=$(( SLURM_ARRAY_TASK_ID % N_DERIVATIVES ))
+DERIVATIVE=${{DERIVATIVES[$DERIV_INDEX]}}
+
+source activate myenv  # TODO: activate your environment
+
+python - <<EOF
+import os
+from neurodags.loaders import load_configuration
+from neurodags.orchestrators import run_pipeline
+
+config = load_configuration("{config_path}")
+run_pipeline(
+    config,
+    derivatives=["$DERIVATIVE"],
+    only_index=$FILE_INDEX,
+    raise_on_error=True,
+)
+EOF
+"""
+
+
+def _slurm_pattern3(config_path: str, derivatives: list[str]) -> tuple[str, str]:
+    """Return (submit_script, worker_script) for chained per-derivative arrays."""
+    submit_lines = [
+        "#!/bin/bash",
+        "# Pattern 3: per-derivative sequential arrays chained via --dependency=afterok.",
+        "# All files run in parallel within each derivative; derivatives run in order.",
+        "#",
+        "# Usage: bash submit_pipeline.sh",
+        "",
+        f"N=$(neurodags count {config_path})",
+        'ARRAY="0-$((N - 1))"',
+        "",
+    ]
+
+    prev_var: str | None = None
+    for i, deriv in enumerate(derivatives):
+        var = f"JOB{i + 1}"
+        dep = f"--dependency=afterok:${prev_var} " if prev_var else ""
+        is_last = i == len(derivatives) - 1
+        if is_last:
+            submit_lines.append(
+                f"sbatch --array=$ARRAY {dep}" f"--export=DERIVATIVE={deriv} run_one_derivative.sh"
+            )
+        else:
+            submit_lines.append(
+                f"{var}=$(sbatch --parsable --array=$ARRAY {dep}"
+                f"--export=DERIVATIVE={deriv} run_one_derivative.sh)"
+            )
+        prev_var = var
+
+    submit = "\n".join(submit_lines) + "\n"
+
+    worker = f"""\
+#!/bin/bash
+# Worker script used by submit_pipeline.sh (Pattern 3).
+# DERIVATIVE is injected via --export from the submit script.
+#
+#SBATCH --job-name=neurodags
+#SBATCH --time=01:00:00    # TODO: adjust per derivative
+#SBATCH --mem=8G           # TODO: adjust
+#SBATCH --output=logs/neurodags_%x_%A_%a.out
+#SBATCH --error=logs/neurodags_%x_%A_%a.err
+
+source activate myenv  # TODO: activate your environment
+
+python - <<EOF
+import os
+from neurodags.loaders import load_configuration
+from neurodags.orchestrators import run_pipeline
+
+config = load_configuration("{config_path}")
+run_pipeline(
+    config,
+    derivatives=["$DERIVATIVE"],
+    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
+    raise_on_error=True,
+    skip_errors=True,
+)
+EOF
+"""
+    return submit, worker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -221,6 +365,63 @@ def build_parser() -> argparse.ArgumentParser:
     view_parser = subparsers.add_parser("view", help="Launch the Dash NC/FIF explorer.")
     view_parser.add_argument("path", help="Path to a .nc or .fif file.")
 
+    count_parser = subparsers.add_parser(
+        "count", help="Print the number of unique files the pipeline will process."
+    )
+    count_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
+    count_parser.add_argument(
+        "-d",
+        "--datasets",
+        default=None,
+        help="Optional path to a datasets YAML override.",
+    )
+    count_parser.add_argument(
+        "--derivative",
+        action="append",
+        dest="derivatives",
+        default=None,
+        help="Derivative to use for counting. Repeat to add more. Defaults to first in DerivativeList.",
+    )
+
+    slurm_parser = subparsers.add_parser(
+        "slurm-script",
+        help="Emit a SLURM array job template populated with this pipeline's derivatives.",
+    )
+    slurm_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
+    slurm_parser.add_argument(
+        "-d",
+        "--datasets",
+        default=None,
+        help="Optional path to a datasets YAML override.",
+    )
+    slurm_parser.add_argument(
+        "--derivative",
+        action="append",
+        dest="derivatives",
+        default=None,
+        help="Derivative to include. Repeat to add more. Defaults to DerivativeList.",
+    )
+    slurm_parser.add_argument(
+        "--pattern",
+        choices=("per-file", "flat", "chained"),
+        default="chained",
+        help=(
+            "Submission pattern: "
+            "per-file=all derivatives per file task, "
+            "flat=file x derivative flat array (max parallelism, independent derivatives only), "
+            "chained=per-derivative sequential arrays linked via --dependency=afterok (default)."
+        ),
+    )
+    slurm_parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Output path for the generated script. "
+            "For chained pattern, a second file (run_one_derivative.sh) is written alongside. "
+            "Omit to print to stdout."
+        ),
+    )
+
     return parser
 
 
@@ -321,6 +522,56 @@ def _cmd_dag(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_count(args: argparse.Namespace) -> int:
+    config = _load_pipeline_config(args.config)
+    derivatives = args.derivatives or (list(config.get("DerivativeList") or [])[:1])
+    if not derivatives:
+        raise ValueError("No derivatives found. Pass --derivative or define DerivativeList.")
+    result = run_pipeline(
+        pipeline_configuration=config,
+        datasets_configuration=args.datasets,
+        derivatives=derivatives,
+        dry_run=True,
+    )
+    count = 0 if result is None or result.empty else int(result["file_path"].nunique())
+    print(count)
+    return 0
+
+
+def _cmd_slurm_script(args: argparse.Namespace) -> int:
+    config = _load_pipeline_config(args.config)
+    derivatives = _resolve_derivatives(config, args.derivatives)
+    ordered = _derivative_topo_order(config, derivatives)
+
+    if args.pattern == "per-file":
+        script = _slurm_pattern1(args.config, ordered)
+        if args.output:
+            Path(args.output).write_text(script)
+            print(f"wrote {args.output}")
+        else:
+            print(script)
+    elif args.pattern == "flat":
+        script = _slurm_pattern2(args.config, ordered)
+        if args.output:
+            Path(args.output).write_text(script)
+            print(f"wrote {args.output}")
+        else:
+            print(script)
+    else:
+        submit, worker = _slurm_pattern3(args.config, ordered)
+        if args.output:
+            submit_path = Path(args.output)
+            worker_path = submit_path.parent / "run_one_derivative.sh"
+            submit_path.write_text(submit)
+            worker_path.write_text(worker)
+            print(f"wrote {submit_path}")
+            print(f"wrote {worker_path}")
+        else:
+            print(f"# === FILE: submit_pipeline.sh ===\n{submit}")
+            print(f"# === FILE: run_one_derivative.sh ===\n{worker}")
+    return 0
+
+
 def _cmd_view(args: argparse.Namespace) -> int:
     subprocess.Popen(
         [sys.executable, "-m", "neurodags.visualization", args.path],
@@ -348,6 +599,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_dag(args)
     if args.command == "view":
         return _cmd_view(args)
+    if args.command == "count":
+        return _cmd_count(args)
+    if args.command == "slurm-script":
+        return _cmd_slurm_script(args)
 
     parser.error(f"Unknown command '{args.command}'")
     return 2
