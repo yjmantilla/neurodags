@@ -1,0 +1,888 @@
+# Feature extraction pipeline replicating the coco_complex_seizures analysis.
+#
+# Preprocessing: filter 0.5-150 Hz → epoch 1s/0.5s → resample 256 Hz →
+#                z-score per epoch-channel.
+#
+# Features (all per epoch per channel, then aggregated as mean/std):
+#   - 1/f slope (FOOOF + Welch, knee mode, 5-100 Hz)
+#   - Lempel-Ziv complexity (binarized at median)
+#   - Sample entropy
+#   - Spectral entropy (TR variant, nperseg = sfreq/5 = 51)
+#   - Approximate entropy
+#   - Hjorth mobility and complexity
+#   - Number of zero crossings (normalized)
+#   - Permutation entropy
+#   - SVD entropy
+#   - Higuchi fractal dimension
+#   - Katz fractal dimension
+#   - Petrosian fractal dimension
+#   - Multiscale entropy (neurokit2)
+#
+# Usage:
+#   neurodags run example_pipelines/pipeline_epilepsy_features.yml
+#   neurodags dataframe example_pipelines/pipeline_epilepsy_features.yml --output features.csv
+
+datasets: datasets_epilepsy_features.yml
+mount_point: local
+new_definitions: example_pipelines/definitions_epilepsy.py
+
+DerivativeDefinitions:
+
+  # ---------------------------------------------------------------------------
+  # Stage 1 – Preprocessing
+  # ---------------------------------------------------------------------------
+
+  Mat2fif:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: SourceFile
+      - id: 1
+        node: mat2fif
+        args:
+          eegpath: id.0
+
+  # Filter 0.5-150 Hz, create 1-second epochs with 0.5-second overlap,
+  # then resample to 256 Hz.
+  BasicPrep:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: Mat2fif.fif
+      - id: 1
+        node: basic_preprocessing
+        args:
+          mne_object: id.0
+          resample: 256
+          notch_filter: null
+          filter_args:
+            l_freq: 0.5
+            h_freq: 150
+          epoch_config:
+            duration: 1
+            overlap: 0.5
+            reject_by_annotation: False
+            proj: False
+
+  # Z-score normalise per epoch per channel.
+  AmpNorm:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: BasicPrep.fif
+      - id: 1
+        node: amplitude_normalization_per_segment
+        args:
+          mne_object: id.0
+
+  # ---------------------------------------------------------------------------
+  # Stage 2 – FOOOF / 1-over-f slope
+  #
+  # Welch PSD with n_fft = sfreq/5 = 51 samples (1/5-second window),
+  # then FOOOF with knee mode, frequency range [5, 100] Hz.
+  # ---------------------------------------------------------------------------
+
+  SpectrumWelch5to100:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: mne_spectrum_array
+        args:
+          meeg: id.0
+          method: 'welch'
+          method_kwargs:
+            fmin: 0
+            n_fft: 51
+            n_overlap: 26
+            n_per_seg: 51
+
+  FooofWelch5to100:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: SpectrumWelch5to100.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'spectrum'
+      - id: 2
+        node: fooof
+        args:
+          psd_like: id.1
+          freq_dim: 'frequencies'
+          fooof_options:
+            FOOOF:
+              aperiodic_mode: 'knee'
+            fit:
+              freq_range: [5, 100]
+            freq_res: 1
+            save:
+              save_results: True
+              save_settings: True
+              save_data: True
+          include_timings: True
+
+  apSlope5to100trMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: FooofWelch5to100.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_scalars
+        args:
+          fooof_like: id.1
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'fooof_aperiodic_exponent'
+      - id: 4
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.3
+          dim: 'epochs'
+          operation: 'mean'
+
+  apSlope5to100trSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: FooofWelch5to100.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'fooof'
+      - id: 2
+        node: fooof_scalars
+        args:
+          fooof_like: id.1
+      - id: 3
+        node: extract_data_var
+        args:
+          dataset_like: id.2
+          data_var: 'fooof_aperiodic_exponent'
+      - id: 4
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.3
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 3 – Lempel-Ziv complexity (binarized at median before computing)
+  # ---------------------------------------------------------------------------
+
+  AntropyLZivComplexity:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: meeg_to_xarray
+        args:
+          mne_object: id.0
+      - id: 2
+        node: binarize_with_median
+        args:
+          data: id.1
+          dim: 'times'
+      - id: 3
+        node: antropy_lziv_complexity
+        args:
+          data_like: id.2
+          dim: 'times'
+          normalize: True
+
+  LZivComplexityMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyLZivComplexity.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  LZivComplexitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyLZivComplexity.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 4 – Sample entropy
+  # ---------------------------------------------------------------------------
+
+  AntropySampleEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_sample_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+          order: 2
+          metric: 'chebyshev'
+
+  SampleEntropyMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropySampleEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  SampleEntropySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropySampleEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 5 – Spectral entropy (TR variant: nperseg = sfreq/5 = 51)
+  # ---------------------------------------------------------------------------
+
+  AntropySpectralEntropyTR:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_spectral_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+          sf: 256.0
+          method: 'welch'
+          nperseg: 51
+          normalize: True
+
+  SpectralEntropyTRMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropySpectralEntropyTR.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  SpectralEntropyTRSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropySpectralEntropyTR.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 6 – Approximate entropy
+  # ---------------------------------------------------------------------------
+
+  AntropyAppEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_app_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+          order: 2
+          metric: 'chebyshev'
+
+  AppEntropyMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyAppEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  AppEntropySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyAppEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 7 – Hjorth parameters (mobility and complexity)
+  # ---------------------------------------------------------------------------
+
+  AntropyHjorthParams:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_hjorth_params
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  HjorthMobilityMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: mobility
+          end: mobility
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'mean'
+
+  HjorthMobilitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: mobility
+          end: mobility
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
+  HjorthComplexityMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: complexity
+          end: complexity
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'mean'
+
+  HjorthComplexitySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyHjorthParams.nc
+      - id: 1
+        node: slice_xarray
+        args:
+          xarray_data: id.0
+          dim: hjorthComponents
+          start: complexity
+          end: complexity
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 8 – Number of zero crossings (normalized)
+  # ---------------------------------------------------------------------------
+
+  AntropyNumZeroCross:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_num_zerocross
+        args:
+          data_like: id.0
+          dim: 'times'
+          normalize: True
+
+  NumZeroCrossMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyNumZeroCross.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  NumZeroCrossSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyNumZeroCross.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 9 – Permutation entropy
+  # ---------------------------------------------------------------------------
+
+  AntropyPermEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_perm_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+          order: 3
+          delay: 1
+          normalize: True
+
+  PermEntropyMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyPermEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  PermEntropySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyPermEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 10 – SVD entropy
+  # ---------------------------------------------------------------------------
+
+  AntropySVDEntropy:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_svd_entropy
+        args:
+          data_like: id.0
+          dim: 'times'
+          order: 3
+          delay: 1
+          normalize: True
+
+  SVDEntropyMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropySVDEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  SVDEntropySD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropySVDEntropy.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 11 – Higuchi fractal dimension
+  # ---------------------------------------------------------------------------
+
+  AntropyHiguchiFD:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_higuchi_fd
+        args:
+          data_like: id.0
+          dim: 'times'
+          kmax: 10
+
+  HiguchiFDMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyHiguchiFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  HiguchiFDSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyHiguchiFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 12 – Katz fractal dimension
+  # ---------------------------------------------------------------------------
+
+  AntropyKatzFD:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_katz_fd
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  KatzFDMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyKatzFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  KatzFDSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyKatzFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 13 – Petrosian fractal dimension
+  # ---------------------------------------------------------------------------
+
+  AntropyPetrosianFD:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: antropy_petrosian_fd
+        args:
+          data_like: id.0
+          dim: 'times'
+
+  PetrosianFDMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyPetrosianFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'mean'
+
+  PetrosianFDSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: AntropyPetrosianFD.nc
+      - id: 1
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.0
+          dim: 'epochs'
+          operation: 'std'
+
+  # ---------------------------------------------------------------------------
+  # Stage 14 – Multiscale entropy (neurokit2)
+  #
+  # Original params: scale='default', dimension=3, tolerance='sd' (now r='sd'),
+  # method='MSEn' (now default).  figure_encoding='none' skips matplotlib output.
+  # ---------------------------------------------------------------------------
+
+  NeurokitEntropyMultiscale:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: AmpNorm.fif
+      - id: 1
+        node: neurokit_entropy_multiscale
+        args:
+          data_like: id.0
+          dim: 'times'
+          figure_encoding: 'none'
+          scale: 'default'
+          dimension: 3
+          r: 'sd'
+
+  EntropyMultiscaleMean:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: NeurokitEntropyMultiscale.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'value'
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'mean'
+
+  EntropyMultiscaleSD:
+    overwrite: False
+    save: False
+    for_dataframe: True
+    nodes:
+      - id: 0
+        derivative: NeurokitEntropyMultiscale.nc
+      - id: 1
+        node: extract_data_var
+        args:
+          dataset_like: id.0
+          data_var: 'value'
+      - id: 2
+        node: aggregate_across_dimension
+        args:
+          xarray_data: id.1
+          dim: 'epochs'
+          operation: 'std'
+
+DerivativeList:
+  # Preprocessing (required by all features)
+  - Mat2fif
+  - BasicPrep
+  - AmpNorm
+
+  # 1/f slope via FOOOF
+  - SpectrumWelch5to100
+  - FooofWelch5to100
+  - apSlope5to100trMean
+  - apSlope5to100trSD
+
+  # Lempel-Ziv complexity
+  - AntropyLZivComplexity
+  - LZivComplexityMean
+  - LZivComplexitySD
+
+  # Sample entropy
+  - AntropySampleEntropy
+  - SampleEntropyMean
+  - SampleEntropySD
+
+  # Spectral entropy (TR)
+  - AntropySpectralEntropyTR
+  - SpectralEntropyTRMean
+  - SpectralEntropyTRSD
+
+  # Approximate entropy
+  - AntropyAppEntropy
+  - AppEntropyMean
+  - AppEntropySD
+
+  # Hjorth parameters
+  - AntropyHjorthParams
+  - HjorthMobilityMean
+  - HjorthMobilitySD
+  - HjorthComplexityMean
+  - HjorthComplexitySD
+
+  # Zero crossings
+  - AntropyNumZeroCross
+  - NumZeroCrossMean
+  - NumZeroCrossSD
+
+  # Permutation entropy
+  - AntropyPermEntropy
+  - PermEntropyMean
+  - PermEntropySD
+
+  # SVD entropy
+  - AntropySVDEntropy
+  - SVDEntropyMean
+  - SVDEntropySD
+
+  # Higuchi FD
+  - AntropyHiguchiFD
+  - HiguchiFDMean
+  - HiguchiFDSD
+
+  # Katz FD
+  - AntropyKatzFD
+  - KatzFDMean
+  - KatzFDSD
+
+  # Petrosian FD
+  - AntropyPetrosianFD
+  - PetrosianFDMean
+  - PetrosianFDSD
+
+  # Multiscale entropy
+  - NeurokitEntropyMultiscale
+  - EntropyMultiscaleMean
+  - EntropyMultiscaleSD
