@@ -718,7 +718,7 @@ def fooof_scalars(
             "component must be one of {'aperiodic_params', 'r_squared', 'error', 'all'}"
         )
 
-    fooof_xr = _resolve_psd_dataarray(fooof_like)
+    fooof_xr = _resolve_fooof_dataarray(fooof_like)
     other_dims = list(fooof_xr.dims)
     other_shape = [int(fooof_xr.sizes[dim]) for dim in other_dims]
     flat_count = int(np.prod(other_shape)) if other_shape else 1
@@ -906,7 +906,7 @@ def fooof_component(
     if space not in {"log", "linear"}:
         raise ValueError("space must be either 'log' or 'linear'")
 
-    fooof_xr = _resolve_psd_dataarray(fooof_like)
+    fooof_xr = _resolve_fooof_dataarray(fooof_like)
     other_dims = list(fooof_xr.dims)
     other_shape = [int(fooof_xr.sizes[dim]) for dim in other_dims]
     flat_count = int(np.prod(other_shape)) if other_shape else 1
@@ -982,42 +982,53 @@ def fooof_component(
             continue
 
         try:
-            model_log = _ensure_shape(getattr(fm, "fooofed_spectrum_", None), "fooofed spectrum")
-            power_log = _ensure_shape(getattr(fm, "power_spectrum", None), "power spectrum")
-            model_in_space = _model_to_space(model_log, "fooofed spectrum")
-            full_in_space = (
-                _ensure_shape(fm.get_data("full", space=space), "full spectrum")
-                if mode == "fooof-api"
-                else _model_to_space(power_log, "power spectrum")
-            )
+            need_residual = component in {"residual", "all"}
+            need_periodic = component in {"periodic", "all"}
+            need_model = need_periodic or need_residual
 
             if mode == "fooof-api":
                 aperiodic = _ensure_shape(
                     fm.get_data("aperiodic", space=space), "aperiodic spectrum"
                 )
-                periodic = _ensure_shape(fm.get_data("peak", space=space), "peak spectrum")
-                # if space == "linear":
-                #     periodic = np.clip(periodic, a_min=0.0, a_max=None)
+                if need_periodic:
+                    periodic = _ensure_shape(fm.get_data("peak", space=space), "peak spectrum")
+                if need_residual:
+                    full_in_space = _ensure_shape(fm.get_data("full", space=space), "full spectrum")
+                    model_in_space = _ensure_shape(
+                        fm.get_data("model", space=space), "model spectrum"
+                    )
+                    residual = full_in_space - model_in_space
             else:
                 ap_fit_log = _ensure_shape(getattr(fm, "_ap_fit", None), "aperiodic fit")
-                peak_log = getattr(fm, "_peak_fit", None)
-                if peak_log is not None:
-                    peak_log = _ensure_shape(peak_log, "peak fit")
-                else:
-                    peak_log = model_log - ap_fit_log
-
                 aperiodic = _log_to_space(ap_fit_log, "aperiodic fit")
-                if space == "linear":
-                    periodic = model_in_space - aperiodic
-                    # periodic = np.clip(periodic, a_min=0.0, a_max=None)
-                else:
-                    periodic = peak_log
 
-            residual = full_in_space - model_in_space
+                if need_model:
+                    model_log = _ensure_shape(
+                        getattr(fm, "fooofed_spectrum_", None), "fooofed spectrum"
+                    )
+                    model_in_space = _model_to_space(model_log, "fooofed spectrum")
+
+                if need_periodic:
+                    peak_log = getattr(fm, "_peak_fit", None)
+                    if peak_log is not None:
+                        peak_log = _ensure_shape(peak_log, "peak fit")
+                    else:
+                        peak_log = model_log - ap_fit_log
+                    if space == "linear":
+                        periodic = model_in_space - aperiodic
+                    else:
+                        periodic = peak_log
+
+                if need_residual:
+                    power_log = _ensure_shape(getattr(fm, "power_spectrum", None), "power spectrum")
+                    full_in_space = _model_to_space(power_log, "power spectrum")
+                    residual = full_in_space - model_in_space
 
             component_arrays["aperiodic"][idx] = aperiodic
-            component_arrays["periodic"][idx] = periodic
-            component_arrays["residual"][idx] = residual
+            if need_periodic:
+                component_arrays["periodic"][idx] = periodic
+            if need_residual:
+                component_arrays["residual"][idx] = residual
         except Exception as exc:
             log.warning("Failed to compute FOOOF component", index=idx, error=str(exc))
             invalid_indices.append(idx)
