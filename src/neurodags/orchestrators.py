@@ -56,6 +56,22 @@ class _FileResult:
     traceback: str | None = None
 
 
+def _sanitize_reference_base(path: str) -> str:
+    """Replace ``@`` with ``&`` in the filename component of *path*.
+
+    ``@`` is the delimiter between source name and derivative name
+    (``source@DerivativeName.ext``).  When a neurodags derivative is itself
+    used as a source, its filename already contains ``@``.  Replacing that
+    ``@`` with ``&`` preserves the one-``@``-per-filename invariant so that
+    derivative paths remain unambiguous.
+
+    Only the basename is rewritten; directory components are left untouched.
+    """
+    dirpart, basename = os.path.split(path)
+    sanitized = basename.replace("@", "&")
+    return os.path.join(dirpart, sanitized) if dirpart else sanitized
+
+
 def _resolve_reference_base(
     file_path: str,
     dataset_config: DatasetConfig,
@@ -68,9 +84,10 @@ def _resolve_reference_base(
         os.makedirs(derivatives_path, exist_ok=True)
         reference_base = os.path.relpath(file_path, start=common_root) if common_root else file_path
         reference_base = os.path.join(derivatives_path, reference_base)
+        reference_base = _sanitize_reference_base(reference_base)
         os.makedirs(os.path.dirname(reference_base), exist_ok=True)
     else:
-        reference_base = file_path
+        reference_base = _sanitize_reference_base(file_path)
     return reference_base, Path(reference_base)
 
 

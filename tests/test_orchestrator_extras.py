@@ -7,9 +7,40 @@ import pytest
 from neurodags.definitions import Artifact, NodeResult
 from neurodags.orchestrators import (
     _resolve_reference_base,
+    _sanitize_reference_base,
     build_derivative_dataframe,
     iterate_derivative_pipeline,
 )
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_reference_base — unit tests
+# ---------------------------------------------------------------------------
+
+def test_sanitize_reference_base_replaces_at_in_filename():
+    result = _sanitize_reference_base("/derivatives/sub-01.vhdr@BasicPrep.fif")
+    assert result == "/derivatives/sub-01.vhdr&BasicPrep.fif"
+
+
+def test_sanitize_reference_base_multiple_at_signs():
+    # double-@ (already-chained path): both replaced
+    result = _sanitize_reference_base("/derivatives/sub-01.vhdr@First@Second.fif")
+    assert result == "/derivatives/sub-01.vhdr&First&Second.fif"
+
+
+def test_sanitize_reference_base_no_at_unchanged():
+    path = "/derivatives/sub-01.vhdr"
+    assert _sanitize_reference_base(path) == path
+
+
+def test_sanitize_reference_base_preserves_directory_components():
+    # @ in directory path must NOT be touched
+    result = _sanitize_reference_base("/path/with@dir/sub-01@BasicPrep.fif")
+    assert result == "/path/with@dir/sub-01&BasicPrep.fif"
+
+
+def test_sanitize_reference_base_no_directory():
+    assert _sanitize_reference_base("sub-01@BasicPrep.fif") == "sub-01&BasicPrep.fif"
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +58,46 @@ def test_resolve_reference_base_no_derivatives_path(tmp_path):
     file_path = str(tmp_path / "sub-01" / "file.vhdr")
     ref_str, ref_path = _resolve_reference_base(file_path, ds_config, None, None)
     assert ref_str == file_path
+
+
+def test_resolve_reference_base_sanitizes_at_no_derivatives_path(tmp_path):
+    """Source filename with @ (neurodags derivative used as input) is sanitized."""
+    from neurodags.definitions import DatasetConfig
+
+    ds_config = DatasetConfig(
+        name="test",
+        file_pattern=str(tmp_path / "**/*.fif"),
+        derivatives_path=None,
+    )
+    # Simulate a neurodags derivative file used as a new source
+    file_path = str(tmp_path / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
+    ref_str, ref_path = _resolve_reference_base(file_path, ds_config, None, None)
+    assert "@" not in ref_str
+    assert "&" in ref_str
+    assert ref_str == str(tmp_path / "sub-01" / "sub-01.vhdr&BasicPrep.fif")
+    assert ref_path == tmp_path / "sub-01" / "sub-01.vhdr&BasicPrep.fif"
+
+
+def test_resolve_reference_base_sanitizes_at_with_derivatives_path(tmp_path):
+    """@ in source filename is sanitized when a separate derivatives_path is set."""
+    from neurodags.definitions import DatasetConfig
+
+    raw_dir = tmp_path / "rawdata"
+    deriv_dir = tmp_path / "derivatives"
+    deriv_dir.mkdir()
+
+    ds_config = DatasetConfig(
+        name="test",
+        file_pattern=str(raw_dir / "**/*.fif"),
+        derivatives_path=str(deriv_dir),
+    )
+    file_path = str(raw_dir / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
+    ref_str, ref_path = _resolve_reference_base(file_path, ds_config, str(raw_dir), None)
+    assert "@" not in ref_str
+    assert "&" in ref_str
+    # derivative goes into deriv_dir with sanitized filename
+    assert ref_str.startswith(str(deriv_dir))
+    assert "sub-01.vhdr&BasicPrep.fif" in ref_str
 
 
 # ---------------------------------------------------------------------------

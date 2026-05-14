@@ -21,6 +21,17 @@ sub-1@PowerSpectrum.nc  → derivative
 
 Derivatives mirror the input directory structure — NeuroDAGs is agnostic to how your data is organized.
 
+### Chaining pipelines (neurodags output as source)
+
+When a derivative produced by one pipeline run is used as the source file in a subsequent pipeline run, its filename already contains `@` (e.g. `sub-1.fif@CleanedEEG.fif`). NeuroDAGs automatically replaces that `@` with `&` when building the reference base, so the one-`@`-per-filename invariant is preserved:
+
+```
+sub-1.fif@CleanedEEG.fif      → source (a previous derivative)
+sub-1.fif&CleanedEEG.fif@PowerSpectrum.nc  → new derivative
+```
+
+This means downstream tooling can always split on the single `@` to separate the source identity from the derivative name.
+
 ## Node
 
 A **node** is a Python function decorated with `@register_node`. It receives data as keyword arguments and returns a `NodeResult`. Preprocessing nodes, spectral analysis nodes, entropy nodes, and custom nodes are all treated identically.
