@@ -19,6 +19,7 @@ api/index
 api/src/neurodags/index
 auto_examples/index
 changelog
+COMPARISON
 ```
 
 ## Poster
