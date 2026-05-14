@@ -11,14 +11,14 @@ from typing import Any
 import numpy as np
 import plotly.graph_objects as go
 import xarray as xr
-from dash import Dash, Input, Output, dcc, html
+from dash import ALL, Dash, Input, Output, callback_context, dcc, html
 
 from neurodags.loaders import load_meeg
 from neurodags.nodes.descriptive import meeg_to_xarray
 
 
-def load_visualization_dataset(filename: str | Path) -> xr.DataArray:
-    """Load a supported visualization input into an xarray DataArray."""
+def load_visualization_dataset(filename: str | Path) -> xr.DataArray | xr.Dataset:
+    """Load a supported visualization input into an xarray DataArray or Dataset."""
     path = Path(filename)
     suffix = path.suffix.lower()
 
@@ -29,8 +29,14 @@ def load_visualization_dataset(filename: str | Path) -> xr.DataArray:
     if suffix == ".nc":
         try:
             return xr.open_dataarray(path)
+        except ValueError:
+            pass
+        try:
+            return xr.open_dataset(path)
         except Exception as exc:
-            raise ValueError(f"Failed to open {path} as xarray DataArray: {exc}") from exc
+            raise ValueError(
+                f"Failed to open {path} as xarray DataArray or Dataset: {exc}"
+            ) from exc
 
     raise ValueError(f"Unsupported file type '{path.suffix}'. Expected .fif or .nc")
 
@@ -72,36 +78,122 @@ def apply_transform(data: Any, transform: str) -> np.ndarray:
     return arr
 
 
-def build_visualization_app(ds: xr.DataArray, filename: str | Path) -> Dash:
-    """Create the Dash app for a loaded DataArray."""
-    dims = list(ds.dims)
-    coords = {dim: ds.coords[dim].values for dim in dims}
-    app = Dash(__name__)
-
-    value_dropdowns: list[Any] = []
+def _make_dim_controls(dims: list[str], coords: dict[str, Any]) -> list:
+    """Build per-dimension value selector dropdowns using pattern-match IDs."""
+    children: list = []
     for dim in dims:
-        value_dropdowns.append(html.Label(dim))
-        value_dropdowns.append(make_dropdown(dim, coords[dim]))
+        children.append(html.Label(dim))
+        children.append(
+            dcc.Dropdown(
+                id={"type": "dim-dropdown", "index": dim},
+                options=[{"label": str(v), "value": str(v)} for v in coords[dim]],
+                value=str(coords[dim][0]),
+                clearable=False,
+            )
+        )
+    return children
 
+
+def _controls_for_variable(
+    da: xr.DataArray,
+) -> tuple[list, list[dict], str | None, list[dict], str]:
+    """Return (dim_children, x_options, x_value, y_options, y_value) for a DataArray."""
+    dims = list(da.dims)
+    coords = {dim: da.coords[dim].values for dim in dims}
+    children = _make_dim_controls(dims, coords)
+    dim_opts = [{"label": d, "value": d} for d in dims]
+    none_opt = [{"label": "None", "value": "none"}]
+    x_val = dims[-1] if dims else None
+    return children, dim_opts, x_val, none_opt + dim_opts, "none"
+
+
+def _compute_figure(
+    da: xr.DataArray,
+    slice_dict: dict[str, str],
+    xdim: str,
+    ydim: str | None,
+    plot_type: str,
+    x_transform: str,
+    y_transform: str,
+) -> tuple[go.Figure, str]:
+    """Return (figure, debug_json) for the given selections."""
+    arr = safe_sel(da, slice_dict)
+    fig = go.Figure()
+
+    if ydim is None and arr.ndim == 1:
+        x_t = apply_transform(arr.coords[xdim].values, x_transform)
+        y_t = apply_transform(arr.values, y_transform)
+        if plot_type == "line":
+            fig.add_trace(go.Scatter(x=x_t, y=y_t, mode="lines"))
+        elif plot_type == "scatter":
+            fig.add_trace(go.Scatter(x=x_t, y=y_t, mode="markers"))
+        elif plot_type == "bar":
+            fig.add_trace(go.Bar(x=x_t, y=y_t))
+    elif ydim is not None and arr.ndim == 2:
+        xvals = apply_transform(arr.coords[xdim].values, x_transform)
+        yvals = apply_transform(arr.coords[ydim].values, y_transform)
+        if plot_type == "heatmap":
+            fig.add_trace(go.Heatmap(x=xvals, y=yvals, z=arr.values))
+        else:
+            for val in arr.coords[ydim].values:
+                sl = arr.sel({ydim: val})
+                x_t = apply_transform(sl.coords[xdim].values, x_transform)
+                y_t = apply_transform(sl.values, y_transform)
+                fig.add_trace(go.Scatter(x=x_t, y=y_t, mode="lines", name=f"{ydim}={val}"))
+    else:
+        fig.add_annotation(
+            text=f"Unsupported shape after slicing: {arr.shape}, ndim={arr.ndim}",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+        )
+
+    debug_info = {
+        "slice_dict": {key: str(value) for key, value in slice_dict.items()},
+        "xdim": str(xdim),
+        "ydim": str(ydim),
+        "plot_type": plot_type,
+        "x_transform": x_transform,
+        "y_transform": y_transform,
+        "arr_shape": tuple(int(x) for x in arr.shape),
+        "arr_dims": [str(dim) for dim in arr.dims],
+        "metadata": {key: str(value) for key, value in arr.attrs.items()},
+        "coords": {key: str(value.values) for key, value in arr.coords.items()},
+        "dimensions": {key: str(value) for key, value in arr.sizes.items()},
+    }
+    return fig, json.dumps(debug_info, indent=2)
+
+
+def build_visualization_app(ds: xr.DataArray | xr.Dataset, filename: str | Path) -> Dash:
+    """Create the Dash app for a loaded DataArray or Dataset."""
+    if isinstance(ds, xr.DataArray):
+        name = ds.name or "data"
+        dataset = ds.to_dataset(name=name)
+    else:
+        dataset = ds
+
+    var_names = list(dataset.data_vars)
+    initial_var = var_names[0]
+    initial_da = dataset[initial_var]
+
+    dim_children, x_opts, x_val, y_opts, _ = _controls_for_variable(initial_da)
+
+    app = Dash(__name__)
     app.layout = html.Div(
         [
             html.H2(f"Explorer for {filename}"),
-            html.Div(value_dropdowns, style={"marginBottom": "20px"}),
+            html.Label("Variable"),
+            dcc.Dropdown(
+                id="variable-selector",
+                options=[{"label": v, "value": v} for v in var_names],
+                value=initial_var,
+                clearable=False,
+            ),
+            html.Div(dim_children, id="dim-controls"),
             html.Label("X-axis dimension"),
-            dcc.Dropdown(
-                id="x-dim",
-                options=[{"label": dim, "value": dim} for dim in dims],
-                value=dims[-1],
-                clearable=False,
-            ),
+            dcc.Dropdown(id="x-dim", options=x_opts, value=x_val, clearable=False),
             html.Label("Y-axis dimension (optional)"),
-            dcc.Dropdown(
-                id="y-dim",
-                options=[{"label": "None", "value": "none"}]
-                + [{"label": dim, "value": dim} for dim in dims],
-                value="none",
-                clearable=False,
-            ),
+            dcc.Dropdown(id="y-dim", options=y_opts, value="none", clearable=False),
             html.Label("Plot type"),
             dcc.Dropdown(
                 id="plot-type",
@@ -142,78 +234,65 @@ def build_visualization_app(ds: xr.DataArray, filename: str | Path) -> Dash:
             html.H3("Debug info"),
             html.Pre(
                 id="debug-output",
-                style={"whiteSpace": "pre-wrap", "border": "1px solid #ccc", "padding": "10px"},
+                style={
+                    "whiteSpace": "pre-wrap",
+                    "border": "1px solid #ccc",
+                    "padding": "10px",
+                },
             ),
         ]
     )
 
     @app.callback(
-        [Output("plot", "figure"), Output("debug-output", "children")],
-        [Input(f"dropdown-{dim}", "value") for dim in dims]
-        + [
-            Input("x-dim", "value"),
-            Input("y-dim", "value"),
-            Input("plot-type", "value"),
-            Input("x-transform", "value"),
-            Input("y-transform", "value"),
-        ],
+        Output("dim-controls", "children"),
+        Output("x-dim", "options"),
+        Output("x-dim", "value"),
+        Output("y-dim", "options"),
+        Output("y-dim", "value"),
+        Input("variable-selector", "value"),
     )
-    def update_plot(*vals: Any) -> tuple[go.Figure, str]:
-        values = vals[: len(dims)]
-        xdim, ydim, plot_type, x_transform, y_transform = vals[len(dims) :]
-        if ydim == "none":
-            ydim = None
+    def update_variable_controls(var_name: str) -> tuple:
+        da = dataset[var_name]
+        return _controls_for_variable(da)
 
+    @app.callback(
+        [Output("plot", "figure"), Output("debug-output", "children")],
+        Input({"type": "dim-dropdown", "index": ALL}, "value"),
+        Input("variable-selector", "value"),
+        Input("x-dim", "value"),
+        Input("y-dim", "value"),
+        Input("plot-type", "value"),
+        Input("x-transform", "value"),
+        Input("y-transform", "value"),
+    )
+    def update_plot(
+        dim_values: list[str],
+        var_name: str,
+        xdim: str | None,
+        ydim: str,
+        plot_type: str,
+        x_transform: str,
+        y_transform: str,
+    ) -> tuple[go.Figure, str]:
+        if not xdim or var_name not in dataset:
+            return go.Figure(), "{}"
+
+        dim_inputs = callback_context.inputs_list[0]
+        dim_names = [item["id"]["index"] for item in dim_inputs]
+
+        if not dim_names:
+            return go.Figure(), "{}"
+
+        resolved_ydim = None if ydim == "none" else ydim
+        da = dataset[var_name]
         slice_dict = {
-            dim: val for dim, val in zip(dims, values, strict=False) if dim not in (xdim, ydim)
+            dim: val
+            for dim, val in zip(dim_names, dim_values, strict=False)
+            if dim not in (xdim, resolved_ydim)
         }
-        arr = safe_sel(ds, slice_dict)
-
-        fig = go.Figure()
-
-        if ydim is None and arr.ndim == 1:
-            x_t = apply_transform(arr.coords[xdim].values, x_transform)
-            y_t = apply_transform(arr.values, y_transform)
-            if plot_type == "line":
-                fig.add_trace(go.Scatter(x=x_t, y=y_t, mode="lines"))
-            elif plot_type == "scatter":
-                fig.add_trace(go.Scatter(x=x_t, y=y_t, mode="markers"))
-            elif plot_type == "bar":
-                fig.add_trace(go.Bar(x=x_t, y=y_t))
-        elif ydim is not None and arr.ndim == 2:
-            xvals = apply_transform(arr.coords[xdim].values, x_transform)
-            yvals = apply_transform(arr.coords[ydim].values, y_transform)
-            if plot_type == "heatmap":
-                fig.add_trace(go.Heatmap(x=xvals, y=yvals, z=arr.values))
-            else:
-                for val in arr.coords[ydim].values:
-                    sl = arr.sel({ydim: val})
-                    x_t = apply_transform(sl.coords[xdim].values, x_transform)
-                    y_t = apply_transform(sl.values, y_transform)
-                    fig.add_trace(go.Scatter(x=x_t, y=y_t, mode="lines", name=f"{ydim}={val}"))
-        else:
-            fig.add_annotation(
-                text=f"Unsupported shape after slicing: {arr.shape}, ndim={arr.ndim}",
-                x=0.5,
-                y=0.5,
-                showarrow=False,
-            )
-
-        debug_info = {
-            "slice_dict": {key: str(value) for key, value in slice_dict.items()},
-            "xdim": str(xdim),
-            "ydim": str(ydim),
-            "plot_type": plot_type,
-            "x_transform": x_transform,
-            "y_transform": y_transform,
-            "arr_shape": tuple(int(x) for x in arr.shape),
-            "arr_dims": [str(dim) for dim in arr.dims],
-            "metadata": {key: str(value) for key, value in arr.attrs.items()},
-            "coords": {key: str(value.values) for key, value in arr.coords.items()},
-            "dimensions": {key: str(value) for key, value in arr.sizes.items()},
-        }
-
-        return fig, json.dumps(debug_info, indent=2)
+        return _compute_figure(
+            da, slice_dict, xdim, resolved_ydim, plot_type, x_transform, y_transform
+        )
 
     return app
 
