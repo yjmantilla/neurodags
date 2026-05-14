@@ -47,9 +47,19 @@ Each derivative definition has a `nodes` list. A step is either:
 
 Steps reference earlier results via `id.<N>` (e.g., `id.0` = result of step 0).
 
+## File Independence
+
+NeuroDAGs processes each input file in isolation. Every derivative is computed independently per file — there are no cross-file operations within the framework. This is a deliberate design constraint that enables trivial parallelism (each file is an independent job) and caching.
+
+The consequence: operations that require information from multiple files — group-level ICA, normalization to a group mean, atlas registration using a subject-average template — cannot be expressed as NeuroDAGs derivatives. These must be done outside the pipeline, either as a post-processing step or by dropping to plain Python/NumPy after running `build_derivative_dataframe`.
+
+If your workflow needs cross-file operations mid-pipeline, consider Snakemake or Pydra instead.
+
 ## Caching
 
 If a derivative's final artifact already exists on disk and `overwrite: False` (the default), the entire derivative computation is skipped. This allows you to resume interrupted pipelines and avoid redundant computation in large studies.
+
+**Cache invalidation is existence-based, not code-based.** If you change a node's implementation, NeuroDAGs has no way to know the cached output is stale — it only checks whether the output file exists. To force recomputation after modifying a node, either set `overwrite: true` on that derivative or delete the relevant `@DerivativeName` files manually.
 
 ## SourceFile
 

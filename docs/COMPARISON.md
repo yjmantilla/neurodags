@@ -12,7 +12,9 @@ NeuroDAGs is designed specifically for neuroscience signal processing (EEG/MEG/E
 | **BIDS Relation** | BIDS-Preserving (Flexible) | BIDS-Aware (Strict) | BIDS-Agnostic (Glue code needed) |
 | **Aggregation** | Built-in \`dataframe\` | Manual "Reduce" Rules | Manual "Combiners" |
 | **Data Types** | MNE / xarray first-class; generic artifacts supported | Generic Files | Generic Python Objects |
-| **Cluster Scheduling** | Manual (joblib parallelism within a job) | Native SLURM/SGE/PBS | Native SLURM/PBS via Dask/CF |
+| **Cross-file Operations** | Not supported — each file is independent | Supported via reduce rules | Supported via combiners |
+| **Cluster Scheduling** | Template generation (`neurodags slurm-script`); orchestration is manual | Native SLURM/SGE/PBS profiles | Native SLURM/PBS via Dask/CF |
+| **Cache Invalidation** | Existence-based (file present = skip) | Content-hash-based | Content-hash-based |
 | **Provenance Tracking** | Human-readable `.error` markers; no full provenance graph | Full provenance via DAG | Hash-based provenance |
 | **Maturity / Community** | Early-stage, small community | Mature, large community | Active, growing community |
 
@@ -42,11 +44,13 @@ Nodes are plain Python functions decorated with \`@register_node\`. They can be 
 
 ## When NOT to Use NeuroDAGs
 
+- **Cross-file or group-level operations mid-pipeline**: NeuroDAGs processes each file independently — group ICA, normalization to a group mean, atlas registration using a subject-average template, or any operation that needs to read from multiple files cannot be expressed as a derivative. These require post-processing outside the framework. If cross-file operations are central to your pipeline, use Snakemake or Pydra.
+- **Cache invalidation on code change**: Caching is existence-based. NeuroDAGs does not detect when a node's implementation changed and silently reuses stale outputs. You must manually set `overwrite: true` or delete cached files after modifying node code. If hash-based invalidation matters, use Pydra.
 - **Strict BIDS-App compliance required**: Snakebids has native BIDS validation and output layout enforcement. NeuroDAGs preserves input paths but does not validate against the BIDS spec.
-- **Complex cluster scheduling**: If you need to submit per-derivative jobs to SLURM/SGE/PBS with dependency chaining, Snakemake or Pydra have native cluster backends. NeuroDAGs parallelises within a single job via joblib; multi-job orchestration is manual.
+- **Production-grade cluster scheduling**: `neurodags slurm-script` generates submission templates but does not integrate with cluster schedulers. Snakemake and Pydra have native SLURM/SGE/PBS profiles with automatic job monitoring, resubmission, and resource accounting.
 - **Full provenance tracking**: NeuroDAGs has no provenance graph — it cannot tell you which version of a node produced a given file. If audit trails matter, Pydra's hash-based caching or DVC are better fits.
 - **Non-neuroscience / non-file-based pipelines**: NeuroDAGs assumes one input file → one set of derivative files. It is not designed for database records, streaming data, or large-scale generic ETL.
-- **Large, mature community support**: NeuroDAGs is early-stage. Snakemake and Nipype have years of community plugins, tutorials, and battle-tested HPC configurations.
+- **Large, mature community support**: NeuroDAGs is early-stage with no ecosystem of reusable nodes. Snakemake and Nipype have years of community wrappers, tutorials, and battle-tested HPC configurations.
 
 ---
 
