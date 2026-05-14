@@ -191,7 +191,7 @@ def iterate_derivative_pipeline(
     """
     log.debug("iterate_call_pipeline: called", pipeline_configuration=pipeline_configuration)
 
-    is_path_like = isinstance(pipeline_configuration, (str, os.PathLike))
+    is_path_like = isinstance(pipeline_configuration, str | os.PathLike)
     config_dict = (
         load_configuration(pipeline_configuration) if is_path_like else pipeline_configuration
     )
@@ -199,9 +199,9 @@ def iterate_derivative_pipeline(
     custom_node_paths: tuple[str, ...] = ()
     new_definitions = config_dict.get("new_definitions")
     if new_definitions:
-        if isinstance(new_definitions, (str, os.PathLike)):
+        if isinstance(new_definitions, str | os.PathLike):
             definition_paths = [new_definitions]
-        elif isinstance(new_definitions, (list, tuple, set)):
+        elif isinstance(new_definitions, list | tuple | set):
             definition_paths = list(new_definitions)
         else:
             raise TypeError("new_definitions must be a string or list of paths")
@@ -289,7 +289,7 @@ def iterate_derivative_pipeline(
             "derivative must be a registered derivative name, node name, DerivativeEntry, or callable node"
         )
     # skip save=False derivatives
-    if "save" in derivative_entry.definition:
+    if derivative_entry is not None and "save" in derivative_entry.definition:
         if derivative_entry.definition["save"] is False:
             log.info(
                 "Derivative is marked with save=False; skipping execution.",
@@ -625,7 +625,7 @@ def _build_reference_base(
     return reference_base_path
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     # Parse args and run iterate_derivative_pipeline
     import argparse
 
