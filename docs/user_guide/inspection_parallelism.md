@@ -219,9 +219,6 @@ run_pipeline(config, derivatives=["MyDerivative"], raise_on_error=True)
 
 `raise_on_error=True` raises `RuntimeError` with the file path, derivative name, and traceback. Useful for CI or single-file debugging where you want a hard stop rather than a partial run.
 
-## HPC Tips
+## HPC / SLURM
 
-1. Set `mount_point: hpc` in `pipeline.yml` for cluster paths. If needed, override it by modifying the config dict before calling the API.
-2. Use `n_jobs: -1` to use all available cores on a compute node.
-3. Submit separate jobs per derivative to exploit SLURM array jobs — each job processes all files for one derivative.
-4. Caching ensures that if a job partially completes, re-running only processes remaining files.
+For full SLURM array job examples (one task per file, per derivative, or chained with `--dependency`) see {doc}`hpc`.

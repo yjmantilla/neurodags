@@ -13,4 +13,5 @@ datasets_yaml
 custom_nodes
 dataframe_assembly
 inspection_parallelism
+hpc
 ```
