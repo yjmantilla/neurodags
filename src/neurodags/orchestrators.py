@@ -278,12 +278,15 @@ def iterate_derivative_pipeline(
     derivative_entry = None
     node_callable: Callable | None = None
     derivative_label: str | None = None
+    allowed_derivatives = config_dict.get("DerivativeList")
 
     if isinstance(derivative, str):
         derivative_label = derivative
         if derivative in list_nodes():
             node_callable = get_node(derivative)
         elif derivative in list_derivatives():
+            if allowed_derivatives is not None and derivative not in allowed_derivatives:
+                raise KeyError(f"Derivative '{derivative}' is not enabled in DerivativeList.")
             derivative_entry = get_derivative(derivative)
         else:
             raise KeyError(f"Unknown derivative or node '{derivative}'")
@@ -489,7 +492,7 @@ def build_derivative_dataframe(
     for derivative_name, derivative_def in derivative_definitions.items():
         if include_derivatives is not None and derivative_name not in include_derivatives:
             continue
-        if not derivative_def.get("for_dataframe", True):
+        if not derivative_def.get("for_dataframe", False):
             continue
         selected_derivatives.append(derivative_name)
     if include_derivatives:

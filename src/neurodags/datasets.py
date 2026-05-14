@@ -63,6 +63,10 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         raise ValueError("No 'datasets' configuration provided or found in the pipeline.")
 
     if isinstance(datasets, str) or isinstance(datasets, os.PathLike):
+        if isinstance(pipeline_input, str | os.PathLike):
+            datasets_path_obj = Path(datasets)
+            if not datasets_path_obj.is_absolute():
+                datasets = str(Path(pipeline_input).resolve().parent / datasets_path_obj)
         datasets_path = get_path(datasets, mount_point=mount_point)
         datasets = load_configuration(datasets_path)
     elif not isinstance(datasets, dict):

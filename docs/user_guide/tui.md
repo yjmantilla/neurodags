@@ -51,7 +51,7 @@ Execute the pipeline to compute derivatives.
 - **Select derivative**: Choose which derivative to compute.
 - **max files/dataset**: Limit the number of files.
 - **n_jobs**: Set the number of parallel jobs (leave blank for serial execution).
-- **Run**: Starts the pipeline execution. Real-time logs are displayed in the area below.
+- **Run**: Starts the pipeline execution. Captured pipeline output is shown in the log area when the run completes.
 
 ### 5. DataFrame Tab
 Assemble computation results into ML-ready DataFrames.

@@ -148,7 +148,7 @@ iterate_derivative_pipeline(config, "MyDerivative", raise_on_error=True)
 
 ## HPC Tips
 
-1. Set `mount_point: hpc` in `pipeline.yml` (or override at runtime) for cluster paths.
+1. Set `mount_point: hpc` in `pipeline.yml` for cluster paths. If needed, override it by modifying the config dict before calling the API.
 2. Use `n_jobs: -1` to use all available cores on a compute node.
 3. Submit separate jobs per derivative to exploit SLURM array jobs — each job processes all files for one derivative.
 4. Caching ensures that if a job partially completes, re-running only processes remaining files.

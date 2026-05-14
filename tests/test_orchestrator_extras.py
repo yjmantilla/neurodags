@@ -39,6 +39,15 @@ def test_iterate_pipeline_unknown_derivative_raises(dummy_pipeline):
         iterate_derivative_pipeline(cfg, "NonExistentDerivative")
 
 
+def test_iterate_pipeline_derivative_not_in_derivative_list_raises(dummy_pipeline):
+    cfg = {
+        **dummy_pipeline["config"],
+        "DerivativeList": ["BasicPrep"],
+    }
+    with pytest.raises(KeyError, match="not enabled in DerivativeList"):
+        iterate_derivative_pipeline(cfg, "Spectrum")
+
+
 def test_iterate_pipeline_invalid_type_raises(dummy_pipeline):
     cfg = dummy_pipeline["config"]
     with pytest.raises(TypeError, match="derivative must be"):
@@ -168,6 +177,20 @@ def test_build_dataframe_no_eligible_derivatives(dummy_pipeline):
     assert "index" in result.columns
 
 
+def test_build_dataframe_missing_for_dataframe_defaults_to_excluded(dummy_pipeline):
+    cfg = {
+        **dummy_pipeline["config"],
+        "DerivativeDefinitions": {
+            "Implicit": {"nodes": [{"id": 0, "derivative": "SourceFile"}]},
+        },
+        "DerivativeList": ["Implicit"],
+    }
+    result = build_derivative_dataframe(cfg)
+    assert isinstance(result, pd.DataFrame)
+    assert "index" in result.columns
+    assert len(result) == 0
+
+
 # ---------------------------------------------------------------------------
 # build_derivative_dataframe — include_derivatives with missing derivative
 # ---------------------------------------------------------------------------
@@ -233,3 +256,23 @@ def test_iterate_pipeline_new_definitions_invalid_type_raises(dummy_pipeline):
     }
     with pytest.raises(TypeError, match="new_definitions must be"):
         iterate_derivative_pipeline(cfg, basic_preprocessing, max_files_per_dataset=1)
+
+
+def test_get_datasets_relative_to_pipeline_path(tmp_path):
+    from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    datasets_path = config_dir / "datasets.yml"
+    datasets_path.write_text(
+        "demo:\n"
+        "  name: Demo\n"
+        f"  file_pattern: {tmp_path}/**/*.vhdr\n"
+        f"  derivatives_path: {tmp_path}/derivatives\n"
+    )
+    pipeline_path = config_dir / "pipeline.yml"
+    pipeline_path.write_text("datasets: datasets.yml\nmount_point: null\n")
+
+    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(pipeline_path)
+    assert mount_point is None
+    assert "demo" in datasets

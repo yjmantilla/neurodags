@@ -69,7 +69,7 @@ def _collect_id_refs(obj: Any) -> set[int]:
         for value in obj.values():
             refs.update(_collect_id_refs(value))
         return refs
-    if isinstance(obj, (list, tuple, set)):
+    if isinstance(obj, list | tuple | set):
         for value in obj:
             refs.update(_collect_id_refs(value))
         return refs
@@ -528,7 +528,7 @@ def collect_derivative_for_dataframe(
     """
 
     enforce_precomputed = bool(derivative_def.get("save", True)) and bool(
-        derivative_def.get("for_dataframe", True)
+        derivative_def.get("for_dataframe", False)
     )
 
     try:
@@ -788,7 +788,7 @@ def _format_coord_value(value: Any) -> str:
 
 
 def _simplify_value(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, bool | int | float | str):
         return value
 
     if isinstance(value, Path):
@@ -800,7 +800,7 @@ def _simplify_value(value: Any) -> Any:
         if isinstance(value, np.generic):
             return value.item()
 
-    if xr is not None and isinstance(value, (xr.DataArray, xr.Dataset)):
+    if xr is not None and isinstance(value, xr.DataArray | xr.Dataset):
         try:
             return value.to_dict(data=True)
         except Exception:
@@ -809,7 +809,7 @@ def _simplify_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(k): _simplify_value(v) for k, v in value.items()}
 
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [_simplify_value(v) for v in value]
 
     if hasattr(value, "to_dict") and callable(value.to_dict):
