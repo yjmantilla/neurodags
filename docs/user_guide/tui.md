@@ -12,16 +12,16 @@ pip install neurodags[tui]
 
 ## Launching the TUI
 
-You can launch the TUI using the `neurodags-tui` command. Optionally, you can pass the path to a pipeline configuration file:
+Launching the TUI using the `neurodags-tui` command. You can pass the path to a pipeline configuration file and optionally a datasets configuration file:
 
 ```bash
-neurodags-tui [pipeline.yml]
+neurodags-tui [pipeline.yml] [-d datasets.yml]
 ```
 
 Alternatively, you can run it via Python:
 
 ```bash
-python -m neurodags.tui [pipeline.yml]
+python -m neurodags.tui [pipeline.yml] [-d datasets.yml]
 ```
 
 ## Interface Overview
@@ -31,7 +31,9 @@ The TUI is organized into several tabs, each focused on a specific part of the N
 ### 1. Config Tab
 This is where you load your pipeline configuration.
 - **Pipeline YAML path**: Enter the path to your `pipeline.yml`.
+- **Datasets YAML path (optional override)**: Enter the path to an independent `datasets.yml`. If provided, this overrides any `datasets` definition found inside the pipeline configuration.
 - **Load**: Click to load the configuration. Once loaded, a summary of datasets and derivatives will be displayed.
+
 
 ### 2. DAG Tab
 Visualize the structure of your pipeline.

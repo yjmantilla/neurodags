@@ -145,22 +145,23 @@ class TestAppStartup:
 
 
 class TestConfigTab:
-    def test_load_config_success(self, tmp_path):
-        yaml = tmp_path / "p.yaml"
-        yaml.write_text(
-            "Datasets:\n  ds1:\n    file_pattern: '*.vhdr'\nDerivativeDefinitions:\n  StepA: {}\n"
-        )
+    def test_load_config_with_datasets_override(self, tmp_path):
+        pipe_yaml = tmp_path / "p.yaml"
+        pipe_yaml.write_text("DerivativeDefinitions:\n  StepA: {}\n")
+        data_yaml = tmp_path / "d.yaml"
+        data_yaml.write_text("Datasets:\n  ds1:\n    file_pattern: '*.vhdr'\n")
 
         async def _():
             async with NeuroDagsApp().run_test() as pilot:
                 app = pilot.app
-                app.query_one("#config-path-input", Input).value = str(yaml)
+                app.query_one("#config-path-input", Input).value = str(pipe_yaml)
+                app.query_one("#datasets-path-input", Input).value = str(data_yaml)
                 await pilot.click("#btn-load-config")
                 await pilot.pause()
                 assert app._config is not None
-                assert "StepA" in app._derivatives
-                status = app.query_one("#config-status", Static).render()
-                assert "Loaded" in str(status)
+                assert app._datasets_path == str(data_yaml)
+                summary = str(app.query_one("#config-summary", Static).render())
+                assert "ds1" in summary
 
         _run(_())
 

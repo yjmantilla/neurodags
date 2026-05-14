@@ -149,25 +149,36 @@ def get_all_files_across_datasets(
     return files_per_dataset, all_files, common_roots
 
 
-def get_all_files_from_pipeline_configuration(pipeline_input, max_files_per_dataset=None):
+def get_all_files_from_pipeline_configuration(
+    pipeline_input, datasets_input=None, max_files_per_dataset=None
+):
     """
-    Given a pipeline configuration dictionary with datasets and an optional mount point,
+    Given a pipeline configuration and an optional datasets configuration,
     retrieve all files across datasets.
+
     Parameters
     ----------
-    pipeline_input : dict
-        A dictionary containing 'datasets' and optionally 'mount_point'.
+    pipeline_input : dict | path-like
+        A dictionary or path to a YAML file containing pipeline configuration.
+    datasets_input : dict | path-like, optional
+        A dictionary or path to a YAML file containing datasets configuration.
+        If provided, it overrides the 'datasets' section of the pipeline configuration.
     max_files_per_dataset : int, optional
         Maximum number of files to retrieve per dataset. If None, retrieves all files.
+
     Returns
     -------
     dict of str to list of str
         A dictionary mapping dataset names to lists of file paths.
     list of tuple
         A list of tuples (index, dataset_name, file_path) for all files across datasets
+    dict of str to str
+        A dictionary mapping dataset names to their common roots.
     """
-    log.debug("get_all_files_from_pipeline_configuration: called", keys=list(pipeline_input.keys()))
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(pipeline_input)
+    log.debug("get_all_files_from_pipeline_configuration: called", pipeline_input=pipeline_input)
+    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+        pipeline_input, datasets_input=datasets_input
+    )
 
     files_per_dataset, all_files, common_roots = get_all_files_across_datasets(
         datasets, mount_point=mount_point, max_files_per_dataset=max_files_per_dataset

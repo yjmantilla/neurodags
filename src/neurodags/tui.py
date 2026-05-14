@@ -19,9 +19,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, ClassVar
 
+from rich.text import Text
+
 try:
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical
+    from textual.markup import escape as escape_markup
     from textual.widgets import (
         Button,
         DataTable,
@@ -45,6 +48,13 @@ _BLANK = (
 )  # kept for format fallback comparison; use select.is_blank for no-selection checks
 
 
+class _InspectableStatic(Static):
+    """Static widget that renders its original content for easier inspection in tests."""
+
+    def render(self) -> Any:
+        return self.content
+
+
 class _ConfigTab(Vertical):
     """Configuration tab."""
 
@@ -63,8 +73,11 @@ class _ConfigTab(Vertical):
         with Horizontal(classes="row"):
             yield Input(placeholder="/path/to/pipeline.yaml", id="config-path-input")
             yield Button("Load", id="btn-load-config", variant="primary")
+        yield Label("Datasets YAML path (optional override)")
+        with Horizontal(classes="row"):
+            yield Input(placeholder="/path/to/datasets.yaml", id="datasets-path-input")
         yield Static("", id="config-status")
-        yield Static("", id="config-summary")
+        yield _InspectableStatic("", id="config-summary")
 
 
 class _DagTab(Vertical):
@@ -187,10 +200,11 @@ class NeuroDagsApp(App):
 
     BINDINGS: ClassVar[list[tuple[str, str, str]]] = [("q", "quit", "Quit")]
 
-    def __init__(self, config_path: str | None = None) -> None:
-        """Initialize the TUI with an optional config path."""
+    def __init__(self, config_path: str | None = None, datasets_path: str | None = None) -> None:
+        """Initialize the TUI with optional config and datasets paths."""
         super().__init__()
         self._config_path: str | None = config_path
+        self._datasets_path: str | None = datasets_path
         self._config: dict[str, Any] | None = None
         self._derivatives: list[str] = []
 
@@ -215,7 +229,14 @@ class NeuroDagsApp(App):
     def on_mount(self) -> None:
         if self._config_path:
             self.query_one("#config-path-input", Input).value = self._config_path
-            self._load_config(self._config_path)
+        if self._datasets_path:
+            self.query_one("#datasets-path-input", Input).value = self._datasets_path
+
+        if self._config_path:
+            if self._datasets_path:
+                self._load_config(self._config_path, self._datasets_path)
+            else:
+                self._load_config(self._config_path)
 
     # ------------------------------------------------------------------
     # Event routing
@@ -241,10 +262,14 @@ class NeuroDagsApp(App):
 
     def _handle_load_config(self) -> None:
         path = self.query_one("#config-path-input", Input).value.strip()
+        ds_path = self.query_one("#datasets-path-input", Input).value.strip() or None
         if path:
-            self._load_config(path)
+            if ds_path:
+                self._load_config(path, ds_path)
+            else:
+                self._load_config(path)
 
-    def _load_config(self, path: str) -> None:
+    def _load_config(self, path: str, datasets_path: str | None = None) -> None:
         from neurodags.loaders import load_configuration
 
         status = self.query_one("#config-status", Static)
@@ -252,16 +277,30 @@ class NeuroDagsApp(App):
         try:
             self._config = load_configuration(path)
             self._config_path = path
+            self._datasets_path = datasets_path
             self._derivatives = list(self._config.get("DerivativeDefinitions", {}).keys())
-            datasets = list(self._config.get("Datasets", {}).keys())
-            status.update(f"[green]Loaded:[/green] {path}")
+            if datasets_path:
+                datasets_config = load_configuration(datasets_path)
+            else:
+                datasets_config = self._config
+            datasets = list(
+                (datasets_config.get("Datasets") or datasets_config.get("datasets") or {}).keys()
+            )
+
+            status_lines = [f"[green]Loaded:[/green] {escape_markup(path)}"]
+            if datasets_path:
+                status_lines.append(f"[green]Datasets:[/green] {escape_markup(datasets_path)}")
+            status.update("\n".join(status_lines))
+
             summary.update(
-                f"Datasets: {', '.join(datasets) or 'none'}\n"
-                f"Derivatives: {', '.join(self._derivatives) or 'none'}"
+                Text(
+                    f"Datasets: {', '.join(datasets) or 'none'}\n"
+                    f"Derivatives: {', '.join(self._derivatives) or 'none'}"
+                )
             )
             self._sync_derivative_selects()
         except Exception as exc:
-            status.update(f"[red]Error:[/red] {exc}")
+            status.update(f"[red]Error:[/red] {escape_markup(str(exc))}")
 
     def _sync_derivative_selects(self) -> None:
         options = [(d, d) for d in self._derivatives]
@@ -326,8 +365,9 @@ class NeuroDagsApp(App):
                 iterate_derivative_pipeline,
                 self._config,
                 derivative,
-                max_files,
-                True,  # dry_run
+                datasets_configuration=self._datasets_path,
+                max_files_per_dataset=max_files,
+                dry_run=True,
             )
         except Exception as exc:
             self.notify(f"Dry run error: {exc}", severity="error")
@@ -371,6 +411,7 @@ class NeuroDagsApp(App):
                 iterate_derivative_pipeline,
                 self._config,
                 derivative,
+                self._datasets_path,
                 max_files,
                 n_jobs,
                 buf,
@@ -409,6 +450,7 @@ class NeuroDagsApp(App):
             df = await asyncio.to_thread(
                 build_derivative_dataframe,
                 self._config,
+                datasets_configuration=self._datasets_path,
                 include_derivatives=include,
                 max_files_per_dataset=max_files,
                 output_format=fmt,
@@ -470,12 +512,29 @@ def _run_pipeline_sync(
     func: Any,
     config: dict,
     derivative: str,
-    max_files: int | None,
-    n_jobs: int | None,
-    buf: io.StringIO,
+    datasets_config_or_max_files: str | dict | int | None,
+    max_files_or_n_jobs: int | io.StringIO | None,
+    n_jobs_or_buf: int | io.StringIO | None,
+    buf: io.StringIO | None = None,
 ) -> None:
+    if isinstance(n_jobs_or_buf, io.StringIO):
+        datasets_config = None
+        max_files = datasets_config_or_max_files
+        n_jobs = max_files_or_n_jobs
+        buf = n_jobs_or_buf
+    else:
+        datasets_config = datasets_config_or_max_files
+        max_files = max_files_or_n_jobs
+        n_jobs = n_jobs_or_buf
+        buf = io.StringIO() if buf is None else buf
     with redirect_stdout(buf), redirect_stderr(buf):
-        func(config, derivative, max_files_per_dataset=max_files, n_jobs=n_jobs)
+        func(
+            config,
+            derivative,
+            datasets_configuration=datasets_config,
+            max_files_per_dataset=max_files,
+            n_jobs=n_jobs,
+        )
 
 
 # ------------------------------------------------------------------
@@ -488,8 +547,12 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="NeuroDAGs TUI")
     parser.add_argument("config", nargs="?", help="Path to pipeline YAML config")
+    parser.add_argument("-d", "--datasets", help="Optional path to datasets YAML config override")
     args = parser.parse_args()
-    NeuroDagsApp(config_path=args.config).run()
+    if args.datasets:
+        NeuroDagsApp(config_path=args.config, datasets_path=args.datasets).run()
+    else:
+        NeuroDagsApp(config_path=args.config).run()
 
 
 if __name__ == "__main__":

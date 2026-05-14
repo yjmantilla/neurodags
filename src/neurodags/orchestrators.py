@@ -147,8 +147,9 @@ def _process_file_job(job: _FileJob) -> _FileResult:
 
 
 def iterate_derivative_pipeline(
-    pipeline_configuration: dict,
+    pipeline_configuration: dict | str,
     derivative: Callable | str,
+    datasets_configuration: dict | str | None = None,
     max_files_per_dataset: int | None = None,
     dry_run: bool = False,
     only_index: int | list[int] | None = None,
@@ -156,17 +157,20 @@ def iterate_derivative_pipeline(
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
-) -> None:
+) -> None | pd.DataFrame:
     """
     Iterate over all files specified in the pipeline configuration and call a given function on each file.
 
     Parameters
     ----------
-    pipeline_configuration : dict
+    pipeline_configuration : dict | str
         The pipeline configuration containing dataset information.
     derivative : callable | str
         The derivative or node to execute for each file. May be a registered derivative/node name, a
         DerivativeEntry, or a callable node.
+    datasets_configuration : dict | str, optional
+        Optional datasets configuration. If provided, it overrides the 'datasets' section
+        of the pipeline configuration.
     max_files_per_dataset : int, optional
         Maximum number of files to process per dataset. If None, processes all files.
     dry_run : bool, optional
@@ -189,7 +193,11 @@ def iterate_derivative_pipeline(
     None | pandas.DataFrame
         Returns a dataframe with dry-run details when ``dry_run=True``; otherwise ``None``.
     """
-    log.debug("iterate_call_pipeline: called", pipeline_configuration=pipeline_configuration)
+    log.debug(
+        "iterate_call_pipeline: called",
+        pipeline_configuration=pipeline_configuration,
+        datasets_configuration=datasets_configuration,
+    )
 
     is_path_like = isinstance(pipeline_configuration, str | os.PathLike)
     config_dict = (
@@ -226,11 +234,12 @@ def iterate_derivative_pipeline(
         )
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_configuration
+        pipeline_configuration, datasets_input=datasets_configuration
     )
 
     files_per_dataset, all_files, common_roots = get_all_files_from_pipeline_configuration(
         pipeline_configuration,
+        datasets_input=datasets_configuration,
         max_files_per_dataset=None,  # gather all files, then filter locally
     )
 
@@ -409,6 +418,7 @@ def iterate_derivative_pipeline(
 def build_derivative_dataframe(
     pipeline_configuration: dict | str,
     *,
+    datasets_configuration: dict | str | None = None,
     include_derivatives: list[str] | None = None,
     max_files_per_dataset: int | None = None,
     only_index: int | list[int] | None = None,
@@ -423,6 +433,9 @@ def build_derivative_dataframe(
     ----------
     pipeline_configuration : dict | str
         Pipeline configuration or path to it.
+    datasets_configuration : dict | str, optional
+        Optional datasets configuration. If provided, it overrides the 'datasets' section
+        of the pipeline configuration.
     include_derivatives : list[str], optional
         Restrict collection to this explicit subset of derivative names.
     max_files_per_dataset : int, optional
@@ -444,7 +457,11 @@ def build_derivative_dataframe(
         A dataframe with one row per processed file and columns derived from collected derivative artifacts.
     """
 
-    log.debug("build_derivative_dataframe: called", pipeline_configuration=pipeline_configuration)
+    log.debug(
+        "build_derivative_dataframe: called",
+        pipeline_configuration=pipeline_configuration,
+        datasets_configuration=datasets_configuration,
+    )
 
     config_dict = (
         load_configuration(pipeline_configuration)
@@ -490,15 +507,17 @@ def build_derivative_dataframe(
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_configuration
+        pipeline_configuration, datasets_input=datasets_configuration
     )
 
     _, _, common_roots = get_all_files_from_pipeline_configuration(
-        pipeline_configuration, max_files_per_dataset=None
+        pipeline_configuration, datasets_input=datasets_configuration, max_files_per_dataset=None
     )
 
     files_per_dataset, all_files, _ = get_all_files_from_pipeline_configuration(
-        pipeline_configuration, max_files_per_dataset=max_files_per_dataset
+        pipeline_configuration,
+        datasets_input=datasets_configuration,
+        max_files_per_dataset=max_files_per_dataset,
     )
 
     log.debug(
@@ -634,6 +653,13 @@ if __name__ == "__main__":  # pragma: no cover
         "config", type=str, help="Path to the pipeline configuration file (YAML or JSON)."
     )
     parser.add_argument(
+        "-d",
+        "--datasets",
+        type=str,
+        default=None,
+        help="Optional path to the datasets configuration file.",
+    )
+    parser.add_argument(
         "--max_files_per_dataset",
         type=int,
         default=None,
@@ -727,6 +753,7 @@ if __name__ == "__main__":  # pragma: no cover
             output = iterate_derivative_pipeline(
                 pipeline_configuration=pipeline_configuration,
                 derivative=derivative,
+                datasets_configuration=args.datasets,
                 max_files_per_dataset=args.max_files_per_dataset,
                 dry_run=args.dry_run,
                 only_index=args.only_index,
@@ -735,6 +762,7 @@ if __name__ == "__main__":  # pragma: no cover
                 joblib_backend=args.joblib_backend,
                 joblib_prefer=args.joblib_prefer,
             )
+
             if args.dry_run and output is not None:
                 dry_run_results.append((derivative, output))
         if args.dry_run:
@@ -791,6 +819,7 @@ if __name__ == "__main__":  # pragma: no cover
         log.info("Building derivative dataframe", derivatives=args.dataframe_derivatives)
         dataframe = build_derivative_dataframe(
             pipeline_configuration=pipeline_configuration,
+            datasets_configuration=args.datasets,
             include_derivatives=args.dataframe_derivatives,
             max_files_per_dataset=args.max_files_per_dataset,
             only_index=args.only_index,

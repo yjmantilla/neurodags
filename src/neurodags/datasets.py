@@ -23,19 +23,29 @@ from neurodags.utils import get_num_digits, get_path
 
 def get_datasets_and_mount_point_from_pipeline_configuration(
     pipeline_input: dict[str, Any] | PathLike,
+    datasets_input: dict[str, Any] | PathLike | None = None,
 ) -> dict[str, Any]:
     """
     Load the pipeline configuration and return the datasets section and mount point.
+
+    If datasets_input is provided, it overrides any datasets defined in the
+    pipeline configuration.
+
     Parameters
     ----------
     pipeline_input : dict or path-like
         Pipeline configuration as a dictionary or a path to a YAML file.
+    datasets_input : dict or path-like, optional
+        Optional datasets configuration as a dictionary or a path to a YAML file.
+        If provided, it overrides the 'datasets' section of the pipeline configuration.
+
     Returns
     -------
     datasets : dict
         The datasets section of the pipeline configuration.
     mount_point : str or None
         The mount point if specified, otherwise None.
+
     Raises
     ------
     ValueError
@@ -43,14 +53,20 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
     """
     pipeline_config = load_configuration(pipeline_input)
     mount_point = pipeline_config.get("mount_point", None)
-    datasets = pipeline_config.get("datasets", None)
+
+    if datasets_input is not None:
+        datasets = datasets_input
+    else:
+        datasets = pipeline_config.get("datasets", None)
+
     if datasets is None:
-        raise ValueError("No 'datasets' section found in the pipeline configuration.")
+        raise ValueError("No 'datasets' configuration provided or found in the pipeline.")
+
     if isinstance(datasets, str) or isinstance(datasets, os.PathLike):
         datasets_path = get_path(datasets, mount_point=mount_point)
         datasets = load_configuration(datasets_path)
     elif not isinstance(datasets, dict):
-        raise ValueError("'datasets' section must be a dict or a path to a YAML file.")
+        raise ValueError("'datasets' must be a dict or a path to a YAML file.")
 
     # At this point, datasets should be a dict
     # Make them into DatasetConfig instances
