@@ -18,6 +18,10 @@ pip install neurodags
 pip install neurodags[tui]
 ```
 
+The core install provides the `neurodags` CLI, including `run`, `dry-run`,
+`dataframe`, `dag`, `view`, and `validate`. The `tui` subcommand requires the
+optional `[tui]` extra.
+
 ## Development Install
 
 ```bash

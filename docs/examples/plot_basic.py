@@ -388,6 +388,9 @@ else:
 # Key takeaways:
 #
 # - **YAML config** makes pipelines readable and version-controllable.
+# - The same pipeline can be driven from the CLI with ``neurodags validate``,
+#   ``neurodags run``, ``neurodags dry-run``, ``neurodags dataframe``, and
+#   ``neurodags dag``.
 # - **Custom nodes** (``@register_node``) integrate seamlessly — no plugins needed.
 # - **Fan-out**: point multiple node ``args`` at the same ``id.N``.
 # - **Fan-in**: list multiple ``id.N`` references in one node's ``args``; the

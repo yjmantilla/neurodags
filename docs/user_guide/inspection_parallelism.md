@@ -13,6 +13,12 @@ plan = iterate_derivative_pipeline(config, "BandPower", dry_run=True)
 print(plan)
 ```
 
+CLI equivalent:
+
+```bash
+neurodags dry-run pipeline.yml --derivative BandPower --output dry_run_results.csv
+```
+
 The dry-run plan shows each step, whether its output is cached, and where it would write. Use this to:
 
 - Verify the DAG structure before a long run
@@ -84,6 +90,10 @@ complete walkthrough.
 Built-in Dash-Plotly explorer for `.fif` (MNE) and `.nc` (NetCDF/xarray) files:
 
 ```bash
+neurodags view path/to/file.fif
+neurodags view path/to/file.nc
+
+# Alternative module entry point
 python -m neurodags.visualization path/to/file.fif
 python -m neurodags.visualization path/to/file.nc
 ```
@@ -117,10 +127,20 @@ iterate_derivative_pipeline(
 )
 ```
 
-### Via CLI (if available)
+### Via CLI
 
 ```bash
-neurodags run pipeline.yml MyDerivative --n-jobs 4 --joblib-backend loky
+neurodags run pipeline.yml --derivative MyDerivative --n-jobs 4 --joblib-backend loky
+```
+
+## CLI DAG Export
+
+Generate Mermaid output directly from the command line:
+
+```bash
+neurodags dag pipeline.yml
+neurodags dag pipeline.yml --html pipeline_dag.html
+neurodags dag pipeline.yml --derivative BandPower --html bandpower_dag.html
 ```
 
 ## Subset Execution

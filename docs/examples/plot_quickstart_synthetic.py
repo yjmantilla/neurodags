@@ -280,8 +280,12 @@ else:
 #   at your raw EEG files.
 # - Save ``PIPELINE_YAML`` / ``DATASETS_YAML`` to ``pipeline.yml`` and
 #   ``datasets.yml`` for version-controlled, reproducible workflows.
+# - Run the same workflow from the CLI with commands such as
+#   ``neurodags validate pipeline.yml``,
+#   ``neurodags dry-run pipeline.yml --derivative BasicPrep``,
+#   and ``neurodags run pipeline.yml``.
 # - Add custom nodes via ``new_definitions: my_nodes.py``.
 # - Scale up: set ``n_jobs=-1`` for file-level parallelism via joblib.
 # - Inspect any ``.nc`` file interactively with the built-in Dash explorer::
 #
-#       python -m neurodags.visualization path/to/file.nc
+#       neurodags view path/to/file.nc

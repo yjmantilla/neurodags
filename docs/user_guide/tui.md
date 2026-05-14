@@ -12,13 +12,20 @@ pip install neurodags[tui]
 
 ## Launching the TUI
 
-Launching the TUI using the `neurodags-tui` command. You can pass the path to a pipeline configuration file and optionally a datasets configuration file:
+Launch the TUI with the unified CLI. You can pass the path to a pipeline
+configuration file and optionally a datasets configuration file:
+
+```bash
+neurodags tui [pipeline.yml] [-d datasets.yml]
+```
+
+Legacy alias:
 
 ```bash
 neurodags-tui [pipeline.yml] [-d datasets.yml]
 ```
 
-Alternatively, you can run it via Python:
+Module entry point:
 
 ```bash
 python -m neurodags.tui [pipeline.yml] [-d datasets.yml]
