@@ -34,6 +34,22 @@ DEFAULT_BANDS: dict[str, tuple[float, float]] = {
 }
 
 
+def _gen_aperiodic_log(
+    freqs: np.ndarray,
+    params: np.ndarray,
+    mode: str = "fixed",
+) -> np.ndarray:
+    """Generate FOOOF aperiodic component in log10 space from stored parameters."""
+    offset = float(params[0])
+    safe_freqs = np.maximum(freqs, 1e-10)
+    if mode == "knee" and params.size >= 3:
+        knee = float(params[1])
+        exp = float(params[2])
+        return offset - np.log10(np.abs(knee) + safe_freqs**exp)
+    exp = float(params[1]) if params.size >= 2 else 1.0
+    return offset - np.log10(safe_freqs**exp)
+
+
 def _resolve_psd_dataarray(
     psd_like: NodeResult | xr.DataArray | str | os.PathLike[str],
 ) -> xr.DataArray:
@@ -46,14 +62,54 @@ def _resolve_psd_dataarray(
         candidate = psd_like.artifacts[".nc"].item
         if isinstance(candidate, xr.DataArray):
             return candidate
-        if isinstance(candidate, (str, os.PathLike)):
+        if isinstance(candidate, str | os.PathLike):
             return xr.open_dataarray(candidate)
         raise ValueError("Unsupported artifact payload for .nc in NodeResult.")
 
-    if isinstance(psd_like, (str, os.PathLike)):
+    if isinstance(psd_like, str | os.PathLike):
         return xr.open_dataarray(psd_like)
 
     raise ValueError("Input must be a NodeResult, xarray.DataArray, or path to netCDF artifact.")
+
+
+def _resolve_fooof_dataarray(
+    fooof_like: "NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str]",
+) -> xr.DataArray:
+    """Resolve a FOOOF artifact to the DataArray of JSON strings."""
+    if isinstance(fooof_like, xr.DataArray):
+        return fooof_like
+
+    if isinstance(fooof_like, xr.Dataset):
+        if "fooof" in fooof_like:
+            return fooof_like["fooof"]
+        if len(fooof_like.data_vars) == 1:
+            return next(iter(fooof_like.data_vars.values()))
+        raise ValueError(
+            "Dataset has multiple variables and no 'fooof' variable; pass the DataArray directly."
+        )
+
+    if isinstance(fooof_like, NodeResult):
+        if ".nc" not in fooof_like.artifacts:
+            raise ValueError("NodeResult does not contain a .nc artifact.")
+        candidate = fooof_like.artifacts[".nc"].item
+        if isinstance(candidate, xr.DataArray):
+            return candidate
+        if isinstance(candidate, xr.Dataset):
+            return _resolve_fooof_dataarray(candidate)
+        if isinstance(candidate, str | os.PathLike):
+            try:
+                return xr.open_dataarray(candidate)
+            except Exception:
+                return _resolve_fooof_dataarray(xr.open_dataset(candidate))
+        raise ValueError(f"Unsupported .nc artifact payload type: {type(candidate)}")
+
+    if isinstance(fooof_like, str | os.PathLike):
+        try:
+            return xr.open_dataarray(fooof_like)
+        except Exception:
+            return _resolve_fooof_dataarray(xr.open_dataset(fooof_like))
+
+    raise ValueError(f"Cannot resolve FOOOF input of type {type(fooof_like)}")
 
 
 @register_node
@@ -1042,6 +1098,7 @@ def bandpower(
     bands: Mapping[str, tuple[float, float]] | None = None,
     freq_dim: str = "frequencies",
     relative: bool = False,
+    log_transform: bool = False,
 ) -> NodeResult:
     """Compute absolute or relative band power from a PSD ``xarray.DataArray``.
 
@@ -1055,6 +1112,8 @@ def bandpower(
         Name of the frequency dimension in the PSD. Defaults to ``"frequencies"``.
     relative : bool, optional
         If ``True`` each band power is normalised by the total power across ``freq_dim``.
+    log_transform : bool, optional
+        If ``True`` apply ``log10`` to the band power values after integration.
 
     Returns
     -------
@@ -1129,12 +1188,17 @@ def bandpower(
             normalised = band_power_xr / denom
         band_power_xr = xr.where(denom == 0, np.nan, normalised)
 
+    if log_transform:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            band_power_xr = np.log10(band_power_xr)
+
     metadata: dict[str, Any] = {
         "bands": {
             label: {"low": float(low), "high": float(high)}
             for label, (low, high) in bands_dict.items()
         },
         "relative": relative,
+        "log_transform": log_transform,
         "freq_dim": freq_dim,
         "input_dims": list(psd_xr.dims),
         "input_shape": [int(psd_xr.sizes[dim]) for dim in psd_xr.dims],
@@ -1271,4 +1335,272 @@ def band_ratios(
         ".nc": Artifact(item=ratio_xr, writer=lambda path: ratio_xr.to_netcdf(path)),
     }
 
+    return NodeResult(artifacts=artifacts)
+
+
+@register_node
+def fooof_peaks(
+    fooof_like: "NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str]",
+    *,
+    alpha_band: tuple[float, float] = (8.0, 13.0),
+) -> NodeResult:
+    """Extract peak summary scalars from serialized FOOOF models.
+
+    Parameters
+    ----------
+    fooof_like : NodeResult | xarray.DataArray | Dataset | path-like
+        Artifact generated by :func:`fooof`, containing JSON strings per slice.
+    alpha_band : tuple[float, float], optional
+        Frequency range defining the alpha band for alpha-peak extraction.
+        Defaults to ``(8.0, 13.0)`` Hz.
+
+    Returns
+    -------
+    NodeResult
+        ``.nc`` artifact containing an ``xarray.Dataset`` with variables:
+        ``n_peaks``, ``dominant_peak_cf``, ``dominant_peak_pw``,
+        ``dominant_peak_bw``, ``alpha_peak_cf``, ``alpha_peak_pw``,
+        ``alpha_peak_bw``.
+    """
+
+    fooof_xr = _resolve_fooof_dataarray(fooof_like)
+    dims = list(fooof_xr.dims)
+    shape = [int(fooof_xr.sizes[d]) for d in dims]
+    flat_count = int(np.prod(shape)) if shape else 1
+    fooof_flat = np.asarray(fooof_xr.values, dtype=object).reshape(flat_count)
+
+    n_peaks = np.zeros(flat_count, dtype=int)
+    dominant_cf = np.full(flat_count, np.nan)
+    dominant_pw = np.full(flat_count, np.nan)
+    dominant_bw = np.full(flat_count, np.nan)
+    alpha_cf = np.full(flat_count, np.nan)
+    alpha_pw = np.full(flat_count, np.nan)
+    alpha_bw = np.full(flat_count, np.nan)
+
+    alpha_lo, alpha_hi = float(alpha_band[0]), float(alpha_band[1])
+
+    for idx, payload in enumerate(fooof_flat):
+        if not isinstance(payload, str) or not payload.strip():
+            continue
+        try:
+            fm = FOOOF()
+            fm.load(io.StringIO(payload))
+            if not fm.has_model:
+                continue
+            peaks = np.asarray(getattr(fm, "peak_params_", []))
+            if peaks.ndim != 2 or peaks.shape[1] != 3 or len(peaks) == 0:
+                continue
+            n = len(peaks)
+            n_peaks[idx] = n
+            dom_idx = int(np.argmax(peaks[:, 1]))
+            dominant_cf[idx] = float(peaks[dom_idx, 0])
+            dominant_pw[idx] = float(peaks[dom_idx, 1])
+            dominant_bw[idx] = float(peaks[dom_idx, 2])
+            in_alpha = (peaks[:, 0] >= alpha_lo) & (peaks[:, 0] <= alpha_hi)
+            alpha_peaks = peaks[in_alpha]
+            if len(alpha_peaks) > 0:
+                best = int(np.argmax(alpha_peaks[:, 1]))
+                alpha_cf[idx] = float(alpha_peaks[best, 0])
+                alpha_pw[idx] = float(alpha_peaks[best, 1])
+                alpha_bw[idx] = float(alpha_peaks[best, 2])
+        except Exception as exc:
+            log.warning("fooof_peaks: failed to process slice", index=idx, error=str(exc))
+
+    coords = {
+        d: fooof_xr.coords[d].values if d in fooof_xr.coords else np.arange(fooof_xr.sizes[d])
+        for d in dims
+    }
+
+    def _make(arr: np.ndarray, vname: str, dtype) -> xr.DataArray:
+        return xr.DataArray(arr.reshape(shape), dims=dims, coords=coords, name=vname).astype(dtype)
+
+    dataset = xr.Dataset(
+        {
+            "n_peaks": _make(n_peaks, "n_peaks", int),
+            "dominant_peak_cf": _make(dominant_cf, "dominant_peak_cf", float),
+            "dominant_peak_pw": _make(dominant_pw, "dominant_peak_pw", float),
+            "dominant_peak_bw": _make(dominant_bw, "dominant_peak_bw", float),
+            "alpha_peak_cf": _make(alpha_cf, "alpha_peak_cf", float),
+            "alpha_peak_pw": _make(alpha_pw, "alpha_peak_pw", float),
+            "alpha_peak_bw": _make(alpha_bw, "alpha_peak_bw", float),
+        }
+    )
+
+    metadata: dict[str, Any] = {
+        "alpha_band": list(alpha_band),
+        "dims": dims,
+        "shape": shape,
+        "variables": list(dataset.data_vars),
+    }
+    dataset.attrs["metadata"] = json.dumps(metadata, indent=2, default=_json_safe)
+
+    artifact = Artifact(
+        item=dataset,
+        writer=lambda path, ds=dataset: ds.to_netcdf(path, engine="netcdf4", format="NETCDF4"),
+    )
+    return NodeResult(artifacts={".nc": artifact})
+
+
+@register_node
+def bandpower_corrected(
+    psd_like: "NodeResult | xr.DataArray | str | os.PathLike[str]",
+    fooof_like: "NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str]",
+    *,
+    bands: "Mapping[str, tuple[float, float]] | None" = None,
+    freq_dim: str = "frequencies",
+    relative: bool = False,
+    log_transform: bool = False,
+    aperiodic_floor: float = 1e-20,
+) -> NodeResult:
+    """Compute aperiodic-corrected band power using fitted FOOOF models.
+
+    Subtracts the FOOOF aperiodic component (in log10 space) from the PSD before
+    integrating, yielding band power with the 1/f background removed.
+
+    Parameters
+    ----------
+    psd_like : NodeResult | xarray.DataArray | path-like
+        PSD artifact from ``mne_spectrum`` / ``mne_spectrum_array``.
+    fooof_like : NodeResult | xarray.DataArray | Dataset | path-like
+        FOOOF artifact from :func:`fooof`.
+    bands : mapping, optional
+        Frequency bands as ``{"label": (low, high)}``. Defaults to ``DEFAULT_BANDS``.
+    freq_dim : str, optional
+        Name of the frequency dimension. Defaults to ``"frequencies"``.
+    relative : bool, optional
+        Normalise each corrected band power by the total corrected power.
+    log_transform : bool, optional
+        Apply ``log10`` to corrected band power values.
+    aperiodic_floor : float, optional
+        Minimum PSD value before taking log (avoids log(0)).
+
+    Returns
+    -------
+    NodeResult
+        ``.nc`` artifact with ``freqbands`` dimension (aperiodic-corrected).
+    """
+
+    psd_xr = _resolve_psd_dataarray(psd_like)
+    fooof_xr = _resolve_fooof_dataarray(fooof_like)
+
+    if freq_dim not in psd_xr.dims:
+        raise ValueError(f"Frequency dimension '{freq_dim}' not in PSD dims: {psd_xr.dims}")
+
+    freqs = np.asarray(psd_xr.coords[freq_dim].values, dtype=float)
+    bands_dict = dict(bands or DEFAULT_BANDS)
+    if not bands_dict:
+        raise ValueError("At least one frequency band must be provided.")
+
+    fooof_meta_raw = fooof_xr.attrs.get("metadata", "{}")
+    try:
+        fooof_meta = json.loads(fooof_meta_raw)
+    except json.JSONDecodeError:
+        fooof_meta = {}
+    aperiodic_mode = fooof_meta.get("fooof_kwargs", {}).get("aperiodic_mode", "fixed")
+
+    fooof_dims = list(fooof_xr.dims)
+
+    psd_transposed = psd_xr.transpose(*[*fooof_dims, freq_dim])
+    psd_values = np.asarray(psd_transposed.values, dtype=float)
+    other_shape = [int(psd_transposed.sizes[d]) for d in fooof_dims]
+    flat_count = int(np.prod(other_shape)) if other_shape else 1
+
+    psd_flat = psd_values.reshape(-1, len(freqs))
+    fooof_flat = np.asarray(fooof_xr.values, dtype=object).reshape(flat_count)
+
+    corrected_flat = np.full_like(psd_flat, np.nan)
+
+    for idx in range(flat_count):
+        payload = fooof_flat[idx]
+        if not isinstance(payload, str) or not payload.strip():
+            continue
+        try:
+            fm = FOOOF()
+            fm.load(io.StringIO(payload))
+            if not fm.has_model:
+                continue
+            ap_params = np.asarray(
+                getattr(fm, "aperiodic_params_", getattr(fm, "_aperiodic_params", None)),
+                dtype=float,
+            )
+            if ap_params is None or ap_params.size < 2:
+                continue
+            ap_log = _gen_aperiodic_log(freqs, ap_params, aperiodic_mode)
+            psd_log = np.log10(np.maximum(psd_flat[idx], aperiodic_floor))
+            corrected_flat[idx] = np.power(10.0, psd_log - ap_log)
+        except Exception as exc:
+            log.warning("bandpower_corrected: failed slice", index=idx, error=str(exc))
+
+    corrected_shape = (*other_shape, len(freqs)) if other_shape else (len(freqs),)
+    corrected_psd = corrected_flat.reshape(corrected_shape)
+
+    coords_base = {
+        d: (
+            psd_transposed.coords[d].values
+            if d in psd_transposed.coords
+            else np.arange(psd_transposed.sizes[d])
+        )
+        for d in fooof_dims
+    }
+    coords_base[freq_dim] = freqs
+
+    corrected_xr = xr.DataArray(
+        corrected_psd,
+        dims=[*fooof_dims, freq_dim],
+        coords=coords_base,
+    )
+
+    freq_axis = corrected_xr.get_axis_num(freq_dim)
+    total_power = corrected_xr.integrate(freq_dim)
+    band_arrays: list[xr.DataArray] = []
+    band_edges: list[tuple[float, float]] = []
+
+    for label, band_range in bands_dict.items():
+        low, high = float(band_range[0]), float(band_range[1])
+        band_slice = corrected_xr.sel({freq_dim: slice(low, high)})
+        if band_slice.sizes.get(freq_dim, 0) == 0:
+            band_power = xr.full_like(total_power, np.nan)
+        else:
+            band_power = band_slice.integrate(freq_dim)
+        band_power = band_power.expand_dims({"freqbands": [label]}, axis=freq_axis)
+        band_arrays.append(band_power)
+        band_edges.append((low, high))
+
+    band_power_xr = xr.concat(band_arrays, dim="freqbands")
+    original_dims = [*fooof_dims, freq_dim]
+    target_dims = ["freqbands" if dim == freq_dim else dim for dim in original_dims]
+    band_power_xr = band_power_xr.transpose(*target_dims)
+    band_power_xr = band_power_xr.assign_coords(freqbands=list(bands_dict))
+    band_power_xr.coords["freqband_low"] = ("freqbands", [e[0] for e in band_edges])
+    band_power_xr.coords["freqband_high"] = ("freqbands", [e[1] for e in band_edges])
+
+    if relative:
+        denom = total_power
+        with np.errstate(divide="ignore", invalid="ignore"):
+            normalised = band_power_xr / denom
+        band_power_xr = xr.where(denom == 0, np.nan, normalised)
+
+    if log_transform:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            band_power_xr = np.log10(band_power_xr)
+
+    metadata: dict[str, Any] = {
+        "bands": {
+            label: {"low": float(low), "high": float(high)}
+            for label, (low, high) in bands_dict.items()
+        },
+        "relative": relative,
+        "log_transform": log_transform,
+        "aperiodic_mode": aperiodic_mode,
+        "aperiodic_floor": aperiodic_floor,
+        "freq_dim": freq_dim,
+        "output_dims": list(band_power_xr.dims),
+        "output_shape": [int(band_power_xr.sizes[dim]) for dim in band_power_xr.dims],
+        "integration": "xarray.DataArray.integrate (trapezoidal)",
+    }
+    band_power_xr.attrs["metadata"] = json.dumps(metadata, indent=2, default=_json_safe)
+
+    artifacts = {
+        ".nc": Artifact(item=band_power_xr, writer=lambda path: band_power_xr.to_netcdf(path)),
+    }
     return NodeResult(artifacts=artifacts)

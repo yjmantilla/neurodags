@@ -1,6 +1,0 @@
-epilepsy_features:
-  name: epilepsy_features
-  file_pattern:
-    local: "/home/yorguin/datasets/epilepsy/rawdata/**/*SF_iEEG.mat"
-  derivatives_path:
-    local: "/home/yorguin/datasets/epilepsy/derivatives/"

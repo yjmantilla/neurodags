@@ -156,7 +156,7 @@ def _metadata_to_dict(metadata: Any | None) -> Mapping[str, Any]:
     if isinstance(metadata, np.ndarray):
         return {"array": _json_safe(metadata)}
 
-    if isinstance(metadata, (list, tuple)):
+    if isinstance(metadata, list | tuple):
         return {"sequence": _json_safe(metadata)}
 
     if hasattr(metadata, "to_dict"):
@@ -354,6 +354,10 @@ def _build_node(name: str, func: CallableLike) -> None:
 _NEUROKIT_FUNCTIONS: Mapping[str, CallableLike] = {
     "neurokit_complexity_delay": nk.complexity_delay,
     "neurokit_entropy_multiscale": nk.entropy_multiscale,
+    "neurokit_entropy_shannon": nk.entropy_shannon,
+    "neurokit_entropy_fuzzy": nk.entropy_fuzzy,
+    "neurokit_entropy_dispersion": nk.entropy_dispersion,
+    "neurokit_fractal_hurst": nk.fractal_hurst,
 }
 
 
