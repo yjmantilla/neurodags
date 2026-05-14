@@ -71,6 +71,7 @@ dev = [
 test = [
   "pytest>=8.2",
   "pytest-cov>=5.0",
+  "textual>=0.70.0",
 ]
 
 docs = [

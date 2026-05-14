@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install -e .[dev,test,docs]
+          pip install -e .[dev,test,docs,tui]
 
       - name: Lint (ruff)
         run: ruff check src/
