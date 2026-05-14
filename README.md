@@ -1,5 +1,5 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/ci.yml?branch=main&label=tests)](https://github.com/yjmantilla/neurodags/actions?query=workflow%3ACI)
-[![Docs](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/docs.yml?branch=main&label=docs)](https://github.com/yjmantilla/neurodags/actions?query=workflow%3ADocs)
+[![Docs](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/docs.yml?branch=main&label=docs)](https://yjmantilla.github.io/neurodags/)
 [![codecov](https://img.shields.io/codecov/c/github/yjmantilla/neurodags)](https://app.codecov.io/gh/yjmantilla/neurodags)
 
 # NeuroDAGs
