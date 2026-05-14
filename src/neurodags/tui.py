@@ -328,9 +328,12 @@ class NeuroDagsApp(App):
 
     def _sync_derivative_selects(self) -> None:
         options = [(d, d) for d in self._derivatives]
+        all_options = [("All (DerivativeList)", "__all__"), *options]
         for widget_id in ("#dryrun-derivative", "#run-derivative"):
             try:
-                self.query_one(widget_id, Select).set_options(options)
+                sel = self.query_one(widget_id, Select)
+                sel.set_options(all_options)
+                sel.value = "__all__"
             except Exception:
                 pass
 
@@ -368,16 +371,16 @@ class NeuroDagsApp(App):
     # ------------------------------------------------------------------
 
     async def _run_dry_run(self) -> None:
-        from neurodags.orchestrators import iterate_derivative_pipeline
+        from neurodags.orchestrators import run_pipeline
 
         if self._config is None:
             self.notify("Load config first.", severity="error")
             return
         dryrun_sel = self.query_one("#dryrun-derivative", Select)
-        if dryrun_sel.is_blank():
-            self.notify("Select a derivative.", severity="warning")
-            return
-        derivative = dryrun_sel.value
+        val = dryrun_sel.value
+        derivatives: list[str] | None = (
+            None if (dryrun_sel.is_blank() or val == "__all__") else [str(val)]
+        )
         max_files = _parse_int(self.query_one("#dryrun-max-files", Input).value)
 
         table = self.query_one("#dryrun-table", DataTable)
@@ -386,10 +389,10 @@ class NeuroDagsApp(App):
 
         try:
             result = await asyncio.to_thread(
-                iterate_derivative_pipeline,
+                run_pipeline,
                 self._config,
-                derivative,
                 datasets_configuration=self._datasets_path,
+                derivatives=derivatives,
                 max_files_per_dataset=max_files,
                 dry_run=True,
             )
@@ -411,30 +414,28 @@ class NeuroDagsApp(App):
     # ------------------------------------------------------------------
 
     async def _run_pipeline(self) -> None:
-        from neurodags.orchestrators import iterate_derivative_pipeline
-
         if self._config is None:
             self.notify("Load config first.", severity="error")
             return
         run_sel = self.query_one("#run-derivative", Select)
-        if run_sel.is_blank():
-            self.notify("Select a derivative.", severity="warning")
-            return
-        derivative = run_sel.value
+        val = run_sel.value
+        derivatives: list[str] | None = (
+            None if (run_sel.is_blank() or val == "__all__") else [str(val)]
+        )
         max_files = _parse_int(self.query_one("#run-max-files", Input).value)
         n_jobs = _parse_int(self.query_one("#run-njobs", Input).value)
 
         log_widget = self.query_one("#run-log", Log)
         log_widget.clear()
-        log_widget.write_line(f"Running: {derivative}")
+        label = "all (DerivativeList)" if derivatives is None else derivatives[0]
+        log_widget.write_line(f"Running: {label}")
 
         buf = io.StringIO()
         try:
             await asyncio.to_thread(
                 _run_pipeline_sync,
-                iterate_derivative_pipeline,
                 self._config,
-                derivative,
+                derivatives,
                 self._datasets_path,
                 max_files,
                 n_jobs,
@@ -532,29 +533,20 @@ def _parse_int(s: str) -> int | None:
 
 
 def _run_pipeline_sync(
-    func: Any,
     config: dict,
-    derivative: str,
-    datasets_config_or_max_files: str | dict | int | None,
-    max_files_or_n_jobs: int | io.StringIO | None,
-    n_jobs_or_buf: int | io.StringIO | None,
-    buf: io.StringIO | None = None,
+    derivatives: list[str] | None,
+    datasets_config: str | dict | None,
+    max_files: int | None,
+    n_jobs: int | None,
+    buf: io.StringIO,
 ) -> None:
-    if isinstance(n_jobs_or_buf, io.StringIO):
-        datasets_config = None
-        max_files = datasets_config_or_max_files
-        n_jobs = max_files_or_n_jobs
-        buf = n_jobs_or_buf
-    else:
-        datasets_config = datasets_config_or_max_files
-        max_files = max_files_or_n_jobs
-        n_jobs = n_jobs_or_buf
-        buf = io.StringIO() if buf is None else buf
+    from neurodags.orchestrators import run_pipeline
+
     with redirect_stdout(buf), redirect_stderr(buf):
-        func(
+        run_pipeline(
             config,
-            derivative,
             datasets_configuration=datasets_config,
+            derivatives=derivatives,
             max_files_per_dataset=max_files,
             n_jobs=n_jobs,
         )

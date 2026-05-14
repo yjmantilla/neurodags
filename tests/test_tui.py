@@ -69,38 +69,41 @@ class TestParseInt:
 
 class TestRunPipelineSync:
     def test_captures_stdout(self):
-        def fake_func(*_a, **_kw):
+        def fake_run(*_a, **_kw):
             print("hello from pipeline")
 
         buf = io.StringIO()
-        _run_pipeline_sync(fake_func, {}, "D", None, None, buf)
+        with patch("neurodags.orchestrators.run_pipeline", fake_run):
+            _run_pipeline_sync({}, None, None, None, None, buf)
         assert "hello from pipeline" in buf.getvalue()
 
     def test_captures_stderr(self):
-        def fake_func(*_a, **_kw):
+        def fake_run(*_a, **_kw):
             import sys
-
             print("err line", file=sys.stderr)
 
         buf = io.StringIO()
-        _run_pipeline_sync(fake_func, {}, "D", None, None, buf)
+        with patch("neurodags.orchestrators.run_pipeline", fake_run):
+            _run_pipeline_sync({}, None, None, None, None, buf)
         assert "err line" in buf.getvalue()
 
     def test_propagates_exception(self):
-        def bad_func(*_a, **_kw):
+        def bad_run(*_a, **_kw):
             raise ValueError("boom")
 
         buf = io.StringIO()
-        with pytest.raises(ValueError, match="boom"):
-            _run_pipeline_sync(bad_func, {}, "D", None, None, buf)
+        with patch("neurodags.orchestrators.run_pipeline", bad_run):
+            with pytest.raises(ValueError, match="boom"):
+                _run_pipeline_sync({}, None, None, None, None, buf)
 
     def test_supports_datasets_config_argument(self):
         captured = {}
 
-        def fake_func(*_a, **_kw):
+        def fake_run(*_a, **_kw):
             captured.update(_kw)
 
-        _run_pipeline_sync(fake_func, {}, "D", "datasets.yml", 3, 2, io.StringIO())
+        with patch("neurodags.orchestrators.run_pipeline", fake_run):
+            _run_pipeline_sync({}, ["D"], "datasets.yml", 3, 2, io.StringIO())
         assert captured["datasets_configuration"] == "datasets.yml"
         assert captured["max_files_per_dataset"] == 3
         assert captured["n_jobs"] == 2
@@ -328,17 +331,18 @@ class TestDryRunTab:
 
         _run(_())
 
-    def test_dry_run_without_derivative_warns(self):
+    def test_dry_run_blank_derivative_runs_all(self):
         async def _():
             async with NeuroDagsApp().run_test() as pilot:
                 app = pilot.app
                 app._config = FAKE_CONFIG
                 app._derivatives = ["StepA"]
-                # derivative select is empty (no value chosen)
-                with patch.object(app, "notify") as m:
-                    await app._run_dry_run()
-                    m.assert_called_once()
-                    assert "warning" in str(m.call_args)
+                # blank select = run all derivatives (no warning, no error)
+                with patch("neurodags.orchestrators.run_pipeline", return_value=None):
+                    with patch.object(app, "notify") as m:
+                        await app._run_dry_run()
+                        notified = str(m.call_args)
+                        assert "error" not in notified
 
         _run(_())
 
@@ -427,15 +431,17 @@ class TestRunPipelineTab:
 
         _run(_())
 
-    def test_run_without_derivative_warns(self):
+    def test_run_blank_derivative_runs_all(self):
         async def _():
             async with NeuroDagsApp().run_test() as pilot:
                 app = pilot.app
                 app._config = FAKE_CONFIG
-                with patch.object(app, "notify") as m:
-                    await app._run_pipeline()
-                    m.assert_called_once()
-                    assert "warning" in str(m.call_args)
+                # blank select = run all derivatives (no warning, no error)
+                with patch("neurodags.tui._run_pipeline_sync"):
+                    with patch.object(app, "notify") as m:
+                        await app._run_pipeline()
+                        notified = str(m.call_args)
+                        assert "error" not in notified
 
         _run(_())
 
@@ -454,7 +460,7 @@ class TestRunPipelineTab:
                     print("running step")
 
                 with patch("neurodags.tui._run_pipeline_sync") as m:
-                    m.side_effect = lambda fn, cfg, d, mf, nj, buf: fake_func()
+                    m.side_effect = lambda cfg, derivs, ds, mf, nj, buf: fake_func()
                     await app._run_pipeline()
 
         _run(_())

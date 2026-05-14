@@ -62,8 +62,9 @@ NeuroDAGs installs a unified `neurodags` command:
 
 ```bash
 neurodags validate pipeline.yml
-neurodags run pipeline.yml --derivative CleanedEEG
-neurodags dry-run pipeline.yml --derivative PowerSpectrum --output dry_run.csv
+neurodags run pipeline.yml                          # all derivatives in DerivativeList
+neurodags run pipeline.yml --derivative CleanedEEG  # or a specific one
+neurodags dry-run pipeline.yml --output dry_run.csv
 neurodags dataframe pipeline.yml --format wide --output features.csv
 neurodags dag pipeline.yml --html pipeline_dag.html
 neurodags view path/to/file.nc
@@ -161,18 +162,26 @@ DerivativeList:
 **Python**
 ```python
 from neurodags.loaders import load_configuration
-from neurodags.orchestrators import iterate_derivative_pipeline
+from neurodags.orchestrators import run_pipeline
 
 config = load_configuration("pipeline.yml")
-iterate_derivative_pipeline(config, "CleanedEEG")
-iterate_derivative_pipeline(config, "PowerSpectrum")
+
+# Run all derivatives in "DerivativeList", auto-sorted by dependency order
+run_pipeline(config)
+
+# Or run specific ones (also sorted by dependency order)
+run_pipeline(config, derivatives=["CleanedEEG"])
 ```
 
 **CLI**
 ```bash
 neurodags validate pipeline.yml
+
+# Run all derivatives in DerivativeList (dependency-sorted)
+neurodags run pipeline.yml
+
+# Or run specific ones
 neurodags run pipeline.yml --derivative CleanedEEG
-neurodags run pipeline.yml --derivative PowerSpectrum
 ```
 
 ## Custom Nodes
@@ -230,7 +239,7 @@ joblib_prefer: processes
 Or via Python:
 
 ```python
-iterate_derivative_pipeline(config, "MyDerivative", n_jobs=4)
+run_pipeline(config, derivatives=["MyDerivative"], n_jobs=4)
 ```
 
 Or via CLI:
@@ -255,7 +264,7 @@ Built-in Dash-Plotly explorer with dimension-aware UI — dropdown per axis, plo
 ## Inspection (Dry Run)
 
 ```python
-iterate_derivative_pipeline(config, "MyDerivative", dry_run=True)
+run_pipeline(config, derivatives=["MyDerivative"], dry_run=True)
 ```
 
 Returns a dataframe describing the execution plan without running any nodes. `.error` marker files prevent silent retry of failed runs.

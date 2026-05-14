@@ -47,18 +47,18 @@ def test_run_uses_derivative_list_when_not_explicit(dummy_pipeline):
     cfg = dummy_pipeline["config"]
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.iterate_derivative_pipeline") as iterate,
+        patch("neurodags.orchestrators.iterate_derivative_pipeline") as iterate,
     ):
         assert main(["run", "pipeline.yml"]) == 0
         called = [call.kwargs["derivative"] for call in iterate.call_args_list]
-        assert called == cfg["DerivativeList"]
+        assert set(called) == set(cfg["DerivativeList"])
 
 
 def test_run_with_explicit_derivative(dummy_pipeline):
     cfg = dummy_pipeline["config"]
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.iterate_derivative_pipeline") as iterate,
+        patch("neurodags.orchestrators.iterate_derivative_pipeline") as iterate,
     ):
         assert main(["run", "pipeline.yml", "--derivative", "BasicPrep"]) == 0
         iterate.assert_called_once()
@@ -70,7 +70,7 @@ def test_dry_run_saves_combined_dataframe(dummy_pipeline):
     fake_df = pd.DataFrame({"file_path": ["a"], "plan": [[]]})
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.iterate_derivative_pipeline", return_value=fake_df),
+        patch("neurodags.orchestrators.iterate_derivative_pipeline", return_value=fake_df),
         patch("neurodags.cli._save_dataframe") as save_df,
     ):
         save_df.return_value = Path("dry_run_results.csv")

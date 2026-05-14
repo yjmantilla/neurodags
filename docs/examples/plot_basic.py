@@ -44,7 +44,7 @@ import yaml
 from neurodags.datasets import generate_dummy_dataset
 from neurodags.definitions import Artifact, NodeResult
 from neurodags.nodes import register_node
-from neurodags.orchestrators import build_derivative_dataframe, iterate_derivative_pipeline
+from neurodags.orchestrators import build_derivative_dataframe, run_pipeline
 
 WORKDIR = Path(tempfile.mkdtemp(prefix="neurodags_dag_"))
 DATA_DIR = WORKDIR / "rawdata"
@@ -314,11 +314,10 @@ print(f"DAG diagram saved to {WORKDIR / 'dag_structure.png'}")
 # %%
 # Step 5 — Execute the Pipeline
 # ------------------------------
-# Run each derivative in order.  Already-cached outputs are skipped.
+# run_pipeline runs all derivatives in DerivativeList, sorted by dependency order.
+# Already-cached outputs are skipped.
 
-for derivative in pipeline_config["DerivativeList"]:
-    print(f"\n--- Running: {derivative} ---")
-    iterate_derivative_pipeline(pipeline_config, derivative, raise_on_error=True)
+run_pipeline(pipeline_config, raise_on_error=True)
 
 produced = sorted(OUT_DIR.rglob("*@*.fif")) + sorted(OUT_DIR.rglob("*@*.nc"))
 print(f"\nProduced {len(produced)} derivative file(s):")

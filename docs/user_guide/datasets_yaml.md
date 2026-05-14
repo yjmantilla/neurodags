@@ -55,7 +55,7 @@ Set `skip: True` to temporarily disable a dataset without removing it.
 
 ## Multiple Datasets
 
-List any number of datasets. All are processed when running `iterate_derivative_pipeline`:
+List any number of datasets. All are processed when running `run_pipeline`:
 
 ```yaml
 dataset1:

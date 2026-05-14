@@ -18,7 +18,10 @@ from neurodags.mermaid import (
     pipeline_to_html,
     pipeline_to_mermaid,
 )
-from neurodags.orchestrators import build_derivative_dataframe, iterate_derivative_pipeline
+from neurodags.orchestrators import (
+    build_derivative_dataframe,
+    run_pipeline,
+)
 
 
 def _save_dataframe(df: pd.DataFrame, output_path: str | None, default_name: str) -> Path:
@@ -241,29 +244,22 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
-    dry_run_results: list[pd.DataFrame] = []
 
-    for derivative in derivatives:
-        result = iterate_derivative_pipeline(
-            pipeline_configuration=config,
-            derivative=derivative,
-            datasets_configuration=args.datasets,
-            max_files_per_dataset=args.max_files_per_dataset,
-            dry_run=dry_run,
-            only_index=args.only_index,
-            raise_on_error=args.raise_on_error,
-            n_jobs=args.n_jobs,
-            joblib_backend=args.joblib_backend,
-            joblib_prefer=args.joblib_prefer,
-        )
-        if dry_run and result is not None:
-            dry_run_results.append(result)
+    result = run_pipeline(
+        pipeline_configuration=config,
+        datasets_configuration=args.datasets,
+        derivatives=derivatives,
+        max_files_per_dataset=args.max_files_per_dataset,
+        dry_run=dry_run,
+        only_index=args.only_index,
+        raise_on_error=args.raise_on_error,
+        n_jobs=args.n_jobs,
+        joblib_backend=args.joblib_backend,
+        joblib_prefer=args.joblib_prefer,
+    )
 
-    if dry_run:
-        combined = (
-            pd.concat(dry_run_results, ignore_index=True) if dry_run_results else pd.DataFrame()
-        )
-        output_path = _save_dataframe(combined, args.output, "dry_run_results.csv")
+    if dry_run and result is not None:
+        output_path = _save_dataframe(result, args.output, "dry_run_results.csv")
         print(f"saved dry run results to {output_path}")
     return 0
 

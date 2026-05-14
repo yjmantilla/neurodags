@@ -6,9 +6,15 @@ Inspect planned computations without executing any nodes. Returns a dataframe de
 
 ```python
 from neurodags.loaders import load_configuration
-from neurodags.orchestrators import iterate_derivative_pipeline
+from neurodags.orchestrators import iterate_derivative_pipeline, run_pipeline
 
 config = load_configuration("pipeline.yml")
+
+# Dry-run all derivatives in DerivativeList
+plan = run_pipeline(config, dry_run=True)
+print(plan)
+
+# Or dry-run a single derivative
 plan = iterate_derivative_pipeline(config, "BandPower", dry_run=True)
 print(plan)
 ```
@@ -118,13 +124,13 @@ joblib_prefer: processes
 ### Via Python
 
 ```python
-iterate_derivative_pipeline(
-    config,
-    "MyDerivative",
-    n_jobs=4,
-    joblib_backend="loky",
-    joblib_prefer="processes",
-)
+from neurodags.orchestrators import run_pipeline
+
+# All derivatives
+run_pipeline(config, n_jobs=4, joblib_backend="loky", joblib_prefer="processes")
+
+# Single derivative
+run_pipeline(config, derivatives=["MyDerivative"], n_jobs=4, joblib_backend="loky", joblib_prefer="processes")
 ```
 
 ### Via CLI
@@ -148,14 +154,16 @@ neurodags dag pipeline.yml --derivative BandPower --html bandpower_dag.html
 Process only a subset of files by index:
 
 ```python
+from neurodags.orchestrators import run_pipeline
+
 # Single file
-iterate_derivative_pipeline(config, "MyDerivative", only_index=0)
+run_pipeline(config, derivatives=["MyDerivative"], only_index=0)
 
 # Multiple files
-iterate_derivative_pipeline(config, "MyDerivative", only_index=[0, 2, 5])
+run_pipeline(config, derivatives=["MyDerivative"], only_index=[0, 2, 5])
 
 # Limit files per dataset
-iterate_derivative_pipeline(config, "MyDerivative", max_files_per_dataset=10)
+run_pipeline(config, derivatives=["MyDerivative"], max_files_per_dataset=10)
 ```
 
 ## Error Handling
@@ -163,7 +171,9 @@ iterate_derivative_pipeline(config, "MyDerivative", max_files_per_dataset=10)
 By default, errors are caught per-file and logged; processing continues. To stop on the first failure:
 
 ```python
-iterate_derivative_pipeline(config, "MyDerivative", raise_on_error=True)
+from neurodags.orchestrators import run_pipeline
+
+run_pipeline(config, derivatives=["MyDerivative"], raise_on_error=True)
 ```
 
 ## HPC Tips

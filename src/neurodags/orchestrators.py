@@ -418,6 +418,121 @@ def iterate_derivative_pipeline(
         return pd.DataFrame(dry_run_collection)
 
 
+def _derivative_topo_order(config_dict: dict, derivatives: list[str]) -> list[str]:
+    """Return *derivatives* sorted so each derivative runs after those it depends on."""
+    defs: dict[str, dict] = config_dict.get("DerivativeDefinitions", {}) or {}
+    deriv_set = set(derivatives)
+
+    deps: dict[str, set[str]] = {d: set() for d in derivatives}
+    for deriv_name in derivatives:
+        for step in defs.get(deriv_name, {}).get("nodes", []):
+            ref = step.get("derivative", "")
+            if ref and ref != "SourceFile":
+                base = ref.split(".", 1)[0]
+                if base in deriv_set:
+                    deps[deriv_name].add(base)
+
+    seen: set[str] = set()
+    order: list[str] = []
+
+    def visit(name: str) -> None:
+        if name in seen:
+            return
+        for dep in sorted(deps.get(name, set())):
+            visit(dep)
+        seen.add(name)
+        order.append(name)
+
+    for name in sorted(derivatives):
+        visit(name)
+
+    return order
+
+
+def run_pipeline(
+    pipeline_configuration: dict | str,
+    datasets_configuration: dict | str | None = None,
+    derivatives: list[str] | None = None,
+    max_files_per_dataset: int | None = None,
+    dry_run: bool = False,
+    only_index: int | list[int] | None = None,
+    raise_on_error: bool = False,
+    n_jobs: int | None = None,
+    joblib_backend: str | None = None,
+    joblib_prefer: str | None = None,
+) -> None | pd.DataFrame:
+    """
+    Execute multiple derivatives from a pipeline configuration in dependency order.
+
+    Parameters
+    ----------
+    pipeline_configuration : dict | str
+        The pipeline configuration containing dataset information.
+    datasets_configuration : dict | str, optional
+        Optional datasets configuration. If provided, it overrides the 'datasets' section
+        of the pipeline configuration.
+    derivatives : list[str], optional
+        List of derivatives to execute. If None, uses 'DerivativeList' from the configuration.
+        Derivatives are automatically sorted in topological order based on inter-derivative
+        dependencies before execution.
+    max_files_per_dataset : int, optional
+        Maximum number of files to process per dataset.
+    dry_run : bool, optional
+        When True, evaluate the pipeline without executing nodes and return a dataframe.
+    only_index : int | list[int], optional
+        Restrict execution to a subset of files by index.
+    raise_on_error : bool, optional
+        Re-raise the first failure instead of continuing.
+    n_jobs : int, optional
+        Number of workers for joblib parallelism.
+    joblib_backend : str, optional
+        Backend passed to joblib's ``Parallel``.
+    joblib_prefer : str, optional
+        Preference hint for joblib backend selection.
+
+    Returns
+    -------
+    None | pandas.DataFrame
+        Returns a combined dataframe with dry-run details when ``dry_run=True``; otherwise ``None``.
+    """
+    config = (
+        load_configuration(pipeline_configuration)
+        if isinstance(pipeline_configuration, str)
+        else pipeline_configuration
+    )
+
+    if derivatives is None:
+        derivatives = config.get("DerivativeList", [])
+
+    if not derivatives:
+        log.warning("No derivatives specified or enabled in 'DerivativeList'.")
+        return None
+
+    ordered = _derivative_topo_order(config, derivatives)
+    log.info("run_pipeline: derivative execution order", order=ordered)
+
+    dry_run_results = []
+    for derivative in ordered:
+        result = iterate_derivative_pipeline(
+            pipeline_configuration=config,
+            derivative=derivative,
+            datasets_configuration=datasets_configuration,
+            max_files_per_dataset=max_files_per_dataset,
+            dry_run=dry_run,
+            only_index=only_index,
+            raise_on_error=raise_on_error,
+            n_jobs=n_jobs,
+            joblib_backend=joblib_backend,
+            joblib_prefer=joblib_prefer,
+        )
+        if dry_run and result is not None:
+            dry_run_results.append(result)
+
+    if dry_run:
+        return pd.concat(dry_run_results, ignore_index=True) if dry_run_results else pd.DataFrame()
+    return None
+
+
 def build_derivative_dataframe(
     pipeline_configuration: dict | str,
     *,
