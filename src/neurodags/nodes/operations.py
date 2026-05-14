@@ -28,7 +28,7 @@ def binarize_with_median(data: xr.DataArray, dim: str) -> xr.DataArray:
         A binarized xarray DataArray where values above the median are 1 and others are 0.
     """
 
-    if isinstance(data, (str, os.PathLike)):
+    if isinstance(data, str | os.PathLike):
         try:
             data = xr.open_dataarray(data)
             log.debug("Loaded xarray DataArray from file", input=data)
@@ -68,7 +68,7 @@ def mean_across_dimension(xarray_data, dim):
     """
     import xarray as xr
 
-    if isinstance(xarray_data, (str, os.PathLike)):
+    if isinstance(xarray_data, str | os.PathLike):
         xarray_data = xr.open_dataarray(xarray_data)
         log.debug("Loaded xarray DataArray from file", input=xarray_data)
 
@@ -119,7 +119,7 @@ def extract_data_var(dataset_like, data_var: str):
         target_array = dataset_like.copy()
         if target_array.name is None:
             target_array.name = data_var
-    elif isinstance(dataset_like, (str, os.PathLike)):
+    elif isinstance(dataset_like, str | os.PathLike):
         ds = xr.open_dataset(dataset_like)
         try:
             if data_var not in ds.data_vars:
@@ -160,7 +160,7 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
         A derivative result containing the sliced data as a netcdf4 artifact.
     """
 
-    if isinstance(xarray_data, (str, os.PathLike)):
+    if isinstance(xarray_data, str | os.PathLike):
         xarray_data = xr.open_dataarray(xarray_data)
         log.debug("Loaded xarray DataArray from file", input=xarray_data)
 
@@ -177,7 +177,7 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
         raise ValueError(f"Dimension '{dim}' not found in the DataArray.")
 
     def _is_index_like(value):
-        return value is None or isinstance(value, (int, np.integer))
+        return value is None or isinstance(value, int | np.integer)
 
     slicer = {dim: slice(start, end)}
 
@@ -195,7 +195,9 @@ def slice_xarray(xarray_data, dim, start=None, end=None):
                 f"Coordinate value(s) {start!r}, {end!r} not found along dimension '{dim}'."
             ) from exc
 
-    if start == end or (dim in sliced_data.sizes and sliced_data.sizes[dim] == 1):
+    if (start is not None and start == end) or (
+        dim in sliced_data.sizes and sliced_data.sizes[dim] == 1
+    ):
         sliced_data = sliced_data.squeeze(dim=dim, drop=True)
 
     # return the new xarray in ncdf4 format
@@ -225,7 +227,7 @@ def aggregate_across_dimension(xarray_data, dim, operation="mean", args=None):
         A derivative result containing the aggregated data as a netcdf4 artifact.
     """
 
-    if isinstance(xarray_data, (str, os.PathLike)):
+    if isinstance(xarray_data, str | os.PathLike):
         xarray_data = xr.open_dataarray(xarray_data)
         log.debug("Loaded xarray DataArray from file", input=xarray_data)
 

@@ -118,11 +118,14 @@ minversion = "7.0"
 addopts = "-ra --cov=neurodags --cov-report=term-missing"
 testpaths = ["tests"]
 
+[tool.coverage.run]
+omit = ["*/neurodags/visualization.py"]
+
 [tool.hatch.build.targets.sdist]
 include = [
-  "src", 
-  "README.md", 
-  "LICENSE", 
+  "src",
+  "README.md",
+  "LICENSE",
   "pyproject.toml",
   "src/neurodags/py.typed"
 ]
