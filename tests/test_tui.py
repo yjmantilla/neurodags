@@ -74,7 +74,7 @@ class TestRunPipelineSync:
 
         buf = io.StringIO()
         with patch("neurodags.orchestrators.run_pipeline", fake_run):
-            _run_pipeline_sync({}, None, None, None, None, buf)
+            _run_pipeline_sync({}, None, None, None, None, False, buf)
         assert "hello from pipeline" in buf.getvalue()
 
     def test_captures_stderr(self):
@@ -84,7 +84,7 @@ class TestRunPipelineSync:
 
         buf = io.StringIO()
         with patch("neurodags.orchestrators.run_pipeline", fake_run):
-            _run_pipeline_sync({}, None, None, None, None, buf)
+            _run_pipeline_sync({}, None, None, None, None, False, buf)
         assert "err line" in buf.getvalue()
 
     def test_propagates_exception(self):
@@ -94,7 +94,7 @@ class TestRunPipelineSync:
         buf = io.StringIO()
         with patch("neurodags.orchestrators.run_pipeline", bad_run):
             with pytest.raises(ValueError, match="boom"):
-                _run_pipeline_sync({}, None, None, None, None, buf)
+                _run_pipeline_sync({}, None, None, None, None, False, buf)
 
     def test_supports_datasets_config_argument(self):
         captured = {}
@@ -103,10 +103,11 @@ class TestRunPipelineSync:
             captured.update(_kw)
 
         with patch("neurodags.orchestrators.run_pipeline", fake_run):
-            _run_pipeline_sync({}, ["D"], "datasets.yml", 3, 2, io.StringIO())
+            _run_pipeline_sync({}, ["D"], "datasets.yml", 3, 2, True, io.StringIO())
         assert captured["datasets_configuration"] == "datasets.yml"
         assert captured["max_files_per_dataset"] == 3
         assert captured["n_jobs"] == 2
+        assert captured["skip_errors"] is True
 
 
 class TestInspectableStatic:
@@ -460,7 +461,7 @@ class TestRunPipelineTab:
                     print("running step")
 
                 with patch("neurodags.tui._run_pipeline_sync") as m:
-                    m.side_effect = lambda cfg, derivs, ds, mf, nj, buf: fake_func()
+                    m.side_effect = lambda cfg, derivs, ds, mf, nj, se, buf: fake_func()
                     await app._run_pipeline()
 
         _run(_())

@@ -61,6 +61,111 @@ def test_save_false_does_not_trigger_cached_shortcut(tmp_path):
     assert isinstance(result, NodeResult)
 
 
+def _error_path(tmp_path: Path) -> Path:
+    reference_base = tmp_path / "subject" / "sample"
+    return Path(f"{reference_base.as_posix()}@DummyDerivative.error")
+
+
+def test_skip_errors_skips_file_with_error_marker(tmp_path):
+    derivative_def = _build_derivative_def()
+    reference_base = tmp_path / "subject" / "sample"
+    reference_base.parent.mkdir(parents=True, exist_ok=True)
+    error_file = _error_path(tmp_path)
+    error_file.write_text("prior failure")
+
+    result = run_derivative(
+        derivative_def,
+        derivative_name="dummy_derivative",
+        file_path="input.vhdr",
+        reference_base=reference_base,
+        skip_errors=True,
+    )
+
+    assert result == {"skipped_error": str(error_file)}
+    # output not produced
+    assert not Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt").exists()
+    # error marker untouched
+    assert error_file.exists()
+
+
+def test_skip_errors_false_retries_file_with_error_marker(tmp_path):
+    derivative_def = _build_derivative_def()
+    reference_base = tmp_path / "subject" / "sample"
+    reference_base.parent.mkdir(parents=True, exist_ok=True)
+    error_file = _error_path(tmp_path)
+    error_file.write_text("prior failure")
+
+    result = run_derivative(
+        derivative_def,
+        derivative_name="dummy_derivative",
+        file_path="input.vhdr",
+        reference_base=reference_base,
+        skip_errors=False,
+    )
+
+    assert isinstance(result, NodeResult)
+    output = Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt")
+    assert output.exists()
+
+
+def test_successful_run_removes_stale_error_marker(tmp_path):
+    derivative_def = _build_derivative_def()
+    reference_base = tmp_path / "subject" / "sample"
+    reference_base.parent.mkdir(parents=True, exist_ok=True)
+    error_file = _error_path(tmp_path)
+    error_file.write_text("prior failure")
+
+    run_derivative(
+        derivative_def,
+        derivative_name="dummy_derivative",
+        file_path="input.vhdr",
+        reference_base=reference_base,
+        skip_errors=False,
+    )
+
+    assert not error_file.exists()
+    output = Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt")
+    assert output.exists()
+
+
+def test_dry_run_reports_error_marker(tmp_path):
+    derivative_def = _build_derivative_def()
+    reference_base = tmp_path / "subject" / "sample"
+    reference_base.parent.mkdir(parents=True, exist_ok=True)
+    error_file = _error_path(tmp_path)
+    error_file.write_text("prior failure")
+
+    result = run_derivative(
+        derivative_def,
+        derivative_name="dummy_derivative",
+        file_path="input.vhdr",
+        reference_base=reference_base,
+        dry_run=True,
+    )
+
+    final_entry = next(e for e in result["plan"] if e.get("id") == "final")
+    assert final_entry["has_error_marker"] is True
+    assert final_entry["error_path"] is not None
+
+
+def test_dry_run_no_error_marker_reports_false(tmp_path):
+    derivative_def = _build_derivative_def()
+    reference_base = tmp_path / "subject" / "sample"
+    reference_base.parent.mkdir(parents=True, exist_ok=True)
+
+    result = run_derivative(
+        derivative_def,
+        derivative_name="dummy_derivative",
+        file_path="input.vhdr",
+        reference_base=reference_base,
+        dry_run=True,
+    )
+
+    final_entry = next(e for e in result["plan"] if e.get("id") == "final")
+    assert final_entry["has_error_marker"] is False
+    assert final_entry["error_path"] is None
+
+
 def test_collect_derivative_for_dataframe_missing_flag_does_not_require_precomputed(tmp_path):
     with patch("neurodags.dag._resolve_derivative_artifacts", return_value={}) as resolver:
         collect_derivative_for_dataframe(

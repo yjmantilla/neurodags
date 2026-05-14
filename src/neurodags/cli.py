@@ -86,6 +86,11 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         help="Re-raise processing errors instead of continuing.",
     )
     parser.add_argument(
+        "--skip-errors",
+        action="store_true",
+        help="Skip files that have a prior .error marker from a previous failed run.",
+    )
+    parser.add_argument(
         "--n-jobs",
         type=int,
         default=None,
@@ -253,6 +258,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
         dry_run=dry_run,
         only_index=args.only_index,
         raise_on_error=args.raise_on_error,
+        skip_errors=args.skip_errors,
         n_jobs=args.n_jobs,
         joblib_backend=args.joblib_backend,
         joblib_prefer=args.joblib_prefer,

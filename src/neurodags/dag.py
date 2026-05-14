@@ -226,6 +226,7 @@ def run_derivative(
     dataset_config: Any = None,
     mount_point: Path | None = None,
     dry_run: bool = False,
+    skip_errors: bool = False,
 ) -> NodeResult | dict[str, Any]:
     """
     Evaluate (or dry-run) a derivative on a single file.
@@ -257,6 +258,9 @@ def run_derivative(
         reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
     )
     final_prefix = base_reference + "@" + snake_to_camel(derivative_name) if save else None
+    error_path = (final_prefix + ".error") if final_prefix else None
+    has_error_marker = bool(error_path and Path(error_path).exists())
+
     if dry_run:
         if save:
             final_candidates = _artifact_candidates_for(final_prefix)
@@ -267,6 +271,8 @@ def run_derivative(
                 prefix=final_prefix,
                 cached=len(final_candidates) > 0,
                 paths=final_candidates,
+                has_error_marker=has_error_marker,
+                error_path=error_path if has_error_marker else None,
             )
         else:
             _record(
@@ -276,6 +282,8 @@ def run_derivative(
                 will_save=False,
                 cached=False,
                 paths=[],
+                has_error_marker=has_error_marker,
+                error_path=error_path if has_error_marker else None,
             )
     else:
         # Early skip if final already cached and not overwriting
@@ -290,6 +298,15 @@ def run_derivative(
                     candidate=final_candidates[0],
                 )
                 return {"cached": final_candidates}
+        # Early skip if prior error marker exists and skip_errors=True
+        if skip_errors and has_error_marker:
+            log.info(
+                "Skipping file with prior error marker",
+                derivative=derivative_name,
+                error_path=error_path,
+                file_path=file_path,
+            )
+            return {"skipped_error": error_path}
 
     for sid in order:
         step = next(s for s in nodes if s["id"] == sid)
@@ -443,6 +460,11 @@ def run_derivative(
                                 exc_info=True,
                             )
                             raise
+                    # clean up any prior .error marker now that save succeeded
+                    stale_error = Path(final_prefix + ".error")
+                    if stale_error.exists():
+                        stale_error.unlink()
+                        log.info("Removed stale error marker", path=str(stale_error))
             except Exception as e:
                 log.error(
                     "Error executing node",

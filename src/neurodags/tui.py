@@ -27,6 +27,7 @@ try:
     from textual.markup import escape as escape_markup
     from textual.widgets import (
         Button,
+        Checkbox,
         DataTable,
         Footer,
         Header,
@@ -139,6 +140,7 @@ class _DryRunTab(Vertical):
         with Horizontal(classes="row"):
             yield Select([], id="dryrun-derivative", prompt="Select derivative")
             yield Input(placeholder="max files/dataset (blank=all)", id="dryrun-max-files")
+            yield Checkbox("Skip errored files", id="dryrun-skip-errors")
             yield Button("Run Dry Run", id="btn-dryrun", variant="primary")
         yield DataTable(id="dryrun-table")
 
@@ -161,6 +163,7 @@ class _RunTab(Vertical):
             yield Select([], id="run-derivative", prompt="Select derivative")
             yield Input(placeholder="max files/dataset (blank=all)", id="run-max-files")
             yield Input(placeholder="n_jobs (blank=1)", id="run-njobs")
+            yield Checkbox("Skip errored files", id="run-skip-errors")
             yield Button("Run", id="btn-run", variant="success")
         yield Log(id="run-log", highlight=True)
 
@@ -382,6 +385,7 @@ class NeuroDagsApp(App):
             None if (dryrun_sel.is_blank() or val == "__all__") else [str(val)]
         )
         max_files = _parse_int(self.query_one("#dryrun-max-files", Input).value)
+        skip_errors = self.query_one("#dryrun-skip-errors", Checkbox).value
 
         table = self.query_one("#dryrun-table", DataTable)
         table.clear(columns=True)
@@ -395,6 +399,7 @@ class NeuroDagsApp(App):
                 derivatives=derivatives,
                 max_files_per_dataset=max_files,
                 dry_run=True,
+                skip_errors=skip_errors,
             )
         except Exception as exc:
             self.notify(f"Dry run error: {exc}", severity="error")
@@ -424,6 +429,7 @@ class NeuroDagsApp(App):
         )
         max_files = _parse_int(self.query_one("#run-max-files", Input).value)
         n_jobs = _parse_int(self.query_one("#run-njobs", Input).value)
+        skip_errors = self.query_one("#run-skip-errors", Checkbox).value
 
         log_widget = self.query_one("#run-log", Log)
         log_widget.clear()
@@ -439,6 +445,7 @@ class NeuroDagsApp(App):
                 self._datasets_path,
                 max_files,
                 n_jobs,
+                skip_errors,
                 buf,
             )
         except Exception as exc:
@@ -538,6 +545,7 @@ def _run_pipeline_sync(
     datasets_config: str | dict | None,
     max_files: int | None,
     n_jobs: int | None,
+    skip_errors: bool,
     buf: io.StringIO,
 ) -> None:
     from neurodags.orchestrators import run_pipeline
@@ -549,6 +557,7 @@ def _run_pipeline_sync(
             derivatives=derivatives,
             max_files_per_dataset=max_files,
             n_jobs=n_jobs,
+            skip_errors=skip_errors,
         )
 
 

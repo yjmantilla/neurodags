@@ -4,6 +4,9 @@ html_theme_sidebar_secondary: false
 
 # NeuroDAGs
 
+[![CI](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/ci.yml?branch=main&label=tests)](https://github.com/yjmantilla/neurodags/actions?query=workflow%3ACI)
+[![Docs](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/docs.yml?branch=main&label=docs)](https://yjmantilla.github.io/neurodags/)
+[![codecov](https://img.shields.io/codecov/c/github/yjmantilla/neurodags)](https://app.codecov.io/gh/yjmantilla/neurodags)
 [![PyPI](https://img.shields.io/pypi/v/neurodags)](https://pypi.org/project/neurodags/)
 
 **An Extensible and Declarative DAG Framework for Reproducible Neuroscience Workflows**

@@ -31,11 +31,52 @@ The dry-run plan shows each step, whether its output is cached, and where it wou
 - Identify which files need recomputation
 - Debug path resolution issues
 
-## Error Markers
+## Failure Behavior
 
-When a node fails, NeuroDAGs writes a `.error` marker file alongside the expected output. On subsequent runs, the presence of this marker prevents silent retries — you must delete or handle it explicitly before retrying that file.
+When a node fails during execution:
 
-This avoids wasting compute on repeatedly failing files in large batches.
+1. The error is logged with full traceback, derivative name, step id, and file path.
+2. A `.error` marker file is written at the expected output location (e.g. `sub-01@MyDerivative.error`). Its content is a human-readable summary of the failure — useful for post-hoc inspection without digging through logs.
+3. By default (`raise_on_error=False`) execution continues to the next file; all failures are collected in the log.
+4. The failed file **will be retried** on the next run — the `.error` file is excluded from the cached-artifact check, so NeuroDAGs treats the output as missing and re-runs it.
+
+To inspect which files failed after a run, look for `*.error` files in the derivatives directory:
+
+```bash
+find derivatives/ -name "*.error"
+```
+
+Each `.error` file contains:
+
+```
+Derivative 'MyDerivative' step id=2 node='my_node' failed:
+<exception message>
+```
+
+### Automatic Cleanup of Stale Error Markers
+
+When a file that previously failed is re-run and **succeeds**, NeuroDAGs automatically deletes the stale `.error` marker. This keeps the derivatives directory clean and ensures dry-run plans accurately reflect current state — a file that succeeded on re-run will not appear as `has_error_marker: true` on subsequent runs.
+
+### Skipping Previously Failed Files
+
+To skip files that already have a `.error` marker (and avoid retrying known failures), use `skip_errors=True`:
+
+```python
+run_pipeline(config, skip_errors=True)
+```
+
+CLI:
+
+```bash
+neurodags run pipeline.yml --skip-errors
+neurodags dry-run pipeline.yml --skip-errors   # shows which files would be skipped
+```
+
+Skipped files are logged and reported in the dry-run plan with `has_error_marker: true`. To retry a skipped file, delete its `.error` marker:
+
+```bash
+rm derivatives/sub-01/ses-SE0/sub-01_ses-SE0_task-rest.vhdr@MyDerivative.error
+```
 
 ## Visualization
 
@@ -168,13 +209,15 @@ run_pipeline(config, derivatives=["MyDerivative"], max_files_per_dataset=10)
 
 ## Error Handling
 
-By default, errors are caught per-file and logged; processing continues. To stop on the first failure:
+By default (`raise_on_error=False`) errors are caught per-file, logged with full traceback, and a `.error` marker written — then execution continues with the next file. To stop immediately on first failure:
 
 ```python
 from neurodags.orchestrators import run_pipeline
 
 run_pipeline(config, derivatives=["MyDerivative"], raise_on_error=True)
 ```
+
+`raise_on_error=True` raises `RuntimeError` with the file path, derivative name, and traceback. Useful for CI or single-file debugging where you want a hard stop rather than a partial run.
 
 ## HPC Tips
 

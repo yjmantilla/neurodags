@@ -1,6 +1,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/ci.yml?branch=main&label=tests)](https://github.com/yjmantilla/neurodags/actions?query=workflow%3ACI)
 [![Docs](https://img.shields.io/github/actions/workflow/status/yjmantilla/neurodags/docs.yml?branch=main&label=docs)](https://yjmantilla.github.io/neurodags/)
 [![codecov](https://img.shields.io/codecov/c/github/yjmantilla/neurodags)](https://app.codecov.io/gh/yjmantilla/neurodags)
+[![PyPI](https://img.shields.io/pypi/v/neurodags)](https://pypi.org/project/neurodags/)
 
 # NeuroDAGs
 
@@ -264,14 +265,22 @@ Built-in Dash-Plotly explorer with dimension-aware UI — dropdown per axis, plo
 ## Inspection (Dry Run)
 
 ```python
+# All derivatives in DerivativeList
+run_pipeline(config, dry_run=True)
+
+# Or a specific one
 run_pipeline(config, derivatives=["MyDerivative"], dry_run=True)
 ```
 
-Returns a dataframe describing the execution plan without running any nodes. `.error` marker files prevent silent retry of failed runs.
+Returns a dataframe describing the execution plan without running any nodes. When a node fails, a `.error` marker file is written with the error message — failed files are retried on the next run. If a retry succeeds, the `.error` marker is automatically removed.
 
 CLI equivalent:
 
 ```bash
+# All derivatives in DerivativeList
+neurodags dry-run pipeline.yml --output dry_run_results.csv
+
+# Or a specific one
 neurodags dry-run pipeline.yml --derivative MyDerivative --output dry_run_results.csv
 ```
 

@@ -38,6 +38,7 @@ class _FileJob:
     derivative_definition: dict[str, Any] | None
     derivative_label: str
     dry_run: bool
+    skip_errors: bool = False
     custom_node_paths: tuple[str, ...] = ()
 
 
@@ -120,6 +121,7 @@ def _process_file_job(job: _FileJob) -> _FileResult:
                 dataset_config=dataset_config,
                 mount_point=job.mount_point,
                 dry_run=job.dry_run,
+                skip_errors=job.skip_errors,
             )
             if job.dry_run:
                 dry_payload = result
@@ -154,6 +156,7 @@ def iterate_derivative_pipeline(
     dry_run: bool = False,
     only_index: int | list[int] | None = None,
     raise_on_error: bool = False,
+    skip_errors: bool = False,
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
@@ -180,6 +183,9 @@ def iterate_derivative_pipeline(
         Restrict execution to a subset of files by index.
     raise_on_error : bool, optional
         Re-raise the first failure instead of continuing.
+    skip_errors : bool, optional
+        When True, skip files that have a prior ``.error`` marker from a previous failed run.
+        The file will not be retried until the ``.error`` file is deleted manually.
     n_jobs : int, optional
         Number of workers to use with joblib. ``None`` or ``1`` keeps execution serial. Negative
         values follow joblib semantics (e.g. ``-1`` uses all cores).
@@ -345,6 +351,7 @@ def iterate_derivative_pipeline(
                 ),
                 derivative_label=derivative_label or "<unknown>",
                 dry_run=dry_run,
+                skip_errors=skip_errors,
                 custom_node_paths=custom_node_paths,
             )
         )
@@ -457,6 +464,7 @@ def run_pipeline(
     dry_run: bool = False,
     only_index: int | list[int] | None = None,
     raise_on_error: bool = False,
+    skip_errors: bool = False,
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
@@ -483,6 +491,9 @@ def run_pipeline(
         Restrict execution to a subset of files by index.
     raise_on_error : bool, optional
         Re-raise the first failure instead of continuing.
+    skip_errors : bool, optional
+        When True, skip files that have a prior ``.error`` marker from a previous failed run.
+        The file will not be retried until the ``.error`` file is deleted manually.
     n_jobs : int, optional
         Number of workers for joblib parallelism.
     joblib_backend : str, optional
@@ -521,6 +532,7 @@ def run_pipeline(
             dry_run=dry_run,
             only_index=only_index,
             raise_on_error=raise_on_error,
+            skip_errors=skip_errors,
             n_jobs=n_jobs,
             joblib_backend=joblib_backend,
             joblib_prefer=joblib_prefer,
