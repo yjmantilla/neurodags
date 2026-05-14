@@ -2040,6 +2040,7 @@ docs = [
 test = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "textual" },
 ]
 tui = [
     { name = "textual" },
@@ -2078,6 +2079,7 @@ requires-dist = [
     { name = "sphinx-autodoc-typehints", marker = "extra == 'docs'", specifier = ">=2.1" },
     { name = "sphinx-gallery", marker = "extra == 'docs'", specifier = ">=0.16" },
     { name = "structlog" },
+    { name = "textual", marker = "extra == 'test'", specifier = ">=0.70.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.70.0" },
     { name = "xarray" },
     { name = "xpublish" },

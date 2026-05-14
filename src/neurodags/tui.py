@@ -4,7 +4,7 @@ Usage:
     neurodags-tui [config.yaml]
     python -m neurodags.tui [config.yaml]
 
-Requires the [tui] extra:
+Requires the ``[tui]`` extra:
     pip install neurodags[tui]
 """
 
@@ -46,6 +46,8 @@ _BLANK = (
 
 
 class _ConfigTab(Vertical):
+    """Configuration tab."""
+
     DEFAULT_CSS = """
     _ConfigTab { height: auto; padding: 1; }
     _ConfigTab .row { height: auto; margin-bottom: 1; }
@@ -53,8 +55,10 @@ class _ConfigTab(Vertical):
     _ConfigTab Static { color: $text-muted; }
     _ConfigTab #config-status { color: $success; }
     """
+    """Internal CSS."""
 
     def compose(self) -> ComposeResult:
+        """Compose child widgets."""
         yield Label("Pipeline YAML path")
         with Horizontal(classes="row"):
             yield Input(placeholder="/path/to/pipeline.yaml", id="config-path-input")
@@ -64,13 +68,17 @@ class _ConfigTab(Vertical):
 
 
 class _DagTab(Vertical):
+    """DAG visualization tab."""
+
     DEFAULT_CSS = """
     _DagTab { height: 1fr; padding: 1; }
     _DagTab .row { height: auto; margin-bottom: 1; }
     _DagTab TextArea { height: 1fr; }
     """
+    """Internal CSS."""
 
     def compose(self) -> ComposeResult:
+        """Compose child widgets."""
         with Horizontal(classes="row"):
             yield Button("Refresh", id="btn-dag-refresh", variant="primary")
             yield Button("Open HTML in browser", id="btn-dag-html")
@@ -78,6 +86,8 @@ class _DagTab(Vertical):
 
 
 class _DryRunTab(Vertical):
+    """Dry run tab."""
+
     DEFAULT_CSS = """
     _DryRunTab { height: 1fr; padding: 1; }
     _DryRunTab .row { height: auto; margin-bottom: 1; }
@@ -85,8 +95,10 @@ class _DryRunTab(Vertical):
     _DryRunTab Input { width: 1fr; }
     _DryRunTab DataTable { height: 1fr; }
     """
+    """Internal CSS."""
 
     def compose(self) -> ComposeResult:
+        """Compose child widgets."""
         with Horizontal(classes="row"):
             yield Select([], id="dryrun-derivative", prompt="Select derivative")
             yield Input(placeholder="max files/dataset (blank=all)", id="dryrun-max-files")
@@ -95,6 +107,8 @@ class _DryRunTab(Vertical):
 
 
 class _RunTab(Vertical):
+    """Pipeline execution tab."""
+
     DEFAULT_CSS = """
     _RunTab { height: 1fr; padding: 1; }
     _RunTab .row { height: auto; margin-bottom: 1; }
@@ -102,8 +116,10 @@ class _RunTab(Vertical):
     _RunTab Input { width: 1fr; }
     _RunTab Log { height: 1fr; }
     """
+    """Internal CSS."""
 
     def compose(self) -> ComposeResult:
+        """Compose child widgets."""
         with Horizontal(classes="row"):
             yield Select([], id="run-derivative", prompt="Select derivative")
             yield Input(placeholder="max files/dataset (blank=all)", id="run-max-files")
@@ -113,6 +129,8 @@ class _RunTab(Vertical):
 
 
 class _DataFrameTab(Vertical):
+    """DataFrame assembly tab."""
+
     DEFAULT_CSS = """
     _DataFrameTab { height: 1fr; padding: 1; }
     _DataFrameTab .row { height: auto; margin-bottom: 1; }
@@ -120,8 +138,10 @@ class _DataFrameTab(Vertical):
     _DataFrameTab Select { width: 1fr; }
     _DataFrameTab DataTable { height: 1fr; }
     """
+    """Internal CSS."""
 
     def compose(self) -> ComposeResult:
+        """Compose child widgets."""
         with Horizontal(classes="row"):
             yield Input(
                 placeholder="derivatives: comma-separated (blank=all)",
@@ -138,13 +158,17 @@ class _DataFrameTab(Vertical):
 
 
 class _NcTab(Vertical):
+    """NC viewer tab."""
+
     DEFAULT_CSS = """
     _NcTab { height: auto; padding: 1; }
     _NcTab .row { height: auto; margin-bottom: 1; }
     _NcTab Input { width: 3fr; }
     """
+    """Internal CSS."""
 
     def compose(self) -> ComposeResult:
+        """Compose child widgets."""
         yield Label(".fif or .nc file path")
         with Horizontal(classes="row"):
             yield Input(placeholder="/path/to/file.nc", id="nc-path")
@@ -153,22 +177,25 @@ class _NcTab(Vertical):
 
 
 class NeuroDagsApp(App):
-    """NeuroDAGs TUI — pipeline dry-run, execution, DataFrame assembly, and NC viewer."""
+    """NeuroDAGs TUI - pipeline dry-run, execution, DataFrame assembly, and NC viewer."""
 
     CSS = """
     TabbedContent { height: 1fr; }
     TabPane { height: 1fr; }
     """
+    """Internal CSS."""
 
     BINDINGS: ClassVar[list[tuple[str, str, str]]] = [("q", "quit", "Quit")]
 
     def __init__(self, config_path: str | None = None) -> None:
+        """Initialize the TUI with an optional config path."""
         super().__init__()
         self._config_path: str | None = config_path
         self._config: dict[str, Any] | None = None
         self._derivatives: list[str] = []
 
     def compose(self) -> ComposeResult:
+        """Compose the main application layout."""
         yield Header()
         with TabbedContent():
             with TabPane("Config", id="tab-config"):

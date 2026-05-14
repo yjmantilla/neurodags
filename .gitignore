@@ -54,6 +54,7 @@ htmlcov/
 # Sphinx documentation
 docs/_build/
 docs/auto_examples/
+docs/api/
 
 # OS files
 .DS_Store

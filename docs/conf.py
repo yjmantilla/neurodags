@@ -79,7 +79,7 @@ autoapi_generate_api_docs = True
 autoapi_member_order = "bysource"  # preserve source order
 autoapi_python_use_implicit_namespaces = True  # if you have any namespace pkgs
 autoapi_python_class_content = "both"  # class + __init__ docs
-autoapi_keep_files = False  # useful for debugging
+autoapi_keep_files = True  # useful for debugging
 
 # Be generous so you truly get “the whole API”
 autoapi_options = [
@@ -92,6 +92,31 @@ autoapi_options = [
     "show-module-summary",
     # "imported-members",   # enable if you also want re-exported/imported names
 ]
+
+def skip_troublesome_tui_members(app, what, name, obj, skip, options):
+    # Skip CSS and BINDINGS which cause formatting issues
+    if any(x in name for x in ("DEFAULT_CSS", "CSS", "BINDINGS")):
+        return True
+    # Skip private tab classes entirely as they inherit problematic docstrings from textual
+    if any(
+        x in name
+        for x in (
+            "_ConfigTab",
+            "_DagTab",
+            "_DryRunTab",
+            "_RunTab",
+            "_DataFrameTab",
+            "_NcTab",
+        )
+    ):
+        return True
+    # Skip NeuroDagsApp.__init__ to avoid inherited textual docstrings
+    if what == "method" and name.endswith(".NeuroDagsApp.__init__"):
+        return True
+    return skip
+
+def setup(app):
+    app.connect("autoapi-skip-member", skip_troublesome_tui_members)
 
 # Ignore docs generation for tests/examples if desired (pattern applies to source crawl)
 autoapi_ignore = [

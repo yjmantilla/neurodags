@@ -4,12 +4,12 @@ import os
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import mne
 import yaml
 
-from neurodags.definitions import RulesLike
+from neurodags.definitions import PathLike, RulesLike
 from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
@@ -118,9 +118,6 @@ def load_configuration(rules: RulesLike) -> dict[str, Any]:
         if close_after:
             f.close()
             active_log.debug("Closed YAML file handle")
-
-
-PathLike = Union[str, "os.PathLike[str]"]
 
 
 def load_meeg(meeg_file: PathLike, kwargs: dict | None = None):
