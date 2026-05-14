@@ -50,6 +50,9 @@ dependencies = ["mne",
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[project.scripts]
+neurodags-tui = "neurodags.tui:main"
+
 [project.urls]
 Homepage = "https://github.com/yjmantilla/neurodags"
 Documentation = "https://yjmantilla.github.io/neurodags/"
@@ -78,6 +81,10 @@ docs = [
   "sphinx-gallery>=0.16",
   "matplotlib>=3.7",
   "sphinx-autoapi",
+]
+
+tui = [
+  "textual>=0.70.0",
 ]
 
 [tool.black]
