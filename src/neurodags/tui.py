@@ -40,7 +40,9 @@ except ImportError as exc:
     raise ImportError("TUI requires the [tui] extra: pip install neurodags[tui]") from exc
 
 
-_BLANK = Select.BLANK
+_BLANK = (
+    Select.BLANK
+)  # kept for format fallback comparison; use select.is_blank for no-selection checks
 
 
 class _ConfigTab(Vertical):
@@ -281,10 +283,11 @@ class NeuroDagsApp(App):
         if self._config is None:
             self.notify("Load config first.", severity="error")
             return
-        derivative = self.query_one("#dryrun-derivative", Select).value
-        if derivative is _BLANK:
+        dryrun_sel = self.query_one("#dryrun-derivative", Select)
+        if dryrun_sel.is_blank():
             self.notify("Select a derivative.", severity="warning")
             return
+        derivative = dryrun_sel.value
         max_files = _parse_int(self.query_one("#dryrun-max-files", Input).value)
 
         table = self.query_one("#dryrun-table", DataTable)
@@ -322,10 +325,11 @@ class NeuroDagsApp(App):
         if self._config is None:
             self.notify("Load config first.", severity="error")
             return
-        derivative = self.query_one("#run-derivative", Select).value
-        if derivative is _BLANK:
+        run_sel = self.query_one("#run-derivative", Select)
+        if run_sel.is_blank():
             self.notify("Select a derivative.", severity="warning")
             return
+        derivative = run_sel.value
         max_files = _parse_int(self.query_one("#run-max-files", Input).value)
         n_jobs = _parse_int(self.query_one("#run-njobs", Input).value)
 
@@ -366,8 +370,8 @@ class NeuroDagsApp(App):
             return
         derivs_raw = self.query_one("#df-derivatives", Input).value.strip()
         include = [d.strip() for d in derivs_raw.split(",") if d.strip()] or None
-        fmt_val = self.query_one("#df-format", Select).value
-        fmt: str = fmt_val if fmt_val is not _BLANK else "wide"
+        fmt_sel = self.query_one("#df-format", Select)
+        fmt: str = str(fmt_sel.value) if not fmt_sel.is_blank() else "wide"
         max_files = _parse_int(self.query_one("#df-max-files", Input).value)
 
         table = self.query_one("#df-table", DataTable)
