@@ -1,4 +1,4 @@
-# Inspection, Visualization, and Parallelism
+# Inspection and Visualization
 
 ## Dry Run Mode
 
@@ -78,9 +78,7 @@ Skipped files are logged and reported in the dry-run plan with `has_error_marker
 rm derivatives/sub-01/ses-SE0/sub-01_ses-SE0_task-rest.vhdr@MyDerivative.error
 ```
 
-## Visualization
-
-### DAG Visualization (Mermaid)
+## DAG Visualization (Mermaid)
 
 NeuroDAGs can render pipeline and derivative graphs as interactive
 [Mermaid](https://mermaid.js.org/) diagrams saved to standalone HTML files.
@@ -129,10 +127,18 @@ print(pipeline_to_mermaid(config))
 print(derivative_to_mermaid(config["DerivativeDefinitions"]["BandPower"], "BandPower"))
 ```
 
+CLI:
+
+```bash
+neurodags dag pipeline.yml
+neurodags dag pipeline.yml --html pipeline_dag.html
+neurodags dag pipeline.yml --derivative BandPower --html bandpower_dag.html
+```
+
 See the {doc}`../auto_examples/plot_mermaid_visualization` example for a
 complete walkthrough.
 
-### Interactive File Explorer
+## Interactive File Explorer
 
 Built-in Dash-Plotly explorer for `.fif` (MNE) and `.nc` (NetCDF/xarray) files:
 
@@ -146,79 +152,7 @@ python -m neurodags.visualization path/to/file.nc
 ```
 
 Features:
-- Dimension-aware UI — dropdown to select which axis to plot along
+- Variable selector — when the `.nc` file is a multi-variable Dataset, a dropdown lets you switch between variables interactively without restarting
+- Dimension-aware UI — per-variable dropdowns to slice along any dimension
 - Plot types: Line, Scatter, Bar, Heatmap
-- Works with any `.nc` file produced by NeuroDAGs, regardless of array shape
-
-## Parallel Execution
-
-NeuroDAGs uses joblib for file-level parallelism. Each file is an independent job.
-
-### Via pipeline.yml
-
-```yaml
-n_jobs: 4           # -1 = all available cores, 1 or null = serial
-joblib_backend: loky
-joblib_prefer: processes
-```
-
-### Via Python
-
-```python
-from neurodags.orchestrators import run_pipeline
-
-# All derivatives
-run_pipeline(config, n_jobs=4, joblib_backend="loky", joblib_prefer="processes")
-
-# Single derivative
-run_pipeline(config, derivatives=["MyDerivative"], n_jobs=4, joblib_backend="loky", joblib_prefer="processes")
-```
-
-### Via CLI
-
-```bash
-neurodags run pipeline.yml --derivative MyDerivative --n-jobs 4 --joblib-backend loky
-```
-
-## CLI DAG Export
-
-Generate Mermaid output directly from the command line:
-
-```bash
-neurodags dag pipeline.yml
-neurodags dag pipeline.yml --html pipeline_dag.html
-neurodags dag pipeline.yml --derivative BandPower --html bandpower_dag.html
-```
-
-## Subset Execution
-
-Process only a subset of files by index:
-
-```python
-from neurodags.orchestrators import run_pipeline
-
-# Single file
-run_pipeline(config, derivatives=["MyDerivative"], only_index=0)
-
-# Multiple files
-run_pipeline(config, derivatives=["MyDerivative"], only_index=[0, 2, 5])
-
-# Limit files per dataset
-run_pipeline(config, derivatives=["MyDerivative"], max_files_per_dataset=10)
-```
-
-## Error Handling
-
-By default (`raise_on_error=False`) errors are caught per-file, logged with full traceback, and a `.error` marker written — then execution continues with the next file. To stop immediately on first failure:
-
-```python
-from neurodags.orchestrators import run_pipeline
-
-run_pipeline(config, derivatives=["MyDerivative"], raise_on_error=True)
-```
-
-`raise_on_error=True` raises `RuntimeError` with the file path, derivative name, and traceback. Useful for CI or single-file debugging where you want a hard stop rather than a partial run.
-
-## HPC / SLURM
-
-For full SLURM array job examples (one task per file, per derivative, or chained with `--dependency`) see {doc}`hpc`.
+- Works with both `xr.DataArray` and `xr.Dataset` files produced by NeuroDAGs

@@ -14,4 +14,5 @@
 - {doc}`datasets_yaml` — all `datasets.yml` fields and mount points
 - {doc}`custom_nodes` — write and register custom nodes
 - {doc}`dataframe_assembly` — build ML-ready dataframes from derivatives
-- {doc}`inspection_parallelism` — dry-run, visualization, HPC parallelism
+- {doc}`inspection` — dry-run, error markers, DAG visualization, file explorer
+- {doc}`parallelism` — local n_jobs, subset execution, error handling, HPC pointer

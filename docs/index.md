@@ -41,4 +41,5 @@ COMPARISON
 - {doc}`user_guide/datasets_yaml` — full `datasets.yml` reference
 - {doc}`user_guide/custom_nodes` — write and register your own nodes
 - {doc}`user_guide/dataframe_assembly` — build ML-ready dataframes from derivatives
-- {doc}`user_guide/inspection_parallelism` — dry-run, visualization, HPC parallelism
+- {doc}`user_guide/inspection` — dry-run, error markers, DAG visualization, file explorer
+- {doc}`user_guide/parallelism` — local n_jobs, subset execution, HPC pointer

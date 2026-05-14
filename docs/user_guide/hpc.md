@@ -11,17 +11,17 @@ The key parameter is `only_index`, which restricts a run to specific file indice
 Use `neurodags slurm-script` to generate a ready-to-edit SLURM template populated with your pipeline's actual derivative names and dependency order:
 
 ```bash
-# Pattern 3 (default) — chained per-derivative arrays
-neurodags slurm-script pipeline.yml --output submit_pipeline.sh
+# per-file (default) — all derivatives per file task
+neurodags slurm-script pipeline.yml --output run_array.sh
 
-# Pattern 1 — all derivatives per file
-neurodags slurm-script pipeline.yml --pattern 1 --output run_array.sh
+# flat — file x derivative flat array (max parallelism, independent derivatives only)
+neurodags slurm-script pipeline.yml --pattern flat --output run_array_per_deriv.sh
 
-# Pattern 2 — file × derivative flat array
-neurodags slurm-script pipeline.yml --pattern 2 --output run_array_per_deriv.sh
+# chained — per-derivative sequential arrays linked via --dependency=afterok
+neurodags slurm-script pipeline.yml --pattern chained --output submit_pipeline.sh
 ```
 
-Pattern 3 writes two files: `submit_pipeline.sh` (the submission script) and `run_one_derivative.sh` (the worker). Edit the `#SBATCH` resource lines before submitting.
+The `chained` pattern writes two files: `submit_pipeline.sh` (the submission script) and `run_one_derivative.sh` (the worker). Edit the `#SBATCH` resource lines before submitting.
 
 ### Counting files
 
@@ -34,7 +34,7 @@ sbatch --array=0-$((N - 1)) run_array.sh
 
 ---
 
-## Pattern 1: One Array Task per File (All Derivatives)
+## per-file: One Array Task per File (All Derivatives)
 
 Each task runs all derivatives in dependency order for a single file.
 
@@ -74,7 +74,7 @@ EOF
 
 ---
 
-## Pattern 2: One Array Task per File × Derivative
+## flat: One Array Task per File × Derivative
 
 Use this when derivatives are independent (no inter-derivative dependencies) and you want maximum parallelism.
 
@@ -124,7 +124,7 @@ EOF
 
 ---
 
-## Pattern 3: Per-Derivative Sequential Array
+## chained: Per-Derivative Sequential Array
 
 Run derivatives one at a time in dependency order, with all files parallelised within each derivative. Use SLURM job dependencies to chain them.
 
@@ -204,4 +204,4 @@ run_pipeline(config, only_index=index, skip_errors=True)
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
 | Partial reruns | Caching is automatic — resubmit the full array, cached files are skipped |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
-| Array size limit | Most clusters cap at 1000–10000 tasks; use `max_files_per_dataset` to batch if needed |
+| Array size limit | Most clusters cap at 1000–10000 tasks; split `--array` into index-range batches (e.g. `0-999`, `1000-1999`). Each task ID maps directly to a file index, so range batching is safe and idempotent — cached files are skipped automatically on resubmit |

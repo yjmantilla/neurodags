@@ -12,6 +12,7 @@ pipeline_yaml
 datasets_yaml
 custom_nodes
 dataframe_assembly
-inspection_parallelism
+inspection
+parallelism
 hpc
 ```

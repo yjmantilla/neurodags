@@ -109,11 +109,11 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _slurm_pattern1(config_path: str, derivatives: list[str]) -> str:
+def _slurm_per_file(config_path: str, derivatives: list[str]) -> str:
     deriv_names = ", ".join(derivatives)
     return f"""\
 #!/bin/bash
-# Pattern 1: one array task per file — all derivatives run in dependency order per task.
+# per-file: one array task per file — all derivatives run in dependency order per task.
 # Derivatives: {deriv_names}
 #
 # Submit:
@@ -145,12 +145,12 @@ EOF
 """
 
 
-def _slurm_pattern2(config_path: str, derivatives: list[str]) -> str:
+def _slurm_flat(config_path: str, derivatives: list[str]) -> str:
     n = len(derivatives)
     deriv_arr = "(" + " ".join(f'"{d}"' for d in derivatives) + ")"
     return f"""\
 #!/bin/bash
-# Pattern 2: one array task per file x derivative (maximum parallelism).
+# flat: one array task per file x derivative (maximum parallelism).
 # WARNING: use only when derivatives are independent (no inter-derivative dependencies).
 #
 # Submit:
@@ -189,11 +189,11 @@ EOF
 """
 
 
-def _slurm_pattern3(config_path: str, derivatives: list[str]) -> tuple[str, str]:
+def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
     """Return (submit_script, worker_script) for chained per-derivative arrays."""
     submit_lines = [
         "#!/bin/bash",
-        "# Pattern 3: per-derivative sequential arrays chained via --dependency=afterok.",
+        "# chained: per-derivative sequential arrays chained via --dependency=afterok.",
         "# All files run in parallel within each derivative; derivatives run in order.",
         "#",
         "# Usage: bash submit_pipeline.sh",
@@ -223,7 +223,7 @@ def _slurm_pattern3(config_path: str, derivatives: list[str]) -> tuple[str, str]
 
     worker = f"""\
 #!/bin/bash
-# Worker script used by submit_pipeline.sh (Pattern 3).
+# Worker script used by submit_pipeline.sh (chained pattern).
 # DERIVATIVE is injected via --export from the submit script.
 #
 #SBATCH --job-name=neurodags
@@ -404,12 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
     slurm_parser.add_argument(
         "--pattern",
         choices=("per-file", "flat", "chained"),
-        default="chained",
+        default="per-file",
         help=(
             "Submission pattern: "
-            "per-file=all derivatives per file task, "
+            "per-file=all derivatives per file task (default), "
             "flat=file x derivative flat array (max parallelism, independent derivatives only), "
-            "chained=per-derivative sequential arrays linked via --dependency=afterok (default)."
+            "chained=per-derivative sequential arrays linked via --dependency=afterok."
         ),
     )
     slurm_parser.add_argument(
@@ -544,21 +544,21 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
     ordered = _derivative_topo_order(config, derivatives)
 
     if args.pattern == "per-file":
-        script = _slurm_pattern1(args.config, ordered)
+        script = _slurm_per_file(args.config, ordered)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     elif args.pattern == "flat":
-        script = _slurm_pattern2(args.config, ordered)
+        script = _slurm_flat(args.config, ordered)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     else:
-        submit, worker = _slurm_pattern3(args.config, ordered)
+        submit, worker = _slurm_chained(args.config, ordered)
         if args.output:
             submit_path = Path(args.output)
             worker_path = submit_path.parent / "run_one_derivative.sh"
