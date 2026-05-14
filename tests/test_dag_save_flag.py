@@ -1,6 +1,7 @@
 from pathlib import Path
+from unittest.mock import patch
 
-from neurodags.dag import run_derivative
+from neurodags.dag import _MissingPrecomputedArtifacts, collect_derivative_for_dataframe, run_derivative
 from neurodags.definitions import NodeResult
 
 
@@ -58,3 +59,30 @@ def test_save_false_does_not_trigger_cached_shortcut(tmp_path):
     result, _ = _run_dummy_derivative(tmp_path, nosave_derivative)
 
     assert isinstance(result, NodeResult)
+
+
+def test_collect_derivative_for_dataframe_missing_flag_does_not_require_precomputed(tmp_path):
+    with patch("neurodags.dag._resolve_derivative_artifacts", return_value={}) as resolver:
+        collect_derivative_for_dataframe(
+            {"save": True},
+            "Demo",
+            "input.vhdr",
+            reference_base=tmp_path / "subject" / "sample",
+        )
+
+    assert resolver.call_args.kwargs["precomputed_only"] is False
+
+
+def test_collect_derivative_for_dataframe_missing_cached_returns_empty_when_opted_in(tmp_path):
+    with patch(
+        "neurodags.dag._resolve_derivative_artifacts",
+        side_effect=_MissingPrecomputedArtifacts,
+    ):
+        result = collect_derivative_for_dataframe(
+            {"save": True, "for_dataframe": True},
+            "Demo",
+            "input.vhdr",
+            reference_base=tmp_path / "subject" / "sample",
+        )
+
+    assert result == {}

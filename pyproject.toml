@@ -51,6 +51,7 @@ dependencies = ["mne",
 allow-direct-references = true
 
 [project.scripts]
+neurodags = "neurodags.cli:main"
 neurodags-tui = "neurodags.tui:main"
 
 [project.urls]

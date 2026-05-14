@@ -15,6 +15,7 @@ pytest.importorskip("textual", reason="textual not installed; skip TUI tests")
 
 from neurodags.tui import (  # noqa: E402
     NeuroDagsApp,
+    _InspectableStatic,
     _parse_int,
     _run_pipeline_sync,
     main,
@@ -93,6 +94,23 @@ class TestRunPipelineSync:
         with pytest.raises(ValueError, match="boom"):
             _run_pipeline_sync(bad_func, {}, "D", None, None, buf)
 
+    def test_supports_datasets_config_argument(self):
+        captured = {}
+
+        def fake_func(*_a, **_kw):
+            captured.update(_kw)
+
+        _run_pipeline_sync(fake_func, {}, "D", "datasets.yml", 3, 2, io.StringIO())
+        assert captured["datasets_configuration"] == "datasets.yml"
+        assert captured["max_files_per_dataset"] == 3
+        assert captured["n_jobs"] == 2
+
+
+class TestInspectableStatic:
+    def test_render_returns_original_content(self):
+        widget = _InspectableStatic("summary text")
+        assert widget.render() == "summary text"
+
 
 # ---------------------------------------------------------------------------
 # App startup
@@ -135,6 +153,21 @@ class TestAppStartup:
             with patch.object(NeuroDagsApp, "_load_config", wraps=None) as m:
                 async with NeuroDagsApp(config_path=str(yaml)).run_test():
                     m.assert_called_once_with(str(yaml))
+
+        _run(_())
+
+    def test_starts_with_datasets_path_preloads(self, tmp_path):
+        yaml = tmp_path / "pipe.yaml"
+        data_yaml = tmp_path / "datasets.yaml"
+        yaml.write_text("Datasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
+        data_yaml.write_text("Datasets: {}\n")
+
+        async def _():
+            async with NeuroDagsApp(
+                config_path=str(yaml), datasets_path=str(data_yaml)
+            ).run_test() as pilot:
+                inp = pilot.app.query_one("#datasets-path-input", Input)
+                assert str(data_yaml) in inp.value
 
         _run(_())
 
@@ -584,7 +617,8 @@ class TestNcTab:
                     app._launch_nc_viewer()
                     mp.assert_called_once()
                     args = mp.call_args[0][0]
-                    assert str(nc) in args
+                    assert args[:3] == [sys.executable, "-m", "neurodags.visualization"]
+                    assert str(nc) == args[3]
 
                 status = str(app.query_one("#nc-status", Static).render())
                 assert "Launched" in status or "127.0.0.1" in status
@@ -635,4 +669,19 @@ class TestMain:
         ):
             main()
             mi.assert_called_once_with(config_path=str(yaml))
+            m.assert_called_once()
+
+    def test_main_with_datasets_arg(self, tmp_path):
+        yaml = tmp_path / "p.yaml"
+        datasets = tmp_path / "d.yaml"
+        yaml.write_text("Datasets: {}\n")
+        datasets.write_text("Datasets: {}\n")
+
+        with (
+            patch.object(sys, "argv", ["neurodags-tui", str(yaml), "--datasets", str(datasets)]),
+            patch("neurodags.tui.NeuroDagsApp.run") as m,
+            patch("neurodags.tui.NeuroDagsApp.__init__", return_value=None) as mi,
+        ):
+            main()
+            mi.assert_called_once_with(config_path=str(yaml), datasets_path=str(datasets))
             m.assert_called_once()

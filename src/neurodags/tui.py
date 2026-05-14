@@ -51,6 +51,30 @@ _BLANK = (
 class _InspectableStatic(Static):
     """Static widget that renders its original content for easier inspection in tests."""
 
+    def __init__(
+        self,
+        content: Any = "",
+        *,
+        expand: bool = False,
+        shrink: bool = False,
+        markup: bool = True,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        """Initialize the inspectable static widget."""
+        super().__init__(
+            content=content,
+            expand=expand,
+            shrink=shrink,
+            markup=markup,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
+
     def render(self) -> Any:
         return self.content
 
@@ -480,10 +504,9 @@ class NeuroDagsApp(App):
         if not Path(nc_path).exists():
             self.notify(f"File not found: {nc_path}", severity="error")
             return
-        vis_script = Path(__file__).parent / "visualization.py"
         try:
             subprocess.Popen(
-                [sys.executable, str(vis_script), nc_path],
+                [sys.executable, "-m", "neurodags.visualization", nc_path],
                 start_new_session=True,
             )
             self.query_one("#nc-status", Static).update(

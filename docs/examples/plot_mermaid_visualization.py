@@ -157,6 +157,12 @@ print(f"{deriv_name} DAG saved to: {deriv_html}")
 #         output_path="bandpower_dag.html",
 #         auto_open=True,
 #     )
+#
+# CLI equivalents::
+#
+#     neurodags dag pipeline.yml
+#     neurodags dag pipeline.yml --html pipeline_dag.html
+#     neurodags dag pipeline.yml --derivative BandPower --html bandpower_dag.html
 
 # %%
 # Direct Mermaid string access

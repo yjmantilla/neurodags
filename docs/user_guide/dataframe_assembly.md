@@ -45,17 +45,29 @@ df = build_derivative_dataframe("pipeline.yml", output_format="wide")
 
 ### Wide Format (`output_format="wide"`)
 
-One row per file. Each derivative becomes one or more columns. Best for file-level features.
+One row per source file. Each collected derivative becomes one or more columns.
+`file_path` remains the original input file path; derivative identity is encoded
+in the column names. Best for file-level features.
 
 ```
-file_path          alpha_power  beta_power  ...
-sub-1@BandPower    0.32         0.18
-sub-2@BandPower    0.27         0.21
+file_path               BandPower@alpha  BandPower@beta  Entropy
+sub-01_task-rest.vhdr   0.32             0.18            1.24
+sub-02_task-rest.vhdr   0.27             0.21            1.11
 ```
 
 ### Long Format (`output_format="long"`)
 
-One row per collected value. No column synthesis — each value is its own row with associated metadata. Best for multi-dimensional derivatives.
+One row per collected value. `file_path` still refers to the source file, while
+the collected derivative value is identified in the `derivative` column. No
+column synthesis is performed. Best for multi-dimensional derivatives.
+
+```
+file_path               derivative               value
+sub-01_task-rest.vhdr   BandPower@alpha          0.32
+sub-01_task-rest.vhdr   BandPower@beta           0.18
+sub-01_task-rest.vhdr   Entropy                  1.24
+sub-02_task-rest.vhdr   BandPower@alpha          0.27
+```
 
 ## Selecting Derivatives
 

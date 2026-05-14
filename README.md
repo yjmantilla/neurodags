@@ -29,6 +29,7 @@ Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes
 - Graph-based caching: skip already-computed derivatives
 - Extensible node system — add nodes without forking the package
 - YAML-based declarative configuration
+- Unified CLI: `neurodags run`, `dry-run`, `dataframe`, `dag`, `view`, `validate`, `tui`
 - Built-in Terminal User Interface (TUI) for pipeline management and execution
 - Built-in nodes for preprocessing, spectral analysis, entropy, complexity, and data transformations
 - Dataframe assembly (wide or long format) from derivative artifacts
@@ -54,6 +55,25 @@ uv add neurodags[tui]
 ## Quickstart
 
 See the [quickstart example](https://yjmantilla.github.io/neurodags/auto_examples/plot_quickstart_synthetic.html) — full synthetic pipeline, no real data required.
+
+## CLI
+
+NeuroDAGs installs a unified `neurodags` command:
+
+```bash
+neurodags validate pipeline.yml
+neurodags run pipeline.yml --derivative CleanedEEG
+neurodags dry-run pipeline.yml --derivative PowerSpectrum --output dry_run.csv
+neurodags dataframe pipeline.yml --format wide --output features.csv
+neurodags dag pipeline.yml --html pipeline_dag.html
+neurodags view path/to/file.nc
+```
+
+If you install the optional TUI extra, you also get:
+
+```bash
+neurodags tui pipeline.yml --datasets datasets.yml
+```
 
 ## Development
 
@@ -148,6 +168,13 @@ iterate_derivative_pipeline(config, "CleanedEEG")
 iterate_derivative_pipeline(config, "PowerSpectrum")
 ```
 
+**CLI**
+```bash
+neurodags validate pipeline.yml
+neurodags run pipeline.yml --derivative CleanedEEG
+neurodags run pipeline.yml --derivative PowerSpectrum
+```
+
 ## Custom Nodes
 
 Add nodes without modifying or forking the package:
@@ -185,6 +212,12 @@ df = build_derivative_dataframe("pipeline.yml", output_format="wide")
 
 Derivatives marked `for_dataframe: True` are collected automatically. Supports `"wide"` (one row per file) and `"long"` (one row per value) formats.
 
+CLI equivalent:
+
+```bash
+neurodags dataframe pipeline.yml --format wide --output derivative_dataframe.csv
+```
+
 ## Parallel Execution
 
 ```yaml
@@ -200,9 +233,19 @@ Or via Python:
 iterate_derivative_pipeline(config, "MyDerivative", n_jobs=4)
 ```
 
+Or via CLI:
+
+```bash
+neurodags run pipeline.yml --derivative MyDerivative --n-jobs 4
+```
+
 ## Visualization
 
 ```bash
+neurodags view path/to/file.fif
+neurodags view path/to/file.nc
+
+# Alternative module entry point
 python -m neurodags.visualization path/to/file.fif
 python -m neurodags.visualization path/to/file.nc
 ```
@@ -216,6 +259,12 @@ iterate_derivative_pipeline(config, "MyDerivative", dry_run=True)
 ```
 
 Returns a dataframe describing the execution plan without running any nodes. `.error` marker files prevent silent retry of failed runs.
+
+CLI equivalent:
+
+```bash
+neurodags dry-run pipeline.yml --derivative MyDerivative --output dry_run_results.csv
+```
 
 ## Derivative Flags
 
