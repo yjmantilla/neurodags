@@ -6,12 +6,16 @@ With [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
 uv add neurodags
+# Or with TUI support
+uv add neurodags[tui]
 ```
 
 With pip:
 
 ```bash
 pip install neurodags
+# Or with TUI support
+pip install neurodags[tui]
 ```
 
 ## Development Install
@@ -23,7 +27,7 @@ uv sync --all-extras    # creates .venv and installs all deps incl. dev/test/doc
 uv run pre-commit install
 ```
 
-> **No uv?** `pip install uv` or `curl -Ls https://astral.sh/uv/install.sh | sh`.  
+> **No uv?** `pip install uv` or `curl -Ls https://astral.sh/uv/install.sh | sh`.
 > Without uv: `python -m venv .venv && source .venv/bin/activate && pip install -e .[dev,test,docs] && pre-commit install`
 
 ## Running Commands

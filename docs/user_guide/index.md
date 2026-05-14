@@ -6,6 +6,7 @@
 installation
 quickstart
 usage
+tui
 concepts
 pipeline_yaml
 datasets_yaml

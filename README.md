@@ -29,6 +29,7 @@ Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes
 - Graph-based caching: skip already-computed derivatives
 - Extensible node system — add nodes without forking the package
 - YAML-based declarative configuration
+- Built-in Terminal User Interface (TUI) for pipeline management and execution
 - Built-in nodes for preprocessing, spectral analysis, entropy, complexity, and data transformations
 - Dataframe assembly (wide or long format) from derivative artifacts
 - Dry-run mode — inspect planned computations without executing
@@ -38,12 +39,16 @@ Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes
 
 ```bash
 pip install neurodags
+# Or with TUI support
+pip install neurodags[tui]
 ```
 
 With [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
 uv add neurodags
+# Or with TUI support
+uv add neurodags[tui]
 ```
 
 ## Quickstart
