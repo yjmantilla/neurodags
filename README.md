@@ -8,7 +8,7 @@
 
 M/EEG studies generate many interdependent intermediate derivatives. Recomputing full pipelines is wasteful; reusing valid intermediates is non-trivial. Large-scale studies require reproducible, extensible, and efficient workflows. NeuroDAGs addresses this with a declarative, graph-based framework for scalable and reusable derivative computation.
 
-**[Poster BRaIN Symposium 2026 Montreal](https://canva.link/c2b2fm0mk2wotwq)**
+**[Docs](https://yjmantilla.github.io/neurodags/)** | **[Poster BRaIN Symposium 2026 Montreal](https://canva.link/c2b2fm0mk2wotwq)**
 
 ## Core Idea
 
