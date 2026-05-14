@@ -480,10 +480,9 @@ class NeuroDagsApp(App):
         if not Path(nc_path).exists():
             self.notify(f"File not found: {nc_path}", severity="error")
             return
-        vis_script = Path(__file__).parent / "visualization.py"
         try:
             subprocess.Popen(
-                [sys.executable, str(vis_script), nc_path],
+                [sys.executable, "-m", "neurodags.visualization", nc_path],
                 start_new_session=True,
             )
             self.query_one("#nc-status", Static).update(
