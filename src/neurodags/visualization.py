@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,6 +16,11 @@ from dash import ALL, Dash, Input, Output, callback_context, dcc, html
 
 from neurodags.loaders import load_meeg
 from neurodags.nodes.descriptive import meeg_to_xarray
+
+_SHOW = {"display": "block"}
+_HIDE = {"display": "none"}
+
+_SPATIAL_DIMS = {"figure_y", "figure_x", "figure_channel"}
 
 
 def load_visualization_dataset(filename: str | Path) -> xr.DataArray | xr.Dataset:
@@ -76,6 +82,22 @@ def apply_transform(data: Any, transform: str) -> np.ndarray:
     if transform == "log20":
         return np.log10(np.where(arr**2 > 0, arr**2, np.nan))
     return arr
+
+
+def _is_png_hex_var(da: xr.DataArray) -> bool:
+    return da.dtype.kind in {"U", "S"}
+
+
+def _is_rgba_var(da: xr.DataArray) -> bool:
+    return _SPATIAL_DIMS.issubset(set(da.dims))
+
+
+def _decode_png_hex(hex_str: str) -> str:
+    """Hex PNG string → base64 data URI for html.Img src."""
+    if not hex_str:
+        return ""
+    raw = bytes.fromhex(hex_str)
+    return "data:image/png;base64," + base64.b64encode(raw).decode()
 
 
 def _make_dim_controls(dims: list[str], coords: dict[str, Any]) -> list:
@@ -164,6 +186,47 @@ def _compute_figure(
     return fig, json.dumps(debug_info, indent=2)
 
 
+def _compute_png_image(
+    da: xr.DataArray,
+    slice_dict: dict[str, str],
+) -> tuple[str, str]:
+    """Decode a figure_png_hex slice to a base64 data URI. Returns (src, debug_json)."""
+    arr = safe_sel(da, slice_dict)
+    hex_str = str(arr.values.item()) if arr.ndim == 0 else str(arr.values.flat[0])
+    src = _decode_png_hex(hex_str)
+    debug_info = {
+        "type": "png_hex",
+        "slice_dict": {k: str(v) for k, v in slice_dict.items()},
+        "hex_len": len(hex_str),
+    }
+    return src, json.dumps(debug_info, indent=2)
+
+
+def _compute_rgba_image(
+    da: xr.DataArray,
+    slice_dict: dict[str, str],
+) -> tuple[go.Figure, str]:
+    """Render a figure_rgba slice as a Plotly Image trace. Returns (figure, debug_json)."""
+    arr = safe_sel(da, slice_dict)
+    fig = go.Figure()
+    if arr.ndim == 3 and arr.shape[2] in {3, 4}:
+        fig.add_trace(go.Image(z=arr.values.astype(np.uint8)))
+        fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
+    else:
+        fig.add_annotation(
+            text=f"Unexpected RGBA shape: {arr.shape}",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+        )
+    debug_info = {
+        "type": "rgba",
+        "slice_dict": {k: str(v) for k, v in slice_dict.items()},
+        "shape": list(arr.shape),
+    }
+    return fig, json.dumps(debug_info, indent=2)
+
+
 def build_visualization_app(ds: xr.DataArray | xr.Dataset, filename: str | Path) -> Dash:
     """Create the Dash app for a loaded DataArray or Dataset."""
     if isinstance(ds, xr.DataArray):
@@ -190,47 +253,62 @@ def build_visualization_app(ds: xr.DataArray | xr.Dataset, filename: str | Path)
                 clearable=False,
             ),
             html.Div(dim_children, id="dim-controls"),
-            html.Label("X-axis dimension"),
-            dcc.Dropdown(id="x-dim", options=x_opts, value=x_val, clearable=False),
-            html.Label("Y-axis dimension (optional)"),
-            dcc.Dropdown(id="y-dim", options=y_opts, value="none", clearable=False),
-            html.Label("Plot type"),
-            dcc.Dropdown(
-                id="plot-type",
-                options=[
-                    {"label": "Line", "value": "line"},
-                    {"label": "Scatter (points)", "value": "scatter"},
-                    {"label": "Bar", "value": "bar"},
-                    {"label": "Heatmap (2D only)", "value": "heatmap"},
+            html.Div(
+                id="numeric-controls",
+                children=[
+                    html.Label("X-axis dimension"),
+                    dcc.Dropdown(id="x-dim", options=x_opts, value=x_val, clearable=False),
+                    html.Label("Y-axis dimension (optional)"),
+                    dcc.Dropdown(id="y-dim", options=y_opts, value="none", clearable=False),
+                    html.Label("Plot type"),
+                    dcc.Dropdown(
+                        id="plot-type",
+                        options=[
+                            {"label": "Line", "value": "line"},
+                            {"label": "Scatter (points)", "value": "scatter"},
+                            {"label": "Bar", "value": "bar"},
+                            {"label": "Heatmap (2D only)", "value": "heatmap"},
+                        ],
+                        value="line",
+                        clearable=False,
+                    ),
+                    html.Label("X-axis transform"),
+                    dcc.Dropdown(
+                        id="x-transform",
+                        options=[
+                            {"label": "None", "value": "none"},
+                            {"label": "Log10", "value": "log10"},
+                            {"label": "Square", "value": "square"},
+                            {"label": "Log20", "value": "log20"},
+                        ],
+                        value="none",
+                        clearable=False,
+                    ),
+                    html.Label("Y-axis transform"),
+                    dcc.Dropdown(
+                        id="y-transform",
+                        options=[
+                            {"label": "None", "value": "none"},
+                            {"label": "Log10", "value": "log10"},
+                            {"label": "Square", "value": "square"},
+                            {"label": "Log20", "value": "log20"},
+                        ],
+                        value="none",
+                        clearable=False,
+                    ),
                 ],
-                value="line",
-                clearable=False,
             ),
-            html.Label("X-axis transform"),
-            dcc.Dropdown(
-                id="x-transform",
-                options=[
-                    {"label": "None", "value": "none"},
-                    {"label": "Log10", "value": "log10"},
-                    {"label": "Square", "value": "square"},
-                    {"label": "Log20", "value": "log20"},
+            html.Div(id="graph-wrapper", children=[dcc.Graph(id="plot")]),
+            html.Div(
+                id="image-wrapper",
+                style=_HIDE,
+                children=[
+                    html.Img(
+                        id="image-display",
+                        style={"maxWidth": "100%", "border": "1px solid #ccc"},
+                    )
                 ],
-                value="none",
-                clearable=False,
             ),
-            html.Label("Y-axis transform"),
-            dcc.Dropdown(
-                id="y-transform",
-                options=[
-                    {"label": "None", "value": "none"},
-                    {"label": "Log10", "value": "log10"},
-                    {"label": "Square", "value": "square"},
-                    {"label": "Log20", "value": "log20"},
-                ],
-                value="none",
-                clearable=False,
-            ),
-            dcc.Graph(id="plot"),
             html.H3("Debug info"),
             html.Pre(
                 id="debug-output",
@@ -256,7 +334,12 @@ def build_visualization_app(ds: xr.DataArray | xr.Dataset, filename: str | Path)
         return _controls_for_variable(da)
 
     @app.callback(
-        [Output("plot", "figure"), Output("debug-output", "children")],
+        Output("plot", "figure"),
+        Output("debug-output", "children"),
+        Output("graph-wrapper", "style"),
+        Output("image-wrapper", "style"),
+        Output("image-display", "src"),
+        Output("numeric-controls", "style"),
         Input({"type": "dim-dropdown", "index": ALL}, "value"),
         Input("variable-selector", "value"),
         Input("x-dim", "value"),
@@ -273,26 +356,47 @@ def build_visualization_app(ds: xr.DataArray | xr.Dataset, filename: str | Path)
         plot_type: str,
         x_transform: str,
         y_transform: str,
-    ) -> tuple[go.Figure, str]:
-        if not xdim or var_name not in dataset:
-            return go.Figure(), "{}"
+    ) -> tuple:
+        empty = (go.Figure(), "{}", _SHOW, _HIDE, "", _SHOW)
+
+        if var_name not in dataset:
+            return empty
 
         dim_inputs = callback_context.inputs_list[0]
         dim_names = [item["id"]["index"] for item in dim_inputs]
 
-        if not dim_names:
-            return go.Figure(), "{}"
+        da = dataset[var_name]
+
+        if _is_png_hex_var(da):
+            # All dims → scalar hex string → PNG image
+            slice_dict = dict(zip(dim_names, dim_values, strict=False))
+            src, debug = _compute_png_image(da, slice_dict)
+            return go.Figure(), debug, _HIDE, _SHOW, src, _HIDE
+
+        if _is_rgba_var(da):
+            # Slice non-spatial dims, render (H, W, C) as go.Image
+            spatial = _SPATIAL_DIMS
+            slice_dict = {
+                dim: val
+                for dim, val in zip(dim_names, dim_values, strict=False)
+                if dim not in spatial
+            }
+            fig, debug = _compute_rgba_image(da, slice_dict)
+            return fig, debug, _SHOW, _HIDE, "", _HIDE
+
+        if not xdim or not dim_names:
+            return empty
 
         resolved_ydim = None if ydim == "none" else ydim
-        da = dataset[var_name]
         slice_dict = {
             dim: val
             for dim, val in zip(dim_names, dim_values, strict=False)
             if dim not in (xdim, resolved_ydim)
         }
-        return _compute_figure(
+        fig, debug = _compute_figure(
             da, slice_dict, xdim, resolved_ydim, plot_type, x_transform, y_transform
         )
+        return fig, debug, _SHOW, _HIDE, "", _SHOW
 
     return app
 
