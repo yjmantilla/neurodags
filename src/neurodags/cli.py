@@ -452,7 +452,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     derivatives = _resolve_derivatives(config, args.derivatives)
 
     result = run_pipeline(
-        pipeline_configuration=args.config,
+        pipeline_configuration=config,
         datasets_configuration=args.datasets,
         derivatives=derivatives,
         max_files_per_dataset=args.max_files_per_dataset,

@@ -411,7 +411,7 @@ class NeuroDagsApp(App):
         try:
             result = await asyncio.to_thread(
                 run_pipeline,
-                self._config_path,
+                self._config,
                 datasets_configuration=self._datasets_path,
                 derivatives=derivatives,
                 max_files_per_dataset=max_files,
