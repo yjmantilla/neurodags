@@ -339,7 +339,11 @@ class TestFooofPeaks:
         assert_allclose(alpha_cf, PEAK_CF, atol=1.0)
 
     def test_out_of_alpha_band_peak_gives_nan_alpha(self):
-        result = self._run_with_peak(25.0, PEAK_PW, PEAK_BW)
+        psd = _make_psd_da(n_channels=2, peaks=[[25.0, PEAK_PW, PEAK_BW]])
+        result = _run_fooof(
+            psd,
+            fooof_options={"FOOOF": {"max_n_peaks": 1}, "fit": {"freq_range": FREQ_RANGE}},
+        )
         peaks_r = fooof_peaks(result, alpha_band=(8.0, 13.0))
         ds = peaks_r.artifacts[".nc"].item
         assert np.all(np.isnan(ds["alpha_peak_cf"].values))
