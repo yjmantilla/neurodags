@@ -309,7 +309,14 @@ class NeuroDagsApp(App):
             if datasets_path:
                 datasets_config = load_configuration(datasets_path)
             else:
-                datasets_config = self._config
+                datasets_val = self._config.get("Datasets") or self._config.get("datasets")
+                if isinstance(datasets_val, str):
+                    ds_path = Path(datasets_val)
+                    if not ds_path.is_absolute():
+                        ds_path = Path(path).resolve().parent / ds_path
+                    datasets_config = load_configuration(str(ds_path))
+                else:
+                    datasets_config = self._config
             datasets = list(
                 (datasets_config.get("Datasets") or datasets_config.get("datasets") or {}).keys()
             )
@@ -394,7 +401,7 @@ class NeuroDagsApp(App):
         try:
             result = await asyncio.to_thread(
                 run_pipeline,
-                self._config,
+                self._config_path,
                 datasets_configuration=self._datasets_path,
                 derivatives=derivatives,
                 max_files_per_dataset=max_files,
@@ -436,25 +443,24 @@ class NeuroDagsApp(App):
         label = "all (DerivativeList)" if derivatives is None else derivatives[0]
         log_widget.write_line(f"Running: {label}")
 
-        buf = io.StringIO()
+        writer = _LiveLogWriter(self, log_widget)
         try:
             await asyncio.to_thread(
                 _run_pipeline_sync,
-                self._config,
+                self._config_path,
                 derivatives,
                 self._datasets_path,
                 max_files,
                 n_jobs,
                 skip_errors,
-                buf,
+                writer,
             )
         except Exception as exc:
             log_widget.write_line(f"Error: {exc}")
             self.notify(f"Pipeline error: {exc}", severity="error")
             return
 
-        for line in buf.getvalue().splitlines():
-            log_widget.write_line(line)
+        writer.flush()
         log_widget.write_line("Pipeline complete.")
         self.notify("Pipeline complete!")
 
@@ -481,7 +487,7 @@ class NeuroDagsApp(App):
         try:
             df = await asyncio.to_thread(
                 build_derivative_dataframe,
-                self._config,
+                self._config_path,
                 datasets_configuration=self._datasets_path,
                 include_derivatives=include,
                 max_files_per_dataset=max_files,
@@ -531,6 +537,27 @@ class NeuroDagsApp(App):
 # ------------------------------------------------------------------
 
 
+class _LiveLogWriter(io.TextIOBase):
+    """Forwards writes to a Textual Log widget from a background thread."""
+
+    def __init__(self, app: App, log_widget: Log) -> None:
+        self._app = app
+        self._log = log_widget
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._app.call_from_thread(self._log.write_line, line)
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf:
+            self._app.call_from_thread(self._log.write_line, self._buf)
+            self._buf = ""
+
+
 def _parse_int(s: str) -> int | None:
     s = s.strip()
     try:
@@ -540,13 +567,13 @@ def _parse_int(s: str) -> int | None:
 
 
 def _run_pipeline_sync(
-    config: dict,
+    config: str | None,
     derivatives: list[str] | None,
     datasets_config: str | dict | None,
     max_files: int | None,
     n_jobs: int | None,
     skip_errors: bool,
-    buf: io.StringIO,
+    buf: io.TextIOBase,
 ) -> None:
     from neurodags.orchestrators import run_pipeline
 
