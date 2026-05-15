@@ -36,7 +36,7 @@ def load_node_definitions(
         if not raw_path:
             continue
 
-        candidate = Path(raw_path)
+        candidate = Path(raw_path).expanduser()
         resolved = (
             (base / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
         )

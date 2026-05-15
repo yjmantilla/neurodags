@@ -452,7 +452,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     derivatives = _resolve_derivatives(config, args.derivatives)
 
     result = run_pipeline(
-        pipeline_configuration=config,
+        pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
         derivatives=derivatives,
         max_files_per_dataset=args.max_files_per_dataset,
@@ -472,9 +472,8 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
 
 
 def _cmd_dataframe(args: argparse.Namespace) -> int:
-    config = _load_pipeline_config(args.config)
     df = build_derivative_dataframe(
-        pipeline_configuration=config,
+        pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
         include_derivatives=args.include_derivatives,
         max_files_per_dataset=args.max_files_per_dataset,
@@ -528,7 +527,7 @@ def _cmd_count(args: argparse.Namespace) -> int:
     if not derivatives:
         raise ValueError("No derivatives found. Pass --derivative or define DerivativeList.")
     result = run_pipeline(
-        pipeline_configuration=config,
+        pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
         derivatives=derivatives,
         dry_run=True,

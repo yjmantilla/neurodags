@@ -329,6 +329,27 @@ def test_iterate_pipeline_new_definitions_invalid_type_raises(dummy_pipeline):
         iterate_derivative_pipeline(cfg, basic_preprocessing, max_files_per_dataset=1)
 
 
+def test_iterate_pipeline_new_definitions_relative_to_pipeline_yaml(dummy_pipeline, tmp_path):
+    """new_definitions relative path resolved against pipeline yaml, not cwd."""
+    import yaml
+    from neurodags.nodes.preprocessing import basic_preprocessing
+
+    pipeline_dir = tmp_path / "pipeline_dir"
+    pipeline_dir.mkdir()
+    node_file = pipeline_dir / "extra_nodes.py"
+    node_file.write_text("MY_EXTRA = True\n")
+
+    cfg = {
+        **dummy_pipeline["config"],
+        "new_definitions": "extra_nodes.py",  # relative path
+    }
+    pipeline_yaml = pipeline_dir / "pipeline.yaml"
+    pipeline_yaml.write_text(yaml.dump(cfg))
+
+    # Must resolve relative to pipeline_dir, not cwd
+    iterate_derivative_pipeline(str(pipeline_yaml), basic_preprocessing, max_files_per_dataset=1, raise_on_error=True)
+
+
 def test_get_datasets_relative_to_pipeline_path(tmp_path):
     from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
 
