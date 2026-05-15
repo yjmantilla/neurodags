@@ -358,6 +358,7 @@ _NEUROKIT_FUNCTIONS: Mapping[str, CallableLike] = {
     "neurokit_entropy_fuzzy": nk.entropy_fuzzy,
     "neurokit_entropy_dispersion": nk.entropy_dispersion,
     "neurokit_fractal_hurst": nk.fractal_hurst,
+    "neurokit_complexity_k": nk.complexity_k,
 }
 
 

@@ -78,6 +78,29 @@ def test_complexity_delay_node_supports_rgba_encoding() -> None:
     assert rgba_da.values.shape[-3] > 0
     assert rgba_da.values.shape[-2] > 0
 
+def test_complexity_k_node_produces_dataset_with_value_and_metadata() -> None:
+    da = _make_dataarray()
+    node = get_node("neurokit_complexity_k")
+
+    result = node(da, dim="times", k_max="max", figure_encoding="png")
+
+    dataset = result.artifacts[".nc"].item
+    assert isinstance(dataset, xr.Dataset)
+
+    value_da = dataset["value"]
+    expected = np.array([
+        nk.complexity_k(signal, k_max="max", show=False)[0]
+        for signal in da.values
+    ])
+    np.testing.assert_allclose(value_da.values, expected, rtol=1e-6, atol=1e-6)
+
+    metadata_da = dataset["metadata"]
+    assert metadata_da.dims == value_da.dims + ("metadata_fields",)
+    assert metadata_da.dtype.kind in {"U", "S"}
+
+    assert "figure_png_hex" in dataset.data_vars
+
+
 if __name__ == "__main__":
 #    pytest.main([__file__])
     pytest.main(["-v", "-s", "-q", "--no-cov", "--pdb", __file__])
