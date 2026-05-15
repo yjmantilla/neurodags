@@ -994,9 +994,10 @@ def fooof_component(
                     periodic = _ensure_shape(fm.get_data("peak", space=space), "peak spectrum")
                 if need_residual:
                     full_in_space = _ensure_shape(fm.get_data("full", space=space), "full spectrum")
-                    model_in_space = _ensure_shape(
-                        fm.get_data("model", space=space), "model spectrum"
+                    model_log = _ensure_shape(
+                        getattr(fm, "fooofed_spectrum_", None), "model spectrum"
                     )
+                    model_in_space = _log_to_space(model_log, "model spectrum")
                     residual = full_in_space - model_in_space
             else:
                 ap_fit_log = _ensure_shape(getattr(fm, "_ap_fit", None), "aperiodic fit")

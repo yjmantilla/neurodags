@@ -240,6 +240,14 @@ class TestFooofComponent:
         psd = _make_psd_da(n_channels=2, peaks=[[PEAK_CF, PEAK_PW, PEAK_BW]])
         return _run_fooof(psd)
 
+    @pytest.fixture
+    def fooof_result_with_data(self):
+        psd = _make_psd_da(n_channels=2, peaks=[[PEAK_CF, PEAK_PW, PEAK_BW]])
+        return _run_fooof(
+            psd,
+            fooof_options={"fit": {"freq_range": FREQ_RANGE}, "save": {"save_data": True}},
+        )
+
     def test_aperiodic_component_has_freq_dim(self, fooof_result):
         result = fooof_component(fooof_result, component="aperiodic", mode="manual")
         ds = result.artifacts[".nc"].item
@@ -278,6 +286,48 @@ class TestFooofComponent:
         ap = ds["aperiodic"]
         assert ap.sizes["spaces"] == 2
         assert ap.sizes["frequencies"] > 0
+
+    def test_fooof_api_aperiodic(self, fooof_result_with_data):
+        result = fooof_component(fooof_result_with_data, component="aperiodic", mode="fooof-api")
+        ds = result.artifacts[".nc"].item
+        assert "aperiodic" in ds
+        assert "frequencies" in ds["aperiodic"].dims
+
+    def test_fooof_api_periodic(self, fooof_result_with_data):
+        result = fooof_component(fooof_result_with_data, component="periodic", mode="fooof-api")
+        ds = result.artifacts[".nc"].item
+        assert "periodic" in ds
+
+    def test_fooof_api_residual(self, fooof_result_with_data):
+        result = fooof_component(fooof_result_with_data, component="residual", mode="fooof-api")
+        ds = result.artifacts[".nc"].item
+        assert "residual" in ds
+
+    def test_manual_periodic_log_space(self, fooof_result):
+        result = fooof_component(fooof_result, component="periodic", space="log", mode="manual")
+        ds = result.artifacts[".nc"].item
+        assert "periodic" in ds
+        assert np.all(np.isfinite(ds["periodic"].values))
+
+    def test_manual_periodic_fallback_when_peak_fit_missing(self, fooof_result, monkeypatch):
+        import neurodags.nodes.spectral as spec_mod
+
+        original_load = spec_mod.FOOOF.load
+
+        def patched_load(self, *args, **kwargs):
+            original_load(self, *args, **kwargs)
+            self._peak_fit = None
+
+        monkeypatch.setattr(spec_mod.FOOOF, "load", patched_load)
+        result = fooof_component(fooof_result, component="periodic", space="log", mode="manual")
+        ds = result.artifacts[".nc"].item
+        assert "periodic" in ds
+
+    def test_manual_residual(self, fooof_result_with_data):
+        result = fooof_component(fooof_result_with_data, component="residual", mode="manual")
+        ds = result.artifacts[".nc"].item
+        assert "residual" in ds
+        assert np.all(np.isfinite(ds["residual"].values))
 
     def test_invalid_component_raises(self, fooof_result):
         with pytest.raises(ValueError, match="component must be one of"):
