@@ -69,11 +69,11 @@ def get_all_files_across_datasets(
     files_per_dataset = {}
     common_roots = {}
     for dataset_name, dataset_config in datasets.items():
-        log.info("get_all_files_across_datasets: processing dataset", dataset=dataset_name)
+        log.debug("get_all_files_across_datasets: processing dataset", dataset=dataset_name)
 
         if dataset_config.skip:
             log.info(
-                "get_all_files_across_datasets: skipping dataset as per configuration",
+                "Skipping dataset (skip=True)",
                 dataset=dataset_name,
             )
             continue
@@ -122,19 +122,19 @@ def get_all_files_across_datasets(
         files_per_dataset[dataset_name] = files
         common_root = find_unique_root(files, mode="maximal")
         common_roots[dataset_name] = common_root
-        log.info(
+        log.debug(
             "get_all_files_across_datasets: common root for dataset",
             dataset=dataset_name,
             common_root=common_root,
         )
         log.info(
-            "get_all_files_across_datasets: added files for dataset",
+            "Found files in dataset",
             dataset=dataset_name,
             file_count=len(files),
         )
     all_files = []
     for dataset, files in files_per_dataset.items():
-        log.info(
+        log.debug(
             "get_all_files_across_datasets: dataset summary", dataset=dataset, file_count=len(files)
         )
         these_files = [(dataset, f) for f in files]
@@ -142,7 +142,7 @@ def get_all_files_across_datasets(
     # add index to each file tuple
     all_files = [(i, dataset, f) for i, (dataset, f) in enumerate(all_files)]
     log.info(
-        "get_all_files_across_datasets: completed",
+        "File discovery complete",
         total_datasets=len(files_per_dataset),
         total_files=len(all_files),
     )

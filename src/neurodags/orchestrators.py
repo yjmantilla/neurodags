@@ -373,9 +373,9 @@ def iterate_derivative_pipeline(
             )
         )
 
-    log.info("iterate_call_pipeline: starting processing", total_files=len(jobs))
+    log.info("Starting derivative processing", total_files=len(jobs))
     if not jobs:
-        log.info("iterate_call_pipeline: completed processing", total_files=0)
+        log.info("No files to process")
         return pd.DataFrame(dry_run_collection) if dry_run else None
 
     parallel_results: list[_FileResult]
@@ -437,7 +437,7 @@ def iterate_derivative_pipeline(
                     error_summary = f"{error_summary}\n{result.traceback}"
                 raise RuntimeError(error_summary)
 
-    log.info("iterate_call_pipeline: completed processing", total_files=len(jobs))
+    log.info("Completed derivative processing", total_files=len(jobs))
     if dry_run:
         return pd.DataFrame(dry_run_collection)
 
@@ -537,7 +537,7 @@ def run_pipeline(
         return None
 
     ordered = _derivative_topo_order(config, derivatives)
-    log.info("run_pipeline: derivative execution order", order=ordered)
+    log.info("Derivative execution order", order=ordered)
 
     dry_run_results = []
     for derivative in ordered:

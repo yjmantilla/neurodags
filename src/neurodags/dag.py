@@ -194,7 +194,7 @@ def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
         register_derivative_with_name(derivative_name, func, definition=derivative_def)
 
         registered.append(derivative_name)
-        log.info("Registered derivative", name=derivative_name)
+        log.debug("Registered derivative", name=derivative_name)
 
     return registered
 
@@ -447,10 +447,10 @@ def run_derivative(
                     assert final_prefix is not None
                     for artifact_name, artifact in res.artifacts.items():
                         try:
-                            log.info("Processed artifact", name=artifact_name, file=artifact)
+                            log.debug("Processed artifact", name=artifact_name, file=artifact)
                             artifact_path = final_prefix + artifact_name
                             artifact.writer(artifact_path)
-                            log.info("Saved artifact", file=artifact_path)
+                            log.debug("Saved artifact", file=artifact_path)
                         except Exception as e:
                             log.error(
                                 "Error saving artifact",
@@ -464,7 +464,7 @@ def run_derivative(
                     stale_error = Path(final_prefix + ".error")
                     if stale_error.exists():
                         stale_error.unlink()
-                        log.info("Removed stale error marker", path=str(stale_error))
+                        log.debug("Removed stale error marker", path=str(stale_error))
             except Exception as e:
                 log.error(
                     "Error executing node",
@@ -483,7 +483,7 @@ def run_derivative(
                             ef.write(
                                 f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{e!s}\n"
                             )
-                        log.info("Wrote error marker file", path=error_path)
+                        log.debug("Wrote error marker file", path=error_path)
                     except Exception as ee:
                         log.error(
                             "Error writing error marker file",

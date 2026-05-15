@@ -158,13 +158,13 @@ def load_meeg(meeg_file: PathLike, kwargs: dict | None = None):
     try:
         # Try to load as Raw
         meeg = mne.io.read_raw(meeg_file, **kwargs)
-        log.info("Loaded MEEG file as Raw", file=str(meeg_file))
+        log.debug("Loaded MEEG file as Raw", file=str(meeg_file))
     except Exception:
         # log.debug("Failed to load as Raw, trying Epochs", file=str(meeg_file), error=str(e_raw))
         try:
             # try to load as epochs
             meeg = mne.read_epochs(meeg_file, **kwargs)
-            log.info("Loaded MEEG file as Epochs", file=str(meeg_file))
+            log.debug("Loaded MEEG file as Epochs", file=str(meeg_file))
         except Exception as e_epochs:
             log.debug(
                 "Failed to load as Epochs and as Raw",

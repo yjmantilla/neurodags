@@ -42,7 +42,7 @@ def register_derivatives_from_dict(yaml_definitions: dict):
         func = make_wrapper(chain)
         # pass chain as definition so DerivativeEntry stores it
         register_derivative_with_name(name, func, definition=chain, override=True)
-        log.info("Registered derivative", name=name)
+        log.debug("Registered derivative", name=name)
 
 
 register_derivatives_from_dict(yaml_definitions)

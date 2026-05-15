@@ -231,7 +231,7 @@ def replace_bids_suffix(path: PathLike, new_suffix: str, new_ext: str) -> Path:
         prefix, _ = base.rsplit("_", 1)
         log.debug("Detected existing suffix, isolating prefix", prefix=prefix)
     elif not exts and "_" in base:
-        log.info("No extension present, keeping full base as prefix", prefix=prefix)
+        log.debug("No extension present, keeping full base as prefix", prefix=prefix)
     else:
         log.debug("No underscore found, using full base", prefix=prefix)
 
