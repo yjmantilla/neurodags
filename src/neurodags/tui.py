@@ -176,6 +176,7 @@ class _DataFrameTab(Vertical):
     _DataFrameTab .row { height: auto; margin-bottom: 1; }
     _DataFrameTab Input { width: 2fr; }
     _DataFrameTab Select { width: 1fr; }
+    _DataFrameTab Log { height: 1fr; }
     _DataFrameTab DataTable { height: 1fr; }
     """
     """Internal CSS."""
@@ -194,6 +195,10 @@ class _DataFrameTab(Vertical):
             )
             yield Input(placeholder="max files/dataset", id="df-max-files")
             yield Button("Assemble", id="btn-df-assemble", variant="primary")
+        with Horizontal(classes="row"):
+            yield Input(placeholder="output path (.csv or .parquet)", id="df-output-path")
+            yield Button("Save", id="btn-df-save", variant="warning", disabled=True)
+        yield Log(id="df-log", highlight=True)
         yield DataTable(id="df-table")
 
 
@@ -234,6 +239,7 @@ class NeuroDagsApp(App):
         self._datasets_path: str | None = datasets_path
         self._config: dict[str, Any] | None = None
         self._derivatives: list[str] = []
+        self._df: Any = None
 
     def compose(self) -> ComposeResult:
         """Compose the main application layout."""
@@ -277,6 +283,7 @@ class NeuroDagsApp(App):
             "btn-dryrun": lambda: self.run_worker(self._run_dry_run(), exclusive=True),
             "btn-run": lambda: self.run_worker(self._run_pipeline(), exclusive=True),
             "btn-df-assemble": lambda: self.run_worker(self._assemble_dataframe(), exclusive=True),
+            "btn-df-save": self._save_dataframe,
             "btn-nc-launch": self._launch_nc_viewer,
         }
         handler = handlers.get(event.button.id or "")
@@ -472,8 +479,6 @@ class NeuroDagsApp(App):
     # ------------------------------------------------------------------
 
     async def _assemble_dataframe(self) -> None:
-        from neurodags.orchestrators import build_derivative_dataframe
-
         if self._config is None:
             self.notify("Load config first.", severity="error")
             return
@@ -483,31 +488,72 @@ class NeuroDagsApp(App):
         fmt: str = str(fmt_sel.value) if not fmt_sel.is_blank() else "wide"
         max_files = _parse_int(self.query_one("#df-max-files", Input).value)
 
+        log_widget = self.query_one("#df-log", Log)
+        log_widget.clear()
+        log_widget.write_line("Assembling DataFrame…")
         table = self.query_one("#df-table", DataTable)
         table.clear(columns=True)
-        self.notify("Assembling DataFrame…")
 
+        writer = _LiveLogWriter(self, log_widget)
         try:
             df = await asyncio.to_thread(
-                build_derivative_dataframe,
+                _build_dataframe_sync,
                 self._config_path,
-                datasets_configuration=self._datasets_path,
-                include_derivatives=include,
-                max_files_per_dataset=max_files,
-                output_format=fmt,
+                self._datasets_path,
+                include,
+                max_files,
+                fmt,
+                writer,
             )
         except Exception as exc:
+            log_widget.write_line(f"Error: {exc}")
             self.notify(f"Error: {exc}", severity="error")
             return
+        finally:
+            writer.flush()
 
         if df is None or len(df) == 0:
+            log_widget.write_line("Empty DataFrame.")
             self.notify("Empty DataFrame.", severity="warning")
             return
 
+        self._df = df
+        self.query_one("#btn-df-save", Button).disabled = False
         table.add_columns(*[str(c) for c in df.columns])
         for _, row in df.iterrows():
             table.add_row(*[str(v) for v in row])
+        log_widget.write_line(f"Done: {df.shape[0]} rows x {df.shape[1]} cols")
         self.notify(f"DataFrame: {df.shape[0]} rows x {df.shape[1]} cols")
+
+    def _save_dataframe(self) -> None:
+        if self._df is None:
+            self.notify("No DataFrame to save.", severity="warning")
+            return
+        out = self.query_one("#df-output-path", Input).value.strip()
+        if not out:
+            self.notify("Enter output path.", severity="warning")
+            return
+        log_widget = self.query_one("#df-log", Log)
+        try:
+            output_path = Path(out)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path.suffix.lower() == ".parquet":
+                try:
+                    self._df.to_parquet(output_path, index=False)
+                except (ImportError, ValueError) as parquet_error:
+                    csv_fallback = output_path.with_suffix(".csv")
+                    log_widget.write_line(
+                        f"Parquet failed ({parquet_error}), saving as {csv_fallback.name}"
+                    )
+                    self._df.to_csv(csv_fallback, index=False)
+                    output_path = csv_fallback
+            else:
+                self._df.to_csv(output_path, index=False)
+            log_widget.write_line(f"Saved: {output_path}")
+            self.notify(f"Saved: {output_path}")
+        except Exception as exc:
+            log_widget.write_line(f"Save error: {exc}")
+            self.notify(f"Save error: {exc}", severity="error")
 
     # ------------------------------------------------------------------
     # NC viewer
@@ -588,6 +634,26 @@ def _run_pipeline_sync(
             max_files_per_dataset=max_files,
             n_jobs=n_jobs,
             skip_errors=skip_errors,
+        )
+
+
+def _build_dataframe_sync(
+    config: str | None,
+    datasets_config: str | None,
+    include: list[str] | None,
+    max_files: int | None,
+    fmt: str,
+    buf: io.TextIOBase,
+) -> Any:
+    from neurodags.orchestrators import build_derivative_dataframe
+
+    with redirect_stdout(buf), redirect_stderr(buf):
+        return build_derivative_dataframe(
+            config,
+            datasets_configuration=datasets_config,
+            include_derivatives=include,
+            max_files_per_dataset=max_files,
+            output_format=fmt,
         )
 
 
