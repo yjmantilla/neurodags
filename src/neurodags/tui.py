@@ -317,9 +317,12 @@ class NeuroDagsApp(App):
                     datasets_config = load_configuration(str(ds_path))
                 else:
                     datasets_config = self._config
-            datasets = list(
-                (datasets_config.get("Datasets") or datasets_config.get("datasets") or {}).keys()
+            datasets_dict = (
+                datasets_config.get("Datasets")
+                or datasets_config.get("datasets")
+                or datasets_config
             )
+            datasets = list((datasets_dict or {}).keys())
 
             status_lines = [f"[green]Loaded:[/green] {escape_markup(path)}"]
             if datasets_path:
