@@ -239,7 +239,7 @@ def iterate_derivative_pipeline(
         base_dir = Path(pipeline_configuration).resolve().parent if is_path_like else Path.cwd()
         resolved_definition_paths = []
         for candidate in definition_paths:
-            candidate_path = Path(candidate)
+            candidate_path = Path(candidate).expanduser()
             resolved_path = (
                 (base_dir / candidate_path).resolve()
                 if not candidate_path.is_absolute()
@@ -525,7 +525,7 @@ def run_pipeline(
     """
     config = (
         load_configuration(pipeline_configuration)
-        if isinstance(pipeline_configuration, str)
+        if isinstance(pipeline_configuration, str | os.PathLike)
         else pipeline_configuration
     )
 
@@ -542,7 +542,7 @@ def run_pipeline(
     dry_run_results = []
     for derivative in ordered:
         result = iterate_derivative_pipeline(
-            pipeline_configuration=config,
+            pipeline_configuration=pipeline_configuration,
             derivative=derivative,
             datasets_configuration=datasets_configuration,
             max_files_per_dataset=max_files_per_dataset,
@@ -882,9 +882,9 @@ if __name__ == "__main__":  # pragma: no cover
 
     from neurodags.loaders import load_configuration
 
-    pipeline_configuration = load_configuration(args.config)
+    pipeline_configuration_dict = load_configuration(args.config)
 
-    derivative_list = pipeline_configuration.get("DerivativeList", [])
+    derivative_list = pipeline_configuration_dict.get("DerivativeList", [])
     if not derivative_list:
         log.error(
             "No derivatives specified in the pipeline configuration under 'DerivativeList'. Exiting."
@@ -898,7 +898,7 @@ if __name__ == "__main__":  # pragma: no cover
     if not args.make_final_dataframe:  # and args.dataframe_output:
         for derivative in derivative_list:
             output = iterate_derivative_pipeline(
-                pipeline_configuration=pipeline_configuration,
+                pipeline_configuration=args.config,
                 derivative=derivative,
                 datasets_configuration=args.datasets,
                 max_files_per_dataset=args.max_files_per_dataset,
@@ -965,7 +965,7 @@ if __name__ == "__main__":  # pragma: no cover
     if args.make_final_dataframe:
         log.info("Building derivative dataframe", derivatives=args.dataframe_derivatives)
         dataframe = build_derivative_dataframe(
-            pipeline_configuration=pipeline_configuration,
+            pipeline_configuration=args.config,
             datasets_configuration=args.datasets,
             include_derivatives=args.dataframe_derivatives,
             max_files_per_dataset=args.max_files_per_dataset,

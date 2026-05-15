@@ -61,7 +61,7 @@
     },
 
     // Equivalent line:
-    // python src/neurodags/orchestrators.py /home/yorguin/code/neurodags/example_pipelines/pipeline_epilepsy.yml --make_final_dataframe --dataframe_output outputs/epilepsy_derivatives.csv --dataframe_format long --max_files_per_dataset 5 
+    // python src/neurodags/orchestrators.py /home/yorguin/code/neurodags/example_pipelines/pipeline_epilepsy.yml --make_final_dataframe --dataframe_output outputs/epilepsy_derivatives.csv --dataframe_format long --max_files_per_dataset 5
     {
       "name": "Python: build_derivative_dataframe epilepsy",
       "type": "debugpy",
@@ -77,8 +77,18 @@
         "--max_files_per_dataset", "2",
         "--dataframe_format","long"
       ],
-    }
+    },
 
+        {
+            "name": "Debug: neurodags dry-run preprocessing",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "neurodags",
+            "args": ["dry-run", "~/code/epilepsy/neurodags_project/step-0_preprocessing_epilepsy.yml"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+        }
 
     ],
 }
