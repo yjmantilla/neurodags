@@ -2,6 +2,19 @@
 
 ## 0.3.1 — 2026-10-11
 
+### Added
+
+- **Parser nodes + `id.N.field` field access** (#8): a parser node takes a file path and
+  returns a flat dict of properties; downstream args can now pull a single field with
+  `id.N.field` (e.g. `subject: id.1.subject`) instead of each node re-parsing the path.
+  New built-in `bids_parse` extracts BIDS entities via `mne_bids.get_entities_from_fname`.
+  The arg resolver was extended to support `id.N.field` alongside the existing whole-result
+  `id.N` (fully backward compatible). **Field keys must be plain identifiers** — `.` is the
+  reference separator, so dotted/dashed/nested paths (`id.1.a.b`, `id.1.some-key`) are
+  rejected with a clear error; parser output must stay flat with identifier keys (values are
+  unconstrained). See the new *Parser Nodes* user guide. (`nodes.parsers.bids_parse`,
+  `dag._resolve_refs`)
+
 ### Fixed
 
 - **Slow CLI startup** (#30): `import neurodags.cli` took ~7.5 s because node discovery
