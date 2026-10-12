@@ -84,6 +84,29 @@ def test_basic_preprocessing_all_options_combined(dummy_raw_obj):
     assert out.info["sfreq"] == 50.0
 
 
+@pytest.mark.parametrize("average_psd", [False, True])
+def test_basic_preprocessing_average_psd(dummy_raw_obj, monkeypatch, average_psd):
+    raw, _ = dummy_raw_obj
+    seen = []
+    original_plot = mne.time_frequency.Spectrum.plot
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs.get("average"))
+        return original_plot(self, *args, **kwargs)
+
+    monkeypatch.setattr(mne.time_frequency.Spectrum, "plot", spy)
+    result = basic_preprocessing(
+        raw.copy(),
+        filter_args={"l_freq": 1.0, "h_freq": 40.0},
+        resample=50,
+        extra_artifacts=True,
+        average_psd=average_psd,
+    )
+    assert ".report.html" in result.artifacts
+    # before, after filter, after resample
+    assert seen == [average_psd] * 3
+
+
 # ---------------------------------------------------------------------------
 # keep_channels
 # ---------------------------------------------------------------------------

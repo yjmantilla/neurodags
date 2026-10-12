@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`basic_preprocessing(average_psd=...)`**: with `extra_artifacts: true`, `average_psd: true`
+  plots each report PSD averaged across channels (one trace) instead of one trace per channel,
+  which makes filter roll-offs easy to see. Default `false` keeps the previous figures.
+- **Quickstart preprocessing template** in `example_pipelines/`
+  (`pipeline_quickstart_preprocessing.yml` + `datasets_quickstart_preprocessing.yml`):
+  band-pass 0.1–75 Hz, 2 s epochs, resample to 256 Hz, plus an MNE Report — built-in nodes
+  only, paths from `$RAW_DATA` / `$OUTPUT_DIR`. Documented in the Quickstart guide and run
+  end-to-end in the test suite.
+
 ## 0.3.3 — 2026-10-12
 
 ### Fixed

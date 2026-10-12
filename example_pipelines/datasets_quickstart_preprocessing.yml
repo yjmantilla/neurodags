@@ -1,0 +1,8 @@
+# Data sources for pipeline_quickstart_preprocessing.yml. One entry per dataset.
+#   file_pattern     : glob matching your raw recordings (.vhdr / .fif / .edf / ...)
+#   derivatives_path : where outputs are written
+# Both accept ~ and $ENV_VARS (an unset variable is an error, not a literal directory).
+my_dataset:
+  name: MyDataset
+  file_pattern: $RAW_DATA/**/*.vhdr      # <-- change the extension to your format
+  derivatives_path: $OUTPUT_DIR/derivatives

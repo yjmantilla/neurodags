@@ -1,0 +1,34 @@
+# Quickstart preprocessing template — copy this file and datasets_quickstart_preprocessing.yml,
+# point the dataset at your recordings, then:
+#
+#   neurodags validate pipeline_quickstart_preprocessing.yml
+#   neurodags dry-run  pipeline_quickstart_preprocessing.yml
+#   neurodags run      pipeline_quickstart_preprocessing.yml
+#
+# For each recording: band-pass 0.1–75 Hz on the continuous data, cut 2 s epochs with no
+# overlap, resample to 256 Hz. Writes <file>@Preprocessed.fif (the epochs) and
+# <file>@Preprocessed.report.html (MNE Report with the PSD before/after each step,
+# averaged across channels so the filter roll-offs are easy to see).
+datasets: datasets_quickstart_preprocessing.yml
+mount_point: null
+new_definitions: null
+
+DerivativeDefinitions:
+  Preprocessed:
+    overwrite: False
+    for_dataframe: False
+    nodes:
+      - id: 0
+        derivative: SourceFile          # the raw recording for each matched file
+      - id: 1
+        node: basic_preprocessing
+        args:
+          mne_object: id.0
+          filter_args: {l_freq: 0.1, h_freq: 75.0}       # band-pass (high-pass on continuous data)
+          epoch_config: {duration: 2.0, overlap: 0.0}    # 2 s windows, no overlap
+          resample: 256                                  # Hz, applied after epoching
+          extra_artifacts: true                          # also write the .report.html
+          average_psd: true                              # one PSD trace averaged across channels
+
+DerivativeList:
+  - Preprocessed
