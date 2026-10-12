@@ -133,6 +133,20 @@
   `incomplete_indices` and `unlisted_files` in `--format json`, `unlisted` per file with
   `--include-files`; incomplete units make `status` exit `1` and are included in
   `--format indices` (and in `--list-missing`). The TUI status table gains the same column.
+- **Exact artifact references; no fallback**: `derivative: Name.suffix` selects the artifact
+  whose suffix key equals `.suffix` exactly (string equality), whether `Name` is done on disk
+  (from its `.done` manifest), computed in the same run, or kept in memory (`save: false`).
+  The 0.3.x `endswith` matching on file names is gone: `Clean.fif` no longer matches a
+  `.report.html` or `.EO_baseline.fif` artifact, so write `Splitter.EO_baseline.fif` in full.
+  A missing suffix no longer falls back to another file or to the whole `NodeResult` (which
+  logged a warning): it fails the consuming unit with the new
+  `neurodags.dag.ArtifactSelectionError` (a `LookupError`; `.error` marker when the consumer
+  saves), with the same message on every path, listing the available suffixes. The dry-run
+  plan reports it as `selection_problem` on the reuse step.
+- **A bare `derivative: Name` is allowed only when `Name` has exactly one artifact**; it then
+  behaves like `Name<suffix>` (the main file's path from a done unit, the in-memory
+  `NodeResult` otherwise). With several (or no) artifacts it raises `ArtifactSelectionError`
+  (in 0.3.x: the first file in sorted order, or the whole `NodeResult`).
 
 ### Added
 

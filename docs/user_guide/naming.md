@@ -184,25 +184,50 @@ NeuroDAGs never parses names itself; {func}`neurodags.naming.parse_entities` and
 
 (naming-references)=
 
-## Derivative references (`derivative: Name.ext`)
+## Derivative references (`derivative: Name.suffix`)
 
 A reuse step value is `SourceFile`, a derivative name, or a name followed by an artifact suffix,
-split at the **first** `.`:
+split at the **first** `.`. The suffix (everything from that `.` on) must equal one of the
+derivative's artifact suffixes **exactly** (string equality, case included):
 
 | Reference | Derivative | Artifact selected |
 |-----------|-----------|-------------------|
 | `SourceFile` | the raw input file | — |
-| `CleanPrep` | `CleanPrep` | all artifacts (which one a node gets follows the [`id.N` heuristic](pipeline_yaml.md)) |
-| `CleanPrep.fif` | `CleanPrep` | the `.fif` artifact |
+| `Clean.fif` | `Clean` | the `.fif` artifact, never `.report.html` |
+| `Clean.report.html` | `Clean` | the `.report.html` artifact |
 | `Splitter.EO_baseline.fif` | `Splitter` | the `.EO_baseline.fif` artifact |
+| `Splitter.fif` | `Splitter` | error when `Splitter` has only `.EO_baseline.fif` and `.EC_baseline.fif`: write the suffix in full |
+| `Fit` | `Fit` | its only artifact; error when `Fit` has several (or none) |
 
-When the referenced unit is done, its files come from its `.done` manifest (the first file of
-each artifact, e.g. the first part of a split recording). The requested suffix is matched against
-the **end** of those file names, so `CleanPrep.fif` would also match a `.EO_baseline.fif`
-artifact; the first match in sorted order is used (with a warning if several match). When it was
-just computed in memory, the artifact key must equal `.<rest>` exactly. Use the full artifact
-suffix to get the same artifact either way. (Exact selection everywhere is the next 0.4.0
-change.)
+The same rule applies on every path: when the referenced unit is done (read from its `.done`
+manifest), when it is computed in the same run, and when it is kept in memory (`save: false`).
+There is no fallback to another artifact or to the whole result. A suffix the derivative did not
+produce, or a bare name for a derivative without exactly one artifact, stops the consuming unit
+with `neurodags.dag.ArtifactSelectionError` (its `.error` marker records the message). The
+message is the same on every path and lists the available suffixes:
+
+```text
+Derivative 'Features': reference 'Splitter.fif' selects artifact '.fif', which derivative
+'Splitter' did not produce (available suffixes: '.EC_baseline.fif', '.EO_baseline.fif').
+References select the artifact whose suffix is exactly the text after the name. Write the
+full suffix, e.g. 'Splitter.EC_baseline.fif'.
+```
+
+What the node receives:
+
+- from a done unit, the path of the selected artifact's main file (the first file its manifest
+  lists, e.g. the first part of a split recording);
+- from a unit computed in the same run (saved or `save: false`), a `NodeResult` holding only the
+  selected artifact, which the [`id.N` heuristic](pipeline_yaml.md) unwraps to the artifact's
+  object.
+
+A bare name `Fit` for a single-artifact derivative behaves exactly like `Fit` followed by its
+suffix.
+
+The reference grammar (a valid name; a suffix matching `^(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$` whose
+last segment is not `done`, `error` or `skip`; `SourceFile` with no suffix) is checked when the
+configuration loads, before anything runs. Whether the suffix exists is known only once the
+referenced derivative has produced its artifacts, so that check happens per file at run time.
 
 ### Other reserved strings in node `args`
 
