@@ -299,6 +299,27 @@ def test_count_prints_unique_file_count(dummy_pipeline, capsys):
     assert capsys.readouterr().out.strip() == "2"
 
 
+def test_count_counts_dataset_entries_not_unique_paths(dummy_pipeline, tmp_path, capsys):
+    """The same file under two dataset entries has two indices, so it needs two array tasks."""
+    import copy
+
+    import yaml
+
+    cfg = copy.deepcopy(dummy_pipeline["config"])
+    entry = cfg["datasets"]["test_dataset"]
+    cfg["datasets"]["condition_b"] = {
+        **entry,
+        "name": "ConditionB",
+        "derivatives_path": str(tmp_path / "derivatives_b"),
+    }
+    pipeline_yml = tmp_path / "pipeline.yml"
+    pipeline_yml.write_text(yaml.safe_dump(cfg))
+
+    assert main(["count-inputs", str(pipeline_yml)]) == 0
+    # 2 files x 2 dataset entries = indices 0..3
+    assert capsys.readouterr().out.strip() == "4"
+
+
 def test_count_prints_zero_on_empty_result(dummy_pipeline, capsys):
     cfg = dummy_pipeline["config"]
     with (

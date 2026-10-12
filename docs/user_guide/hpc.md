@@ -25,7 +25,7 @@ The `chained` pattern writes two files: `submit_pipeline.sh` (the submission scr
 
 ### Counting source files
 
-`neurodags count-inputs` prints the number of unique source (input) files the pipeline will process — useful in submission scripts:
+`neurodags count-inputs` prints the number of input entries the pipeline will process, i.e. the size of the index range `--only-index` accepts (`0` to `N-1`). A file listed under two dataset entries counts twice, because it has two indices. Useful in submission scripts:
 
 ```bash
 N=$(neurodags count-inputs pipeline.yml)
