@@ -28,7 +28,11 @@ neurodags run pipeline.yml --derivative MyDerivative --n-jobs 4 --joblib-backend
 
 ## Subset Execution
 
-Process only a subset of files by index:
+Process only a subset of files by index. The index is the position in the sorted input list
+(datasets in YAML order, files sorted by their path below `source_root`; see
+{ref}`Discovery and file order <datasets-discovery-order>`); an unknown or negative index raises
+`neurodags.iterators.IndexSelectionError` before anything is written. Pass `inputs=` (a list
+written by `neurodags inputs`) to keep the indices fixed while files are added:
 
 ```python
 from neurodags.orchestrators import run_pipeline
@@ -39,8 +43,11 @@ run_pipeline(config, derivatives=["MyDerivative"], only_index=0)
 # Multiple files
 run_pipeline(config, derivatives=["MyDerivative"], only_index=[0, 2, 5])
 
-# Limit files per dataset
+# Limit files per dataset (the first 10 in sorted order)
 run_pipeline(config, derivatives=["MyDerivative"], max_files_per_dataset=10)
+
+# Indices of a frozen input list
+run_pipeline(config, inputs="inputs.tsv", only_index=[0, 2, 5])
 ```
 
 ## Error Handling

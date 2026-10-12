@@ -13,6 +13,11 @@
   `derivatives_path` must use different `derivatives_subdir` values.
 - The pipeline YAML must declare `naming_version: 1` (see the
   [pipeline.yml reference](pipeline_yaml.md)).
+- Outputs mirror the tree below `source_root` (see {ref}`Output layout <naming-output-layout>`),
+  and discovered files are sorted (see [Discovery and file order](#datasets-discovery-order)).
+
+To convert a 0.3.x datasets YAML (and its outputs), use `neurodags migrate`
+({doc}`migrating_to_0_4`).
 ```
 
 ## Structure
@@ -34,7 +39,9 @@
 
 ### `name`
 
-Human-readable dataset identifier. Used in logging and dataframe output.
+Required. Human-readable display label. The dataset **key** (`<dataset_key>`), not `name`, is
+what identifies the dataset in the `dataset` column of dataframes, in `inputs.tsv`, in `.done`
+manifests and in `status --include-files`.
 
 ### `source_root`
 
@@ -52,7 +59,8 @@ file_pattern:
 ```
 
 - For an active dataset it must be an existing directory; every file matched by
-  `file_pattern` must lie below it.
+  `file_pattern` must lie strictly below it (a file outside it is a configuration error naming
+  the file).
 - Choose the folder your recordings are organised under (e.g. the BIDS root), not a
   subject folder: neurodags will mirror the tree below `source_root` inside
   `derivatives_path`, so narrowing `file_pattern` for a test run (`rawdata/sub-01/**/*.vhdr`)
@@ -86,7 +94,10 @@ See "Environment variables and `~`" below for using
 
 ### `derivatives_path`
 
-Root directory where derivative files are written. Mirrors the source file's subdirectory structure under this root:
+Root directory where derivative files are written. Below it (and below `derivatives_subdir`,
+if set) the outputs mirror each source file's folders relative to `source_root` (see
+{ref}`Output layout <naming-output-layout>`). Without `derivatives_path`, outputs are written
+next to the sources and no `code/` snapshot is made:
 
 ```yaml
 derivatives_path:
@@ -122,28 +133,33 @@ study_b:
   derivatives_subdir: study_b                  # required: shares derivatives_path
 ```
 
-Sharing a `derivatives_path` across *separate* pipeline configurations cannot be detected;
-avoid it. (In 0.4.0 the subfolder is validated and reported by `validate`; the output layout
-that places files under it lands with the 0.4.0 layout change.)
+Outputs of `study_b` go to `/data/derivatives/study_b/<folders below source_root>/`; the
+`code/` snapshot stays at `/data/derivatives/code/`. Sharing a `derivatives_path` across
+*separate* pipeline configurations cannot be detected; avoid it.
 
 ### `exclude_pattern`
 
 Optional glob to exclude files matching the pattern from processing. It is
 expanded like `file_pattern` (see below).
 
+(relative-paths)=
+
 ### Relative paths (changed in 0.4.0)
 
-Relative values of `source_root`, `file_pattern`, `exclude_pattern` and
-`derivatives_path` are resolved, after `~`/`$VAR` expansion, against:
+This is the reference table for every relative path neurodags reads. `~` and `$VAR` are
+expanded first; a path that is absolute after expansion is used as is.
 
-| Where the dataset is defined | Relative paths are resolved against |
+| Path | Resolved against |
 |---|---|
-| a datasets YAML (`datasets: datasets.yml`, or `-d datasets.yml`) | the directory of **that datasets YAML** (0.3.x: the current working directory) |
-| an inline `datasets:` mapping inside `pipeline.yml` | the directory of `pipeline.yml` |
-| a dict passed to the Python API | the `base_dir=` argument; relative paths without it are an error |
+| paths typed on the command line (pipeline file, `-d/--datasets`, `--inputs`, `-o`) | the current working directory |
+| the `datasets:` key and `new_definitions` in `pipeline.yml` | the directory of `pipeline.yml` |
+| `source_root`, `file_pattern`, `exclude_pattern`, `derivatives_path` in a datasets YAML (`datasets: datasets.yml`, or `-d datasets.yml`) | the directory of **that datasets YAML** (0.3.x: the current working directory) |
+| the same keys in an inline `datasets:` mapping inside `pipeline.yml` | the directory of `pipeline.yml` |
+| the same keys in a dict passed to the Python API | the `base_dir=` argument; relative paths without it are an error |
 
-A path that is absolute after expansion is used as is. The result does not depend on
-where you run the command from, and workers always receive absolute paths.
+The result does not depend on where you run the command from, and workers always receive
+absolute paths. The 0.3.5 fallback that looked a missing `-d` file up next to the pipeline
+YAML is removed in 0.4.0.
 
 ### Environment variables and `~`
 
@@ -168,7 +184,8 @@ derivatives_path:
   There is no escape syntax for a literal `$NAME`.
 - Expansion happens first; a path that is still relative afterwards is resolved as
   described in "Relative paths" above.
-- Skipped datasets (`skip: True`) are not checked.
+- Skipped datasets (`skip: True`) are not expanded or checked, except that they must still
+  declare `source_root`.
 
 This is unrelated to `vars` (below): `vars` are dataset-level values substituted
 into pipeline node args (`$condition_name`), not environment variables, and node
@@ -195,7 +212,23 @@ continuations is logged.
 
 ### `skip`
 
-Set `skip: True` to temporarily disable a dataset without removing it.
+Set `skip: True` to temporarily disable a dataset without removing it. A skipped dataset
+contributes no files (and no indices), but must still declare `source_root`.
+
+(datasets-discovery-order)=
+
+## Discovery and file order
+
+For each active dataset, neurodags globs `file_pattern`, removes `exclude_pattern` matches, drops
+MNE split continuations, removes duplicates and the pipeline's own output trees (the dataset's
+`derivatives_path[/derivatives_subdir]` when it lies inside `source_root`, and `code/` /
+`.neurodags/` under any `derivatives_path`), checks that every file lies below `source_root`, and
+**sorts the files by their path relative to `source_root`** (`/` separators, code-point order:
+`sub-10` sorts before `sub-2`, so zero-pad labels such as `sub-02`). `max_files_per_dataset`
+keeps the first N of that order. Datasets are then concatenated in YAML order and numbered from
+`0`: that number is the file index used by `--only-index`, `status` and the SLURM templates.
+To keep indices fixed while files are added, freeze the list with `neurodags inputs` (see
+{doc}`hpc`).
 
 ### `vars`
 
@@ -207,7 +240,7 @@ eeg_adhd_epilepsy_EO_baseline:
   source_root:
     local: data
   file_pattern:
-    local: data/**/*@CleanedPrepRaw.fif
+    local: data/**/*@clean_prep.fif
   derivatives_path:
     local: outputs/features_conditions/EO_baseline
   vars:
@@ -256,7 +289,9 @@ eeg_adhd_epilepsy_EC_baseline:
 
 ## Multiple Datasets
 
-List any number of datasets. All are processed when running `run_pipeline`:
+List any number of datasets. All active ones are processed when running `run_pipeline`, in
+YAML order (their files are numbered one after the other). Datasets that share a
+`derivatives_path` need distinct `derivatives_subdir` values; here each has its own folder:
 
 ```yaml
 dataset1:

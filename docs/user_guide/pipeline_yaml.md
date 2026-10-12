@@ -46,7 +46,7 @@ that contains them: the datasets YAML, or `pipeline.yml` for an inline mapping (
 0.4.0; they used to be relative to the current working directory). For a configuration
 passed as a dict to the Python API, pass `base_dir=` to `run_pipeline` /
 `iterate_derivative_pipeline` / `build_derivative_dataframe`; relative dataset paths without
-it are an error.
+it are an error. See {ref}`Relative paths <relative-paths>` for the full table.
 
 ## `mount_point`
 
@@ -134,7 +134,7 @@ Each entry in `nodes` is a step with a unique `id`. Steps execute in topological
   derivative: CleanedEEG.fif
 ```
 
-- `derivative`: `<DerivativeName><suffix>` — resolves the named derivative for the current file and selects the artifact whose suffix is **exactly** `<suffix>` (`CleanedEEG.fif` selects `.fif`, never `.report.html`); use the YAML name, not the on-disk name (see {ref}`Derivative references <naming-references>`)
+- `derivative`: `<DerivativeName><suffix>` — resolves the named derivative for the current file and selects the artifact whose suffix is **exactly** `<suffix>` (`CleanedEEG.fif` selects `.fif`, never `.report.html`); the name is written as in `DerivativeDefinitions`, which is also its on-disk spelling (see {ref}`Derivative references <naming-references>`)
 - A bare `<DerivativeName>` is allowed only when the derivative has exactly one artifact
 - Use `SourceFile` to load the raw input file
 

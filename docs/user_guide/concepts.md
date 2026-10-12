@@ -30,9 +30,9 @@ sub-1.fif@CleanedEEG.fif      → source (a previous derivative)
 sub-1.fif&CleanedEEG.fif@PowerSpectrum.nc  → new derivative
 ```
 
-This means downstream tooling can always split on the single `@` to separate the source identity from the derivative name.
+This means downstream tooling can always split on the single `@` (`basename.rsplit("@", 1)`) to separate the source identity from the derivative name; the original source name is kept in the unit's `.done` manifest. Set the downstream dataset's `source_root` to the upstream `derivatives_path` (or a folder of it): discovery never returns the dataset's own output tree, nor the `code/` and `.neurodags/` folders (see {ref}`Output layout <naming-output-layout>`).
 
-Avoid `@` and `&` in raw source file names for the same reason (see {ref}`Output layout <naming-output-layout>`).
+Avoid `@` and `&` in raw source file names: two sources that differ only by `@`/`&` (`a@b.vhdr`, `a&b.vhdr` in one folder) map to the same outputs and are refused before running.
 
 ## Node
 
@@ -42,39 +42,41 @@ A **node** is a Python function decorated with `@register_node`. It receives dat
 
 ```python
 class Artifact(NamedTuple):
-    item: Any                        # the data object
-    writer: Callable[[str], None]    # how to save it to disk
+    item: Any                                      # the data object
+    writer: Callable[[str], list[str] | None]      # saves it; returns the files written (None = exactly the path)
 
 class NodeResult(NamedTuple):
-    artifacts: dict[str, Artifact]   # extension → Artifact
+    artifacts: dict[str, Artifact]   # artifact suffix → Artifact
 ```
 
-A node returns one or more artifacts keyed by file extension. Example: `{".nc": Artifact(...), ".report.html": Artifact(...)}`. The last node in a derivative's chain saves under the `@DerivativeName` prefix.
+A node returns one or more artifacts keyed by **artifact suffix** (`.nc`, `.report.html`, `.EO_baseline.fif`; see {ref}`Output file names <naming-output-files>` for the grammar). Example: `{".nc": Artifact(...), ".report.html": Artifact(...)}`. The last node in a derivative's chain saves each artifact as `<source>@<DerivativeName><suffix>`; the writer must report every file it writes (see {ref}`Writer contract <naming-writer-contract>`).
 
 ### Multi-Artifact (Splitter) Nodes
 
 A node can return several artifacts in one `NodeResult`, each under a distinct extension key. This is the **splitter** pattern: one artifact per condition, segment type, or split key.
 
 ```python
+from neurodags.writers import save_mne
+
 @register_node
 def split_by_condition(epochs) -> NodeResult:
     artifacts = {}
     for cond in epochs.event_id:
         artifacts[f".{cond}.fif"] = Artifact(
             item=epochs[cond],
-            writer=lambda path, e=epochs[cond]: e.save(path, overwrite=True),
+            writer=lambda path, e=epochs[cond]: save_mne(e, path),  # reports every file written
         )
     return NodeResult(artifacts=artifacts)
 ```
 
-Downstream derivatives select one artifact using the `derivative: SplitterName.condA.fif` syntax in the pipeline YAML (see [pipeline_yaml.md — Reuse Step](./pipeline_yaml.md)). The selection is applied identically whether the splitter's output is already cached on disk or is still in memory from the current run.
+Downstream derivatives select one artifact using the `derivative: SplitterName.condA.fif` syntax in the pipeline YAML: the text after the name must equal one of the artifact suffixes exactly (see {ref}`Derivative references <naming-references>`). The selection is applied identically whether the splitter's output is already done on disk or is still in memory from the current run.
 
 ## Pipeline Steps
 
 Each derivative definition has a `nodes` list. A step is either:
 
 - **`node`**: execute a registered Python function
-- **`derivative`**: resolve an upstream derivative by name and optional extension; if the upstream is a splitter, `derivative: Name.condA.fif` selects a single artifact
+- **`derivative`**: resolve an upstream derivative by name and artifact suffix (`Name.nc` selects exactly the `.nc` artifact); a bare `Name` is allowed only when the derivative has exactly one artifact, and for a splitter `derivative: Name.condA.fif` selects a single artifact
 
 Steps reference earlier results via `id.<N>` (e.g., `id.0` = result of step 0).
 
@@ -88,7 +90,7 @@ If your workflow needs cross-file operations mid-pipeline, consider Snakemake or
 
 ## Caching
 
-When a derivative finishes for a file, NeuroDAGs writes a small `.done` manifest next to its outputs listing every file it wrote. If that manifest is valid (every listed file still exists) and `overwrite: False` (the default), the entire derivative computation is skipped. This allows you to resume interrupted pipelines and avoid redundant computation in large studies; a unit interrupted mid-write has no `.done` and is recomputed (see {ref}`Completion manifest <naming-done-manifest>`).
+When a derivative finishes for a file (a *unit*), NeuroDAGs writes a small `.done` manifest next to its outputs listing every file it wrote. If that manifest is valid (every listed file still exists) and `overwrite: False` (the default), the entire derivative computation is skipped. This allows you to resume interrupted pipelines and avoid redundant computation in large studies; a unit interrupted mid-write has no `.done` and is recomputed. Output files without a valid `.done` (including outputs written by 0.3.x and not migrated) are never trusted. `neurodags status` reports every unit as `done`, `done (migrated)`, `skipped`, `errored`, `incomplete` or `missing` (see {ref}`Unit states <naming-unit-states>` and {ref}`Completion manifest <naming-done-manifest>`).
 
 **Cache invalidation is manifest-based, not code-based.** If you change a node's implementation, NeuroDAGs has no way to know the cached output is stale — it only checks the manifest and the files it lists. To force recomputation after modifying a node, either set `overwrite: true` on that derivative or delete the relevant `@<name>.done` files (or all `@<name>.*` files) manually.
 
@@ -111,7 +113,7 @@ nodes:
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `save` | bool | `True` | Write artifacts to disk. `False` = compute in memory only. |
-| `overwrite` | bool | `False` | Recompute even if output exists. |
+| `overwrite` | bool | `False` | Recompute even if the unit is done (valid `.done` manifest). |
 | `for_dataframe` | bool | `False` | Include in `build_derivative_dataframe` output. |
 
 ## DerivativeList
@@ -139,6 +141,7 @@ mount_point: local   # or: hpc
 ```yaml
 # datasets.yml (relative paths are relative to this file's folder)
 my_dataset:
+  name: MyDataset
   source_root:
     local: data
     hpc: /cluster/BIDS
@@ -159,8 +162,9 @@ Dataset entries can declare a `vars:` block. Any pipeline node arg whose string 
 ```yaml
 # datasets.yml
 eeg_study_EO:
+  name: EEG study, eyes open
   source_root: { local: data }
-  file_pattern: { local: data/**/*@CleanedPrepRaw.fif }
+  file_pattern: { local: data/**/*@clean_prep.fif }
   derivatives_path: { local: outputs/features/EO_baseline }
   vars:
     condition_name: EO_baseline

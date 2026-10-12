@@ -959,8 +959,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-missing",
         action="store_true",
         help=(
-            "Print the file index and path of missing (not yet computed) files below the "
-            "summary table. With --format indices, restrict the output to missing indices."
+            "Print the file index and path of incomplete and missing (not yet computed) "
+            "files below the summary table. With --format indices, restrict the output to "
+            "incomplete and missing indices."
         ),
     )
     status_parser.add_argument(
@@ -975,17 +976,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="table",
         help=(
             "Output format: 'table' (default), 'json', or 'indices' (only the sorted, "
-            "space-separated file indices that are missing or errored — narrow with "
-            "--list-missing / --list-errors — ready for --only-index or sbatch --array). "
-            "The exit code is 1 whenever anything is missing or errored, in every format "
-            "(unless --exit-zero)."
+            "space-separated file indices that are missing, incomplete or errored — narrow "
+            "with --list-missing / --list-errors — ready for --only-index or sbatch --array). "
+            "The exit code is 1 whenever anything is missing, incomplete or errored, in "
+            "every format (unless --exit-zero)."
         ),
     )
     status_parser.add_argument(
         "--exit-zero",
         action="store_true",
         help=(
-            "Exit 0 whenever the report was produced, even if files are missing or errored "
+            "Exit 0 whenever the report was produced, even if files are missing, incomplete "
+            "or errored "
             "(for report jobs chained with --dependency=afterok). Real failures such as a "
             "missing or invalid config or an unset environment variable still exit non-zero."
         ),
@@ -1051,7 +1053,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     migrate_parser.add_argument("config", help="Path to the 0.3.x pipeline YAML configuration.")
-    migrate_parser.add_argument("-d", "--datasets", default=None, help=DATASETS_HELP)
+    migrate_parser.add_argument(
+        "-d",
+        "--datasets",
+        default=None,
+        help=(
+            "Optional path to the 0.3.x datasets YAML that overrides the pipeline's 'datasets' "
+            "key. Resolved relative to the current working directory (~ and $VARS are "
+            "expanded). Relative paths inside it are read with the 0.3.x rule (relative to "
+            "--legacy-cwd) and rewritten relative to the YAML's own directory."
+        ),
+    )
     migrate_parser.add_argument(
         "--mount",
         default=None,

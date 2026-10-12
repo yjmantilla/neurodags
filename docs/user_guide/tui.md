@@ -31,8 +31,10 @@ Module entry point:
 python -m neurodags.tui [pipeline.yml] [-d datasets.yml]
 ```
 
-The `-d` path is relative to the directory you launch from (with a deprecated fallback to the
-pipeline YAML's directory); see {doc}`usage` for the exact resolution rule.
+The `-d` path is relative to the directory you launch from (the 0.3.5 fallback to the pipeline
+YAML's directory was removed in 0.4.0); see {doc}`usage` for the exact resolution rule. The
+pipeline must declare `naming_version: 1`: an unmigrated 0.3.x configuration is refused before
+the interface starts (see {doc}`migrating_to_0_4`).
 
 ## Interface Overview
 
@@ -73,7 +75,7 @@ Assemble computation results into ML-ready DataFrames.
 ### 6. Status Tab
 Check per-derivative processing status for the loaded pipeline (the TUI equivalent of the `neurodags status` command).
 - **Select derivative**: Choose a derivative to inspect, or leave on `All (DerivativeList)`.
-- **Refresh**: Scan outputs and populate the table with *done* / *skipped* / *missing* / *errored* counts per derivative, plus a summary line and any error paths.
+- **Refresh**: Scan outputs and populate the table with *done* / *incomplete* / *missing* / *errored* counts per derivative, plus a summary line and any error paths. The states are those of {ref}`Unit states <naming-unit-states>`; use `neurodags status` for the `skipped` and `(migrated)` counts.
 
 ### 7. NC Viewer Tab
 Launch the interactive Dash explorer for results.
