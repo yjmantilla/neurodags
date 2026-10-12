@@ -1,5 +1,27 @@
 # Migrating to 0.4
 
+```{admonition} Upgrade checklist
+:class: important
+
+1. **Install 0.4.0** and check which copy runs:
+   `python -c "import neurodags; print(neurodags.__version__, neurodags.__file__)"`.
+2. **Preview** from the directory you ran 0.3.x from:
+   `neurodags migrate pipeline.yml --report plan.json` (changes nothing).
+3. **Read the preview**: confirm `source_root` and the artifact sets, look at orphans, and
+   resolve every `REFUSED` line. The most common one is a
+   [pilot copy next to a full-run copy](#pilot-duplicates).
+4. **Apply once per output tree / mount**: `neurodags migrate pipeline.yml --apply`, then
+   `neurodags migrate pipeline.yml --mount hpc --apply` on the other machine.
+5. **Check** with `neurodags status pipeline.yml` (migrated units show as `done` with a
+   `(migrated)` count).
+6. **Rebuild dataframes** with `neurodags dataframe` (column names changed).
+7. **Update downstream code** with the report's `column_map` (`X__error` → `X.error`,
+   coordinate encoding), and edit chained `file_pattern`s that name old `@Token` outputs.
+8. **Regenerate SLURM scripts and input lists**: `neurodags slurm-script ...`, then
+   `neurodags inputs pipeline.yml -o inputs.tsv` (file indices changed once: discovery is
+   now sorted).
+```
+
 neurodags 0.4.0 changes how outputs are named, where they go and when they count as done
 (see {doc}`naming`). A 0.3.x configuration is refused by every command until it declares
 `naming_version: 1`, and 0.3.x outputs have no `.done` manifest, so they would all be
@@ -67,7 +89,11 @@ neurodags migrate pipeline.yml [-d datasets.yml] [--mount NAME]
    [Dataframe consumers](#dataframe-consumers)).
 8. **Update downstream code** (analysis scripts, notebooks, other pipelines) using the
    column map of the report, and patterns such as `*@CleanPrep.fif` that refer to output
-   file names (printed by the preview, never edited by migrate).
+   file names (printed by the preview, never edited by migrate; see
+   [Chained pipelines](#chained-pipelines)).
+9. **Regenerate HPC scripts**: file indices changed once (sorted discovery) and the
+   `slurm-script` templates now use a frozen `inputs.tsv`; regenerate them and the list (see
+   {doc}`hpc`).
 
 (reading-the-preview)=
 
@@ -150,6 +176,51 @@ for most derivatives) is complete for the unit. Not certified (no `.done`, statu
 Units with a `.skip` marker keep it (status `skipped`). `--no-synthesize` writes no
 manifests at all, so every migrated unit is recomputed.
 
+(pilot-duplicates)=
+
+## Pilot copy and full-run copy of the same subject
+
+This is the refusal you are most likely to meet on a real 0.3.x project:
+
+```text
+REFUSED (nothing will be applied):
+  - 2 sets of 0.3.x outputs map to the same new outputs
+    study/data/derivatives/sub-01/ses-1/eeg/sub-01_ses-1_eeg.vhdr@band_power* with different
+    content: study/data/derivatives/sub-01_ses-1_eeg.vhdr@BandPower*,
+    study/data/derivatives/sub-01/ses-1/eeg/sub-01_ses-1_eeg.vhdr@BandPower*. Keep one
+    (delete or move the others away) and run migrate again.
+```
+
+(One line in the real output, with absolute paths; wrapped here.)
+
+**Why it happens.** 0.3.x placed outputs below the common root of the files it discovered. A
+pilot run on one subject (one matching file, or `max_files_per_dataset: 1`) used that file's
+own folder as the root, so it wrote the outputs **flat**, directly under `derivatives_path`
+(`<derivatives_path>/<file>@Token.*`). The later full run had a different common root and
+looked for the outputs in the **nested** folder (`<derivatives_path>/sub-01/ses-1/eeg/...`),
+found nothing there and computed the subject again. Both copies belong to the same source,
+so both map to the same 0.4.0 outputs. When the two copies are byte-identical migrate keeps
+the deeper one and lists the other as a duplicate; usually they are not, because the files
+embed run-specific data (timestamps in MNE reports and JSON sidecars, file ids and
+measurement metadata in FIF files, NetCDF history attributes). Migrate cannot know which copy
+you want, so it refuses.
+
+**Fix.** Keep the full-run (nested) copy and remove the pilot (flat) one, then preview again:
+
+1. Read the refusal: the shallower prefix is the pilot copy, usually
+   `<derivatives_path>/<file>@Token.*` directly under `derivatives_path`.
+2. Check that the nested copy is complete (it has every artifact of the derivative, and no
+   `.error`).
+3. Move the flat copy out of the tree rather than deleting it outright, e.g.
+   `mkdir -p ../pilot-0.3 && mv <derivatives_path>/<file>@Token.* ../pilot-0.3/`
+   (`find <derivatives_path> -maxdepth 1 -name '*@*'` lists every flat output). Include its
+   `.error`/`.skip` markers.
+4. Run `neurodags migrate pipeline.yml --report plan.json` again; repeat until nothing is
+   refused, then `--apply`.
+
+Keep the flat copy instead only if it is the one you trust (for example the full run
+failed for that subject); then move the nested copy away.
+
 (dataframe-consumers)=
 
 ## Dataframe consumers
@@ -178,6 +249,8 @@ legacy_column_to_new("psd__error", ["psd"])                # 'psd.error'
 
 The reliable path is to rebuild the dataframe from the (unchanged) artifacts with 0.4.0.
 
+(chained-pipelines)=
+
 ## Chained pipelines
 
 A pipeline whose sources are another pipeline's outputs (`file_pattern: .../*@CleanPrep.fif`)
@@ -202,7 +275,7 @@ Nothing is applied while any of these remains:
 |---|---|
 | Ambiguous mapping (several sources match an old output) | Move the listed outputs out of the tree (or delete them); they are recomputed. |
 | A target exists with different content | Keep one of the two files (delete or move the other) and run again. Identical files are not refused: the old one is left as a duplicate. |
-| Two old outputs map to one target with different content (e.g. a pilot-era copy and a full-run copy of the same unit) | Keep one. If they are identical, the deeper one is used and the other is left as a duplicate. |
+| Two old outputs map to one target with different content (e.g. a pilot-era copy and a full-run copy of the same unit) | Keep one: see [Pilot copy and full-run copy](#pilot-duplicates). If they are identical, the deeper one is used and the other is left as a duplicate. |
 | The configuration already declares `naming_version: 1` but the tree still has 0.3.x outputs, and there is no `pipeline.yml.bak-0.3` | Restore the 0.3.x configuration and migrate it, or (if it was migrated on another mount) keep the backup next to the pipeline. |
 | A folder to write is not writable | Fix the permissions. |
 | A move would cross filesystems | Copy the tree onto one filesystem first; cross-filesystem migration is out of scope. |
@@ -229,4 +302,5 @@ Nothing is applied while any of these remains:
   migrations see that every dataset has a `source_root`, take its paths as 0.4.0 paths and
   leave it unchanged.
 - Skipped datasets (`skip: true`) get a `source_root` but their outputs are not moved; to
-  migrate them later, un-skip them and run migrate again (it then works on the tree only).
+  migrate them later, un-skip them and run migrate again (it then works on the tree only,
+  which requires the `pipeline.yml.bak-0.3` backup next to the pipeline).

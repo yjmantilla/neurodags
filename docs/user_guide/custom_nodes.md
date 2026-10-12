@@ -8,7 +8,7 @@ The built-in nodes target EEG/MEG/ECG via MNE-Python and xarray, but the node sy
 
 1. A node is a Python function.
 2. It returns a `NodeResult`.
-3. A `NodeResult` contains `artifacts` — a dict mapping file extension to `Artifact(item, writer)`.
+3. A `NodeResult` contains `artifacts` — a dict mapping an **artifact suffix** (`.nc`, `.report.html`, `.EO_baseline.fif`) to `Artifact(item, writer)`. Each artifact is saved as `<source>@<derivative name><suffix>`; suffixes must follow the {ref}`suffix grammar <naming-output-files>` (checked before anything is written).
 
 ## Minimal Example
 
@@ -68,14 +68,15 @@ def _internal_function_name(data) -> NodeResult:
 
 ## Artifact Types
 
-The `item` field holds the in-memory object; `writer` is a callable that receives a full file path and saves it. Common patterns:
+The `item` field holds the in-memory object; `writer` is a callable that receives a full file path and saves it. It returns the list of files it wrote, or `None` (any non-list value counts as `None`) meaning exactly that path; a writer that creates extra files must return them all, because the `.done` manifest is built from these reports (see {ref}`Writer contract <naming-writer-contract>`). Common patterns:
 
 ```python
 # xarray DataArray → NetCDF (recommended for numerical results)
 ".nc": Artifact(item=da, writer=lambda path: da.to_netcdf(path))
 
-# MNE object → FIF
-".fif": Artifact(item=raw, writer=lambda path: raw.save(path, overwrite=True))
+# MNE object → FIF (save_mne reports every split part X.fif, X-1.fif, ...)
+from neurodags.writers import save_mne
+".fif": Artifact(item=raw, writer=lambda path: save_mne(raw, path))
 
 # Pandas DataFrame → CSV
 ".csv": Artifact(item=df, writer=lambda path: df.to_csv(path))
@@ -207,7 +208,8 @@ def extract_condition_features(raw_path: str, condition_name: str) -> NodeResult
 **What neurodags does when `SkipDerivative` is raised:**
 
 1. Writes a `.skip` marker file alongside where the artifact would have been saved
-   (e.g. `sub-0002@SpectrumWelch.skip`). The exception message is written into the file.
+   (e.g. `sub-0002_task-rest_eeg.vhdr@SpectrumWelch.skip`). The exception message is written
+   into the file, and any `.done` or `.error` of the unit is removed.
 2. Propagates the skip to all parent derivatives that depend on this one — they each write
    their own `.skip` marker without attempting to compute.
 3. Reports the derivative as **skipped** in `neurodags status` output (a distinct column,

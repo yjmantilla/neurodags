@@ -27,15 +27,20 @@ Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes
 
 - Agnostic to data organization / directory hierarchy
 - SLURM / HPC friendly with file-level parallelism via joblib
-- Graph-based caching: skip already-computed derivatives
+- Graph-based caching: skip derivatives whose `.done` manifest is valid
 - Extensible node system — add nodes without forking the package
 - YAML-based declarative configuration
-- Unified CLI: `neurodags run`, `dry-run`, `dataframe`, `dag`, `view`, `validate`, `tui`
+- Unified CLI: `neurodags validate`, `run`, `dry-run`, `status`, `inputs`, `count-inputs`, `dataframe`, `dag`, `view`, `slurm-script`, `migrate`, `tui`
 - Built-in Terminal User Interface (TUI) for pipeline management and execution
 - Built-in nodes for preprocessing, spectral analysis, entropy, complexity, and data transformations
 - Dataframe assembly (wide or long format) from derivative artifacts
 - Dry-run mode — inspect planned computations without executing
 - Built-in Dash-Plotly explorer for `.fif` and `.nc` files
+
+> **Upgrading from 0.3.x?** 0.4.0 changes output names, the output layout and when a unit
+> counts as done, and refuses 0.3.x configurations until they are migrated. Preview the
+> upgrade with `neurodags migrate pipeline.yml`, then add `--apply`; see the
+> [migration guide](https://yjmantilla.github.io/neurodags/user_guide/migrating_to_0_4.html).
 
 ## Installation
 
@@ -96,7 +101,8 @@ neurodags run pipeline.yml --n-jobs 4 --joblib-backend loky --joblib-prefer proc
 
 # subset / error control
 neurodags run pipeline.yml --max-files-per-dataset 10
-neurodags run pipeline.yml --only-index 0 5 12   # process only these file indices
+neurodags run pipeline.yml --only-index 0 5 12   # process only these file indices (unknown index = error)
+neurodags run pipeline.yml --inputs inputs.tsv   # use a frozen input list instead of discovery
 neurodags run pipeline.yml --skip-errors          # skip files with a prior .error marker
 neurodags run pipeline.yml --raise-on-error       # stop on first failure
 ```
@@ -117,28 +123,28 @@ neurodags dry-run pipeline.yml --skip-errors                     # exclude error
 
 ### Status
 
-Quick summary of done / missing / errored counts per derivative — no CSV needed.
+Quick summary of done / skipped / incomplete / missing / errored counts per derivative — no CSV needed.
 
 ```bash
 neurodags status pipeline.yml                        # summary table
 neurodags status pipeline.yml --derivative Alpha     # filter to one derivative
 neurodags status pipeline.yml --list-errors          # errored files: [idx N] path + .error path
-neurodags status pipeline.yml --list-missing         # missing files: [idx N] path
+neurodags status pipeline.yml --list-missing         # incomplete and missing files: [idx N] path
 neurodags status pipeline.yml --list-errors --list-missing
 neurodags status pipeline.yml --n-jobs 4             # parallelize underlying dry-run
 neurodags status pipeline.yml --format json          # machine-readable JSON
 neurodags status pipeline.yml --format json --include-files   # + per-file records
-neurodags status pipeline.yml --format indices       # missing/errored indices for --only-index
+neurodags status pipeline.yml --format indices       # missing/incomplete/errored indices for --only-index
 ```
 
-Exit code `0` only when all derivatives are complete (no missing, no errored); `1` otherwise.
+Exit code `0` only when all derivatives are complete (nothing missing, incomplete or errored); `1` otherwise.
 
 ### Source File Count
 
 ```bash
 neurodags count-inputs pipeline.yml                         # number of input entries (size of the --only-index range)
 neurodags count-inputs pipeline.yml --inputs inputs.tsv    # number of entries in a frozen input list
-neurodags inputs pipeline.yml -o inputs.tsv                 # freeze the input list (index, dataset, path)
+neurodags inputs pipeline.yml -o inputs.tsv                 # freeze the input list (index, dataset, path below source_root)
 ```
 
 ### Dataframe Assembly
@@ -342,7 +348,7 @@ def my_node(data) -> NodeResult:
 Key rules:
 1. A node is a function decorated with `@register_node`.
 2. It returns a `NodeResult`.
-3. A `NodeResult` contains `artifacts` — a dict mapping file extension to `Artifact(item, writer)`.
+3. A `NodeResult` contains `artifacts` — a dict mapping an artifact suffix (`.nc`, `.report.html`) to `Artifact(item, writer)`; the writer returns the files it wrote (or `None`).
 
 ## Dataframe Assembly
 
@@ -421,7 +427,7 @@ neurodags dry-run pipeline.yml --derivative MyDerivative --output dry_run_result
 | Flag | Default | Description |
 |------|---------|-------------|
 | `save` | `True` | Persist artifacts to disk. `False` = compute but don't write. |
-| `overwrite` | `False` | Force recompute even if output exists. |
+| `overwrite` | `False` | Force recompute even if the unit is done (valid `.done` manifest). |
 | `for_dataframe` | `False` | Include this derivative in `build_derivative_dataframe`. |
 
 ## Custom Node Definitions

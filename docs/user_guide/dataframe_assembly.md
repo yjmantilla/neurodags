@@ -33,13 +33,27 @@ df = build_derivative_dataframe("pipeline.yml", output_format="wide")
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `pipeline_configuration` | dict or str | — | Pipeline config dict or path to YAML |
+| `pipeline_configuration` | dict or str | — | Pipeline config dict or path to YAML (must declare `naming_version: 1`) |
+| `datasets_configuration` | dict or str | None | Override the pipeline's `datasets` |
 | `include_derivatives` | list[str] | None | Restrict to specific derivative names |
-| `max_files_per_dataset` | int | None | Limit files per dataset |
-| `only_index` | int or list[int] | None | Process only specific file indices |
+| `max_files_per_dataset` | int | None | Limit files per dataset (the first N in sorted order) |
+| `only_index` | int or list[int] | None | Process only specific file indices (unknown or negative indices raise) |
+| `inputs` | str | None | Frozen input list written by `neurodags inputs` (see {doc}`hpc`) |
 | `output_format` | `"wide"` or `"long"` | `"wide"` | Shape of output dataframe |
 | `preserve_complex_values` | bool | False | Keep nested structures instead of flattening |
-| `raise_on_error` | bool | False | Re-raise exceptions instead of skipping |
+| `raise_on_error` | bool | False | Re-raise exceptions instead of recording them in `<name>.error` |
+| `n_jobs` | int | None | Parallel file-level collection (`-1` = all cores) |
+| `base_dir` | str | None | Directory relative dataset paths of a dict configuration resolve against |
+
+**Saved derivatives are read only from done units.** A derivative with `save: true` (the
+default) and `for_dataframe: true` is read from the files listed in its valid `.done`
+manifest; a unit without one (`missing`, `errored`, `incomplete`, including 0.3.x outputs not
+yet migrated) contributes no columns for that row. Run the pipeline (or `neurodags migrate` an
+old tree) first. `save: false` derivatives are computed in memory (see below).
+
+Rows follow the file index order: datasets in YAML order, files sorted by their path below
+`source_root` (see {ref}`Discovery and file order <datasets-discovery-order>`). `file_path` is
+the absolute path of the source file, and `dataset` is the dataset key.
 
 ## Output Formats
 
@@ -50,9 +64,9 @@ One row per source file. Each collected derivative becomes one or more columns.
 in the column names. Best for file-level features.
 
 ```
-index  dataset  file_path              BandPower.nc@band-alpha_channel-Fp1  BandPower.nc@band-beta_channel-Fp1  Entropy.json
-0      demo     sub-01_task-rest.vhdr  0.32                                 0.18                                1.24
-1      demo     sub-02_task-rest.vhdr  0.27                                 0.21                                1.11
+index  dataset  file_path                           BandPower.nc@band-alpha_channel-Fp1  BandPower.nc@band-beta_channel-Fp1  Entropy.json
+0      demo     /data/sub-01/sub-01_task-rest.vhdr  0.32                                 0.18                                1.24
+1      demo     /data/sub-02/sub-02_task-rest.vhdr  0.27                                 0.21                                1.11
 ```
 
 ### Long Format (`output_format="long"`)
@@ -62,11 +76,11 @@ and `value`. `derivative` holds the full wide column name, so both formats use t
 identity. No column synthesis is performed. Best for multi-dimensional derivatives.
 
 ```
-file_path               derivative                           value
-sub-01_task-rest.vhdr   BandPower.nc@band-alpha_channel-Fp1  0.32
-sub-01_task-rest.vhdr   BandPower.nc@band-beta_channel-Fp1   0.18
-sub-01_task-rest.vhdr   Entropy.json                         1.24
-sub-02_task-rest.vhdr   BandPower.nc@band-alpha_channel-Fp1  0.27
+index  dataset  file_path                           derivative                           value
+0      demo     /data/sub-01/sub-01_task-rest.vhdr  BandPower.nc@band-alpha_channel-Fp1  0.32
+0      demo     /data/sub-01/sub-01_task-rest.vhdr  BandPower.nc@band-beta_channel-Fp1   0.18
+0      demo     /data/sub-01/sub-01_task-rest.vhdr  Entropy.json                         1.24
+1      demo     /data/sub-02/sub-02_task-rest.vhdr  BandPower.nc@band-alpha_channel-Fp1  0.27
 ```
 
 (dataframe-column-names)=
@@ -119,6 +133,12 @@ with code `2`.
 **Errors.** With `raise_on_error=False`, a derivative that fails for a file leaves its message in
 the `<name>.error` column of that row (wide) or in a row with `derivative = "<name>.error"`
 (long).
+
+**Coming from 0.3.x.** Error columns were `<name>__error`, and coordinates used lossy character
+swaps (`band-8~12`, `cond-a|b`, `ref-a$b`, `NA` for an empty value) and an optional
+`sort_flattened_dims`; all of these are gone. Rebuild dataframes from the artifacts with 0.4.0
+and update code that refers to column names using the column map of `neurodags migrate`
+(see {ref}`Dataframe consumers <dataframe-consumers>`).
 
 (dataframe-splitting-columns)=
 

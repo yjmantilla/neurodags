@@ -11,7 +11,7 @@ NeuroDAGs installs a unified `neurodags` command with several subcommands. Every
 - **The same keys in an inline `datasets:` mapping inside `pipeline.yml`**: the directory of `pipeline.yml`.
 - **The same keys in a dict passed to the Python API**: the `base_dir=` argument (relative paths without it are an error).
 
-`~` and `$VARS` are expanded first; a path that is absolute after expansion is used as is.
+`~` and `$VARS` are expanded first; a path that is absolute after expansion is used as is. Full table: {ref}`Relative paths <relative-paths>`.
 ```
 
 ```{admonition} Changed in 0.4.0
@@ -59,7 +59,7 @@ neurodags validate pipeline.yml --derivative BandPower  # effective set for a sp
 
 Pass `--derivative` (repeatable) to preview exactly what a `run --derivative …` would compute: dependencies are auto-resolved into `computed_with_dependencies`, while anything else defined shows under `not computed by this run`.
 
-Dataset configuration errors are printed to stderr, one `error: …` line each, and `validate` exits with code `1`: a missing `source_root` (with a suggested value derived from `file_pattern` when one exists), a `source_root` that is not an existing directory, a path that does not resolve for the active mount point, an invalid `derivatives_subdir`, or two active datasets sharing a `derivatives_path` with the same `derivatives_subdir`. `run`, `dry-run`, `status`, `count-inputs` and `dataframe` refuse the same configurations before touching any file (exit code `2`).
+An unversioned configuration or invalid derivative names stop `validate` like every other command (one `neurodags: error: …` message listing every problem, exit code `2`); name warnings (names over 64 characters, repeated key-value keys) are printed without failing. Dataset configuration errors are printed to stderr, one `error: …` line each, and `validate` exits with code `1`: a missing `source_root` (with a suggested value derived from `file_pattern` when one exists), a `source_root` that is not an existing directory, a path that does not resolve for the active mount point, an invalid `derivatives_subdir`, or two active datasets sharing a `derivatives_path` with the same `derivatives_subdir`. `run`, `dry-run`, `status`, `count-inputs` and `dataframe` refuse the same configurations before touching any file (exit code `2`).
 
 ```text
   study:
@@ -122,7 +122,7 @@ Example `neurodags_env.json`:
 ```json
 {
   "snapshot_time": "2026-05-21T08:00:00.000000+00:00",
-  "neurodags_version": "0.1.0",
+  "neurodags_version": "0.4.0",
   "neurodags_git_commit": "a1b2c3d4..."
 }
 ```
@@ -151,46 +151,32 @@ See {doc}`inspection` for the plan format and how to interpret cached / missing 
 
 ## Status
 
-Quick at-a-glance summary of done / missing / errored counts per derivative — no CSV required.
+Quick at-a-glance summary of done / skipped / incomplete / missing / errored counts per derivative — no CSV required. The states are defined in {ref}`Unit states <naming-unit-states>`.
 
 ```bash
 neurodags status pipeline.yml                        # summary table for all derivatives
 neurodags status pipeline.yml --derivative Alpha     # filter to one derivative
 neurodags status pipeline.yml --list-errors          # errored files: [idx N] path + .error path
-neurodags status pipeline.yml --list-missing         # missing files: [idx N] path
+neurodags status pipeline.yml --list-missing         # incomplete and missing files: [idx N] path
 neurodags status pipeline.yml --list-errors --list-missing
 neurodags status pipeline.yml --n-jobs 4             # parallelize the underlying dry-run
 neurodags status pipeline.yml --format json          # machine-readable JSON output
 neurodags status pipeline.yml --format json --include-files   # + per-file records
-neurodags status pipeline.yml --format indices       # missing/errored indices for --only-index
+neurodags status pipeline.yml --format indices       # missing/incomplete/errored indices for --only-index
 neurodags status pipeline.yml --inputs inputs.tsv    # check against a frozen input list
 ```
 
-Example output:
+The table has one row per derivative with the columns `total`, `done`, `skipped`,
+`incomplete`, `missing` and `errored` (plus `(migrated)` when some done units were certified
+by `neurodags migrate`); see {doc}`inspection` for a full example and the JSON format.
 
-```
-config: /abs/path/pipeline.yml
-files:  42
-
-Derivative               total   done  missing  errored
-───────────────────────────────────────────────────────
-Alpha                       42     30       10        2
-Beta                        42     25       15        2
-───────────────────────────────────────────────────────
-Total                       84     55       25        4
-
-2 error(s) found.  Run with --list-errors for details.
-4 derivative(s) missing.  Run with --list-missing for details.
-Use --format indices to get the file indices for --only-index resubmission.
-```
-
-Exit code `0` only when all derivatives are complete (no missing, no errored); `1` otherwise — suitable for CI and shell dependency chains:
+Exit code `0` only when all derivatives are complete (nothing missing, incomplete or errored, and with `--inputs` no `missing-source` input); `1` otherwise — suitable for CI and shell dependency chains:
 
 ```bash
 neurodags status pipeline.yml || sbatch resubmit.sh
 ```
 
-Pass `--exit-zero` to use `status` purely as a report: it exits `0` whenever the report was produced, even if files are missing or errored, while real failures (missing or invalid config, unset environment variable, unreadable `-d` file) still exit non-zero. This is what a report job chained with `--dependency=afterok` wants (see {doc}`hpc`):
+Pass `--exit-zero` to use `status` purely as a report: it exits `0` whenever the report was produced, even if files are missing, incomplete or errored, while real failures (missing or invalid config, unset environment variable, unreadable `-d` file) still exit non-zero. This is what a report job chained with `--dependency=afterok` wants (see {doc}`hpc`):
 
 ```bash
 neurodags status pipeline.yml --exit-zero                  # report only; 0 even if incomplete
@@ -306,6 +292,8 @@ See {doc}`hpc` for full details on each pattern and how to submit.
 
 ## Migrating a 0.3.x Project
 
+A 0.3.x configuration is refused until it is migrated. `neurodags migrate` adds `naming_version: 1` and `source_root`, rewrites relative dataset paths, renames and moves the existing outputs to the 0.4.0 names and layout, and writes `.done` manifests for them:
+
 ```bash
 neurodags migrate pipeline.yml --report plan.json        # preview: prints the plan, changes nothing
 neurodags migrate pipeline.yml --apply                   # rewrite config, move outputs, write .done
@@ -334,13 +322,13 @@ All subcommands that take a pipeline file also accept:
 |------|-------------|
 | `-d / --datasets <path>` | Override the `datasets` key in the pipeline YAML. The path is relative to the current working directory |
 
-How the `-d` path is resolved (`validate`, `run`, `dry-run`, `dataframe`, `count-inputs`, `status`, `slurm-script`, `tui`, and the legacy `neurodags-tui`):
+How the `-d` path is resolved (`validate`, `run`, `dry-run`, `dataframe`, `count-inputs`, `inputs`, `status`, `slurm-script`, `migrate`, `tui`, and the legacy `neurodags-tui`):
 
 1. `~` and `$VARS` are expanded, exactly as for the `datasets:` key (an unset or empty variable is an error).
 2. A relative path is resolved against the **current working directory** — the directory you run `neurodags` from, like every other CLI path.
 3. If the file does not exist there, the command stops with a short error naming the path it tried and exits with code `2` (no traceback). **Removed in 0.4.0:** the YAML-relative fallback (deprecated in 0.3.5) that looked the file up next to the pipeline YAML.
 
-Paths written *inside* the datasets file passed with `-d` are resolved against that file's own directory (0.4.0). The `datasets:` key written *inside* `pipeline.yml` is unaffected: it stays relative to the pipeline YAML.
+Paths written *inside* the datasets file passed with `-d` are resolved against that file's own directory (0.4.0; `neurodags migrate` reads a 0.3.x file with the 0.3.x rule, relative to `--legacy-cwd`). The `datasets:` key written *inside* `pipeline.yml` is unaffected: it stays relative to the pipeline YAML.
 
 ```bash
 # run from the repository root; the pipeline lives in pipelines/x/

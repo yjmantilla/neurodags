@@ -202,6 +202,7 @@ DERIVATIVE=${DERIVATIVES[$DERIV_INDEX]}
 source activate myenv
 
 python - <<EOF
+import os
 from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
@@ -280,15 +281,16 @@ EOF
 
 ---
 
-## Resubmitting missing/errored files
+## Resubmitting missing, incomplete or errored files
 
-`neurodags status` reports the global **file index** of every missing or errored file — the
+`neurodags status` reports the global **file index** of every missing, incomplete or errored
+file (see {ref}`Unit states <naming-unit-states>`) — the
 same index the per-file and chained arrays use as `SLURM_ARRAY_TASK_ID` (see
 {doc}`inspection`). `--format indices` prints just those indices, space-separated. Pass the
 **same input list** the array used, so the indices refer to the same files:
 
 ```bash
-# --exit-zero: exit 0 even when something is missing/errored, but still fail on a
+# --exit-zero: exit 0 even when something is missing/incomplete/errored, but still fail on a
 # broken config, so `set -e` keeps protecting you
 IDX=$(neurodags status pipeline.yml --inputs inputs.tsv --format indices --exit-zero)
 [ -z "$IDX" ] && { echo "nothing to resubmit"; exit 0; }
@@ -301,7 +303,7 @@ sbatch --array=$(echo "$IDX" | tr ' ' ',') retry_array.sh
 ```
 
 **Report / resubmission jobs chained with `--dependency=afterok`.** By default `status` exits
-`1` whenever anything is missing or errored, which is the expected state after a partial run
+`1` whenever anything is missing, incomplete or errored, which is the expected state after a partial run
 or a staged array — so a report job would fail and SLURM would cancel every job chained after
 it. Use `--exit-zero` in such jobs: `status` then exits `0` whenever the report was produced,
 in every `--format`, while real failures (missing or invalid config, unset environment
@@ -370,8 +372,8 @@ Each `.error` file contains the derivative name, step, and exception. To retry o
 
 To skip known-bad files and process only new/uncached ones:
 
-```bash
-run_pipeline(config, only_index=index, skip_errors=True)
+```python
+run_pipeline(config, inputs="inputs.tsv", only_index=index, skip_errors=True)
 ```
 
 ---
@@ -386,5 +388,7 @@ run_pipeline(config, only_index=index, skip_errors=True)
 | Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed |
 | Outputs computed on another mount | Copy the derivatives tree as is: manifests list files relative to their folder, so the copy verifies on the new mount as long as the paths below `source_root` are the same |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
+| `--only-index` errors | An unknown or negative index is an error (exit `2`), never ignored: size the array from `count-inputs --inputs inputs.tsv`, and pass the same `--inputs` list to `status` and the workers |
+| Upgrading from 0.3.x | File indices changed once (sorted discovery) and the templates changed (frozen input list, `load_pipeline_configuration`, `base_dir=`): regenerate the scripts with `neurodags slurm-script` and run `neurodags migrate` once per output tree (see {doc}`migrating_to_0_4`) |
 | Array size limit | Most clusters cap at 1000–10000 tasks; split `--array` into index-range batches (e.g. `0-999`, `1000-1999`). With a frozen `inputs.tsv`, each task ID maps to the same file in every batch, so range batching is safe and idempotent — cached files are skipped automatically on resubmit |
 | Index order | Files are sorted by their path below `source_root` in code-point order (`sub-10` before `sub-2`); zero-pad labels (`sub-02`) for a natural order |

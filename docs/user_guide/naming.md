@@ -107,15 +107,20 @@ removes the other markers, including `.done`. A crash or a failing writer theref
 ### Unit states
 
 `neurodags status`, the dry-run plan (`state` field of the `derivative_output` step) and the TUI
-report each unit as:
+report each unit (one source file × one derivative) as:
 
-| State | Meaning |
-|-------|---------|
-| `done` | valid `.done` manifest (see above) |
-| `skipped` | `.skip` marker |
-| `errored` | `.error` marker (state `error` in the dry-run plan) |
-| `incomplete` | output files (or an invalid `.done`) without a valid manifest: an interrupted write, a deleted part, or 0.3.x outputs not yet migrated; recomputed by the next run |
-| `missing` | nothing on disk for the unit |
+| State | Meaning | Next `run` |
+|-------|---------|------------|
+| `done` | valid `.done` manifest (see above) | skipped (cached) |
+| `done (migrated)` | `done`, but the manifest was written by `neurodags migrate` (`"origin": "migrate"`) from 0.3.x outputs; counted as `done` (the table adds a `(migrated)` column, JSON a `migrated` count and per-file `label`) | skipped (cached) |
+| `skipped` | `.skip` marker (the derivative does not apply to this file) | skipped |
+| `errored` | `.error` marker (state `error` in the dry-run plan) | retried, unless `--skip-errors` |
+| `incomplete` | output files (or an invalid `.done`) without a valid manifest: an interrupted write, a deleted part, or 0.3.x outputs not yet migrated | recomputed |
+| `missing` | nothing on disk for the unit | computed |
+
+With a frozen input list (`--inputs`), a listed source file that no longer exists is reported
+as `missing-source` at its index; it is a state of the *input*, not of a unit, and is never
+recomputed. See {doc}`inspection` for the `status` output and exit codes.
 
 (naming-writer-contract)=
 
@@ -358,13 +363,13 @@ derivatives/
 │   ├── sub-01_task-rest_eeg.vhdr@band_power.nc
 │   └── sub-01_task-rest_eeg.vhdr@band_power.done
 └── sub-02/eeg/
-    └── sub-02_task-rest_eeg.vhdr@clean_prep.error  # clean_prep failed; band_power not written
+    └── sub-02_task-rest_eeg.vhdr@clean_prep.error  # clean_prep failed for this file
 ```
 
 A second pipeline uses the cleaned files as its sources (`source_root: derivatives`,
 `file_pattern: derivatives/**/*@clean_prep.fif`, `derivatives_path: derivatives2`) with a
-derivative `Entropy`. The tree below `source_root` is mirrored and the `@` of the source becomes
-`&`:
+derivative `Entropy`. The tree below `source_root` is mirrored (`code/` is never discovered)
+and the `@` of the source becomes `&`:
 
 ```text
 derivatives2/
@@ -373,11 +378,12 @@ derivatives2/
     └── sub-01_task-rest_eeg.vhdr&clean_prep.fif@Entropy.done
 ```
 
-Dataframe columns from the first pipeline (wide format, `band_power` with `for_dataframe: true`):
+Dataframe columns from the first pipeline (wide format, `band_power` with `for_dataframe: true`;
+`file_path` is the absolute path of the source, here with the project in `/study`):
 
 ```text
-index  dataset  file_path                                     band_power.nc@freqbands-alpha_spaces-Fp1-F3  band_power.nc@freqbands-alpha_spaces-O1  ...
-0      demo     rawdata/sub-01/eeg/sub-01_task-rest_eeg.vhdr  0.32                                         0.29                                     ...
+index  dataset  file_path                                           band_power.nc@freqbands-alpha_spaces-Fp1-F3  band_power.nc@freqbands-alpha_spaces-O1  ...
+0      demo     /study/rawdata/sub-01/eeg/sub-01_task-rest_eeg.vhdr  0.32                                         0.29                                     ...
 ```
 
 To find all `band_power` outputs on disk: `find derivatives -name '*@band_power.*'`.

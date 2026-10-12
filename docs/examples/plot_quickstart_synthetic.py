@@ -281,8 +281,10 @@ else:
 # %%
 # What's Next
 # ------------
-# - Swap ``generate_dummy_dataset`` for real BIDS data by pointing ``file_pattern``
-#   at your raw EEG files.
+# - Swap ``generate_dummy_dataset`` for real BIDS data by pointing ``source_root``
+#   at your raw data folder and ``file_pattern`` at your raw EEG files below it.
+# - Outputs land in ``derivatives/`` mirroring the folders below ``source_root``,
+#   as ``<file>@BasicPrep.fif`` plus a ``<file>@BasicPrep.done`` manifest.
 # - Save ``PIPELINE_YAML`` / ``DATASETS_YAML`` to ``pipeline.yml`` and
 #   ``datasets.yml`` for version-controlled, reproducible workflows.
 # - Run the same workflow from the CLI with commands such as
