@@ -1,3 +1,21 @@
+"""Node registry and built-in node discovery.
+
+Every module in this package is imported by :func:`discover` when
+``neurodags.nodes`` is first imported, i.e. on every CLI invocation and in every
+worker process. Node modules must therefore stay cheap to import:
+
+* Import heavy third-party packages (e.g. ``antropy``, ``neurokit2``, ``fooof``,
+  ``matplotlib``, ``mne.export``, ``mne_bids``) *inside* the node function or a
+  small helper it calls, never at module level. Base ``mne``, ``numpy``,
+  ``xarray`` and ``scipy`` are fine at module level.
+* When a node wraps functions of a heavy library, bind the function *name* and
+  resolve it with ``getattr`` at call time (see ``antropy.py``/``neurokit.py``).
+* If the dependency is missing, the node is still registered and raises an
+  actionable :class:`ImportError` when called.
+
+``tests/test_import_weight.py`` guards this convention.
+"""
+
 from __future__ import annotations
 
 import pkgutil

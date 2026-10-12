@@ -13,7 +13,7 @@ from neurodags.nodes.spectral import mne_spectrum, mne_spectrum_array
 
 
 def test_importing_spectral_emits_no_fooof_deprecation_warning():
-    # #16: the top-level `from fooof import FOOOF` must not surface fooof's
+    # #16: importing the spectral nodes must not surface fooof's
     # DeprecationWarning on import (it fires on every CLI invocation otherwise).
     # `-W always::DeprecationWarning` would show it if it were not suppressed.
     result = subprocess.run(

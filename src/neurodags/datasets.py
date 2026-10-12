@@ -14,7 +14,6 @@ from typing import Any
 
 import mne
 import numpy as np
-from mne.export import export_raw
 
 from neurodags.definitions import DatasetConfig, PathLike
 from neurodags.loaders import load_configuration
@@ -698,7 +697,10 @@ def save_dummy_vhdr(fpath: PathLike, dummy_args: dict[str, Any] | None = None) -
         )
         raw = raw.set_annotations(anns)
 
-    # Write BrainVision trio via public exporter
+    # Write BrainVision trio via public exporter. Imported here, not at module
+    # level: mne.export pulls in mne.viz/matplotlib (~1 s) for every CLI call (#30).
+    from mne.export import export_raw
+
     # Note: export_raw determines companion .vmrk/.eeg files from the .vhdr basename
     export_raw(fname=str(vhdr_path), raw=raw, fmt="brainvision", overwrite=True)
 
