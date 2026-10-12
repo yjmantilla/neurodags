@@ -61,3 +61,8 @@ docs/api/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local agent tooling (worktrees, local settings) and review panels.
+# Review panels live in the private neurodags-private repo.
+.claude/
+reviews/
