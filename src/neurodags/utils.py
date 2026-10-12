@@ -2,7 +2,8 @@ import math
 import ntpath
 import os
 import posixpath
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
@@ -64,9 +65,107 @@ def get_num_digits(n: int, method: Literal["safe", "fast"] = "safe") -> int:
     raise ValueError(f"Unknown method: {method!r}. Use 'safe' or 'fast'.")
 
 
-def get_path(path: str | dict[str, str], mount_point: str | None = None) -> str:
+_POSIX_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_WINDOWS_VAR_RE = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)%")
+
+
+def _referenced_env_vars(path: str) -> list[str]:
+    """Return the environment-variable names referenced in *path*, in order.
+
+    Recognises ``$NAME`` and ``${NAME}`` everywhere and ``%NAME%`` on Windows.
+    A ``$`` that is not followed by an identifier (``a$1``, ``foo$``) is not a
+    reference.
+    """
+    names = [braced or bare for braced, bare in _POSIX_VAR_RE.findall(path)]
+    if os.name == "nt":
+        names.extend(_WINDOWS_VAR_RE.findall(path))
+    return list(dict.fromkeys(names))
+
+
+def expand_path(path: str, *, field: str = "path") -> str:
+    """Expand ``~`` and environment variables in a dataset path, failing loudly.
+
+    The path is expanded with ``os.path.expandvars(os.path.expanduser(path))``.
+    ``$NAME`` and ``${NAME}`` are recognised (plus ``%NAME%`` on Windows). Unlike
+    :func:`os.path.expandvars`, a referenced variable that is unset **or empty**
+    raises instead of being left in place (or silently collapsing), so neurodags
+    never creates a directory literally named ``$NAME`` or ``~``.
+
+    Parameters
+    ----------
+    path : str
+        The path (or glob pattern) to expand.
+    field : str, default="path"
+        Name of the configuration field, used in error messages
+        (e.g. ``"derivatives_path"``).
+
+    Returns
+    -------
+    str
+        The expanded path.
+
+    Raises
+    ------
+    ValueError
+        If a referenced environment variable is unset or empty, or if a leading
+        ``~`` cannot be expanded.
+
+    Examples
+    --------
+    With ``SCRATCH=/scratch/me`` exported, ``expand_path("$SCRATCH/derivatives")``
+    returns ``'/scratch/me/derivatives'``. A ``$`` not followed by an identifier is
+    left alone:
+
+    >>> expand_path("data/a$1")
+    'data/a$1'
+    """
+    unset: list[str] = []
+    empty: list[str] = []
+    for name in _referenced_env_vars(path):
+        value = os.environ.get(name)
+        if value is None:
+            unset.append(name)
+        elif value == "":
+            empty.append(name)
+    if unset or empty:
+        problems = []
+        if unset:
+            problems.append("unset: " + ", ".join(unset))
+        if empty:
+            problems.append("empty: " + ", ".join(empty))
+        raise ValueError(
+            f"{field} {path!r} references environment variable(s) that are "
+            f"{'; '.join(problems)}. Set them before running, or write the path "
+            "literally. (neurodags refuses to create a directory named after an "
+            "unresolved variable.)"
+        )
+
+    expanded = os.path.expandvars(os.path.expanduser(path))
+    if expanded.startswith("~"):
+        raise ValueError(
+            f"{field} {path!r} expands to {expanded!r}, which still starts with '~' "
+            "(the home directory could not be resolved). Use an absolute path, or "
+            "'./~...' if you really mean a directory named '~'."
+        )
+    if expanded != path:
+        log.debug("expand_path: expanded", field=field, path=path, expanded=expanded)
+    return expanded
+
+
+def get_path(
+    path: str | dict[str, str],
+    mount_point: str | None = None,
+    *,
+    field: str = "path",
+) -> str:
     """
     Retrieve the resolved path based on a given mount_point key or return the path directly.
+
+    The selected string is passed through :func:`expand_path`, so ``~`` and
+    ``$VAR``/``${VAR}`` are expanded from the environment and an unset or empty
+    variable raises ``ValueError``. Only the value for the active mount point is
+    expanded: inactive entries may reference variables that exist only on other
+    machines.
 
     Parameters
     ----------
@@ -74,7 +173,10 @@ def get_path(path: str | dict[str, str], mount_point: str | None = None) -> str:
         A file path string or a dictionary mapping mount_point names to paths.
     mount_point : str, optional
         The mount_point key to use if ``path`` is a dictionary. If None or if ``path``
-        is not a dictionary, the function returns ``path`` directly.
+        is not a dictionary, the function returns ``path`` directly (a dict is
+        returned unchanged when ``mount_point`` is None).
+    field : str, default="path"
+        Name of the configuration field, used in error messages.
 
     Returns
     -------
@@ -85,6 +187,9 @@ def get_path(path: str | dict[str, str], mount_point: str | None = None) -> str:
     ------
     KeyError
         If ``mount_point`` is provided but not found in the dictionary ``path``.
+    ValueError
+        If the selected path references an unset/empty environment variable or a
+        ``~`` that cannot be expanded.
 
     Examples
     --------
@@ -99,10 +204,6 @@ def get_path(path: str | dict[str, str], mount_point: str | None = None) -> str:
     if isinstance(path, dict) and mount_point is not None:
         try:
             resolved = path[mount_point]
-            log.debug(
-                "get_path: resolved via mount_point", mount_point=mount_point, resolved=resolved
-            )
-            return resolved
         except KeyError:
             log.debug(
                 "get_path: missing mount_point key",
@@ -110,8 +211,64 @@ def get_path(path: str | dict[str, str], mount_point: str | None = None) -> str:
                 available=list(path.keys()),
             )
             raise
+        log.debug("get_path: resolved via mount_point", mount_point=mount_point, resolved=resolved)
+        if isinstance(resolved, str):
+            resolved = expand_path(resolved, field=field)
+        return resolved
     log.debug("get_path: returning direct path", path=path)
+    if isinstance(path, str):
+        return expand_path(path, field=field)
     return path
+
+
+def resolve_dataset_paths(
+    datasets: Mapping[str, Any],
+    mount_point: str | None = None,
+) -> dict[str, dict[str, str | None]]:
+    """Resolve and validate the path fields of every active dataset.
+
+    Expands ``file_pattern``, ``derivatives_path`` and ``exclude_pattern`` for the
+    active mount point of each non-skipped dataset (see :func:`expand_path`).
+    Intended as a preflight check before anything is written to disk, so that an
+    unresolved ``$VAR`` fails loudly instead of creating a literal ``$VAR``
+    directory.
+
+    Parameters
+    ----------
+    datasets : mapping of str to DatasetConfig
+        Dataset configurations (as returned by
+        :func:`neurodags.datasets.get_datasets_and_mount_point_from_pipeline_configuration`).
+    mount_point : str, optional
+        The active mount point.
+
+    Returns
+    -------
+    dict
+        ``{dataset_name: {"file_pattern": ..., "derivatives_path": ...,
+        "exclude_pattern": ...}}`` with resolved values (``None`` when unset).
+        Skipped datasets are omitted.
+
+    Raises
+    ------
+    ValueError
+        If any active path field references an unset/empty environment variable.
+    KeyError
+        If a mount-point map lacks the active mount point.
+    """
+    resolved: dict[str, dict[str, str | None]] = {}
+    for name, cfg in datasets.items():
+        if getattr(cfg, "skip", False):
+            continue
+        entry: dict[str, str | None] = {}
+        for attr in ("file_pattern", "derivatives_path", "exclude_pattern"):
+            value = getattr(cfg, attr, None)
+            entry[attr] = (
+                get_path(value, mount_point=mount_point, field=f"datasets.{name}.{attr}")
+                if value
+                else None
+            )
+        resolved[name] = entry
+    return resolved
 
 
 def _resolve_eval_strings(value: Any) -> Any:

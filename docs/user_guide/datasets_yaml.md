@@ -37,6 +37,9 @@ file_pattern:
 
 The active mount point is set by `mount_point` in `pipeline.yml`.
 
+See "Environment variables and `~`" below for using
+`$SCRATCH`-style paths.
+
 ### `derivatives_path`
 
 Root directory where derivative files are written. Mirrors the source file's subdirectory structure under this root:
@@ -49,7 +52,37 @@ derivatives_path:
 
 ### `exclude_pattern`
 
-Optional glob to exclude files matching the pattern from processing.
+Optional glob to exclude files matching the pattern from processing. It is
+expanded like `file_pattern` (see below).
+
+### Environment variables and `~`
+
+`file_pattern`, `derivatives_path` and `exclude_pattern` (and the `datasets:`
+reference in `pipeline.yml`) expand a leading `~` and environment variables
+written as `$NAME` or `${NAME}` (`%NAME%` is also accepted on Windows):
+
+```yaml
+derivatives_path:
+  local: ~/neurodags-out
+  hpc: $SCRATCH/myproject/derivatives
+```
+
+- Only the value for the **active** mount point is expanded. Other entries may
+  reference variables that exist only on other machines (e.g. `$SCRATCH` on a
+  laptop).
+- A referenced variable that is **unset or empty is an error**, raised before
+  anything is written. neurodags never creates a directory literally named
+  `$SCRATCH` or `~`. `neurodags validate` reports the resolved paths (or the
+  error) without running anything.
+- A `$` not followed by a variable name (`a$1`, `foo$`) is kept literally.
+  There is no escape syntax for a literal `$NAME`.
+- Relative paths are still resolved against the current working directory, as
+  before; expansion does not change that.
+- Skipped datasets (`skip: True`) are not checked.
+
+This is unrelated to `vars` (below): `vars` are dataset-level values substituted
+into pipeline node args (`$condition_name`), not environment variables, and node
+args are never expanded from the environment.
 
 ### `drop_split_continuations`
 
