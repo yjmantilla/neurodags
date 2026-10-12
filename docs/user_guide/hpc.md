@@ -2,7 +2,63 @@
 
 NeuroDAGs processes files independently — each file is self-contained. This maps naturally onto SLURM array jobs: one array task per file, all tasks running in parallel across nodes.
 
-The key parameter is `only_index`, which restricts a run to specific file indices from the full file list. Combined with `$SLURM_ARRAY_TASK_ID`, each array task processes exactly one file.
+The key parameter is `only_index`, which restricts a run to specific file indices from the full file list. Combined with `$SLURM_ARRAY_TASK_ID`, each array task processes exactly one file. An index that does not exist (or is negative) is an error, never silently ignored.
+
+---
+
+## File indices and frozen input lists
+
+Every invocation enumerates its inputs **once** and numbers them from `0`:
+
+1. per dataset: glob `file_pattern`, apply `exclude_pattern`, drop split-FIF continuations,
+   remove duplicates, check that every file lies below the dataset's `source_root` (a file
+   outside it is a configuration error naming the file), then **sort by the path relative to
+   `source_root`** (`/` separators, plain code-point order);
+2. keep the first `max_files_per_dataset` files of each dataset (after sorting, so a limited
+   run is a prefix of the full run);
+3. concatenate the datasets in YAML order, skipping `skip: true` ones; the index is the
+   position in that list.
+
+The order is code-point order, not "natural" order: `sub-10` sorts **before** `sub-2`, and
+upper-case letters before lower-case ones. Use zero-padded labels (`sub-02`, `sub-10`) if you
+want the indices to follow the subject numbers.
+
+Discovery depends on what is on disk, so adding or removing a file shifts the indices of the
+files after it. For array jobs, **freeze the list once** and give it to every task:
+
+```bash
+neurodags inputs pipeline.yml -o inputs.tsv                 # discover once, write the list
+N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv) # number of entries
+sbatch --array=0-$((N - 1)) run_array.sh                     # workers pass --inputs / inputs=
+```
+
+`inputs.tsv` is a small text file: the header `# neurodags-inputs naming_version=1`, then
+one `index<TAB>dataset<TAB>rel` line per input, where `rel` is the path relative to the
+dataset's `source_root` with `/` separators:
+
+```text
+# neurodags-inputs naming_version=1
+0	study	sub-01/eeg/sub-01_task-rest_eeg.vhdr
+1	study	sub-02/eeg/sub-02_task-rest_eeg.vhdr
+```
+
+`run`, `dry-run`, `status`, `count-inputs` and `dataframe` accept `--inputs inputs.tsv` (a
+path relative to the current working directory); the Python API takes `inputs=`
+(`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`). With a list:
+
+- the list **replaces discovery**: indices come from the list, and each path is the dataset's
+  `source_root` on the active mount joined with `rel`. Because only `rel` is stored, the same
+  list works on your laptop and on the cluster (`mount_point: local` vs `hpc`);
+- files added on disk later are **not processed**; their number is logged, and `status`
+  prints it ("N file(s) on disk are not in the input list");
+- listed files that disappeared keep their index and are reported as **`missing-source`**:
+  `status` shows them, `run` skips them with a per-file error record, and `--only-index` on
+  such an index fails explicitly;
+- the list is validated before anything runs: header and version, dataset names that exist
+  (and are not `skip: true`) in the configuration, no duplicate indices, indices contiguous
+  from `0`;
+- `--max-files-per-dataset` cannot be combined with `--inputs` (the list already fixes the
+  inputs); write a pilot list instead.
 
 ---
 
@@ -23,12 +79,18 @@ neurodags slurm-script pipeline.yml --pattern chained --output submit_pipeline.s
 
 The `chained` pattern writes two files: `submit_pipeline.sh` (the submission script) and `run_one_derivative.sh` (the worker). Edit the `#SBATCH` resource lines before submitting.
 
+All templates use the frozen-list flow: generate `inputs.tsv` once with `neurodags inputs`,
+size the array from it, and the workers read it (`inputs=os.path.abspath("inputs.tsv")`, so
+submit from the directory that holds `inputs.tsv`). Keep `inputs.tsv` until every array of
+the run, including resubmissions, has finished.
+
 ### Counting source files
 
-`neurodags count-inputs` prints the number of input entries the pipeline will process, i.e. the size of the index range `--only-index` accepts (`0` to `N-1`). A file listed under two dataset entries counts twice, because it has two indices. Useful in submission scripts:
+`neurodags count-inputs` prints the number of input entries the pipeline will process, i.e. the size of the index range `--only-index` accepts (`0` to `N-1`). A file listed under two dataset entries counts twice, because it has two indices. With `--inputs`, it prints the number of entries in the list (`missing-source` ones included, so the array covers every index of the list). Useful in submission scripts:
 
 ```bash
-N=$(neurodags count-inputs pipeline.yml)
+neurodags inputs pipeline.yml -o inputs.tsv
+N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv)
 sbatch --array=0-$((N - 1)) run_array.sh
 ```
 
@@ -67,7 +129,8 @@ print(f\"estimated total files: {d['grand_total']['total']}\")
 Each task runs all derivatives in dependency order for a single file.
 
 ```bash
-N=$(neurodags count-inputs pipeline.yml)
+neurodags inputs pipeline.yml -o inputs.tsv
+N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv)
 sbatch --array=0-$((N - 1)) run_array.sh
 ```
 
@@ -93,6 +156,7 @@ config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
+    inputs=os.path.abspath("inputs.tsv"),   # frozen input list
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
     skip_errors=True,
@@ -109,7 +173,8 @@ EOF
 Use this when derivatives are independent (no inter-derivative dependencies) and you want maximum parallelism.
 
 ```bash
-N=$(neurodags count-inputs pipeline.yml)
+neurodags inputs pipeline.yml -o inputs.tsv
+N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv)
 N_DERIVATIVES=3
 TOTAL=$(( N * N_DERIVATIVES ))
 sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
@@ -145,6 +210,7 @@ config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
+    inputs=os.path.abspath("inputs.tsv"),   # frozen input list
     derivatives=["$DERIVATIVE"],
     only_index=$FILE_INDEX,
     raise_on_error=True,
@@ -164,7 +230,8 @@ Run derivatives one at a time in dependency order, with all files parallelised w
 #!/bin/bash
 # submit_pipeline.sh
 
-N=$(neurodags count-inputs pipeline.yml)
+neurodags inputs pipeline.yml -o inputs.tsv
+N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv)
 ARRAY="0-$((N - 1))"
 
 JOB1=$(sbatch --parsable --array=$ARRAY \
@@ -202,6 +269,7 @@ config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
+    inputs=os.path.abspath("inputs.tsv"),   # frozen input list
     derivatives=["$DERIVATIVE"],
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
@@ -216,16 +284,17 @@ EOF
 
 `neurodags status` reports the global **file index** of every missing or errored file — the
 same index the per-file and chained arrays use as `SLURM_ARRAY_TASK_ID` (see
-{doc}`inspection`). `--format indices` prints just those indices, space-separated:
+{doc}`inspection`). `--format indices` prints just those indices, space-separated. Pass the
+**same input list** the array used, so the indices refer to the same files:
 
 ```bash
 # --exit-zero: exit 0 even when something is missing/errored, but still fail on a
 # broken config, so `set -e` keeps protecting you
-IDX=$(neurodags status pipeline.yml --format indices --exit-zero)
+IDX=$(neurodags status pipeline.yml --inputs inputs.tsv --format indices --exit-zero)
 [ -z "$IDX" ] && { echo "nothing to resubmit"; exit 0; }
 
 # run them locally / in one job ...
-neurodags run pipeline.yml --only-index $IDX
+neurodags run pipeline.yml --inputs inputs.tsv --only-index $IDX
 
 # ... or as a sparse per-file array (sbatch wants a comma-separated list)
 sbatch --array=$(echo "$IDX" | tr ' ' ',') retry_array.sh
@@ -271,7 +340,8 @@ Things to keep in mind:
   N_DERIVATIVES=${#DERIVATIVES[@]}
   TASKS=()
   for D in "${!DERIVATIVES[@]}"; do
-    for F in $(neurodags status pipeline.yml --derivative "${DERIVATIVES[$D]}" \
+    for F in $(neurodags status pipeline.yml --inputs inputs.tsv \
+                 --derivative "${DERIVATIVES[$D]}" \
                  --format indices --exit-zero); do
       TASKS+=($(( F * N_DERIVATIVES + D )))
     done
@@ -279,9 +349,11 @@ Things to keep in mind:
   [ ${#TASKS[@]} -gt 0 ] && sbatch --array=$(IFS=,; echo "${TASKS[*]}") run_array_per_deriv.sh
   ```
 
-- **Indices are positions, not IDs.** They are stable only while the dataset configuration
-  and the set of input files stay the same — compute the list right before resubmitting, on
-  the same filesystem/mount point the jobs will use.
+- **Indices are positions, not IDs.** Without `--inputs` they are stable only while the
+  dataset configuration and the set of input files stay the same. With a frozen list they
+  stay fixed for as long as you keep the list, on every mount point. `--format indices` never
+  lists `missing-source` entries (listed files that no longer exist cannot be recomputed);
+  `--format json` reports them as `missing_source_indices`.
 
 ---
 
@@ -312,4 +384,5 @@ run_pipeline(config, only_index=index, skip_errors=True)
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
 | Partial reruns | Caching is automatic — resubmit the full array, cached files are skipped |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
-| Array size limit | Most clusters cap at 1000–10000 tasks; split `--array` into index-range batches (e.g. `0-999`, `1000-1999`). Each task ID maps directly to a file index, so range batching is safe and idempotent — cached files are skipped automatically on resubmit |
+| Array size limit | Most clusters cap at 1000–10000 tasks; split `--array` into index-range batches (e.g. `0-999`, `1000-1999`). With a frozen `inputs.tsv`, each task ID maps to the same file in every batch, so range batching is safe and idempotent — cached files are skipped automatically on resubmit |
+| Index order | Files are sorted by their path below `source_root` in code-point order (`sub-10` before `sub-2`); zero-pad labels (`sub-02`) for a natural order |

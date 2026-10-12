@@ -94,8 +94,9 @@ neurodags run pipeline.yml --n-jobs 4 --joblib-backend loky --joblib-prefer proc
 **Subset / error control:**
 
 ```bash
-neurodags run pipeline.yml --max-files-per-dataset 10
-neurodags run pipeline.yml --only-index 0 5 12   # process only files at these indices
+neurodags run pipeline.yml --max-files-per-dataset 10   # first 10 files (sorted) per dataset
+neurodags run pipeline.yml --only-index 0 5 12   # process only files at these indices (unknown index = error)
+neurodags run pipeline.yml --inputs inputs.tsv   # use a frozen input list instead of discovery
 neurodags run pipeline.yml --skip-errors          # skip files that already have a .error marker
 neurodags run pipeline.yml --raise-on-error       # stop immediately on first failure
 ```
@@ -162,6 +163,7 @@ neurodags status pipeline.yml --n-jobs 4             # parallelize the underlyin
 neurodags status pipeline.yml --format json          # machine-readable JSON output
 neurodags status pipeline.yml --format json --include-files   # + per-file records
 neurodags status pipeline.yml --format indices       # missing/errored indices for --only-index
+neurodags status pipeline.yml --inputs inputs.tsv    # check against a frozen input list
 ```
 
 Example output:
@@ -197,14 +199,44 @@ neurodags status pipeline.yml --format indices --exit-zero # works with every --
 
 See {doc}`inspection` for status definitions and `.error` marker behaviour.
 
-## Source File Count
+## File Indices and Input Lists
 
-Print the number of unique source (input) files the pipeline will process. Useful for sanity-checking datasets before a long run. Note: this counts input files, not output files — one input file may produce multiple output files depending on the derivatives.
+Every command enumerates its inputs once: per dataset, the discovered files are sorted by their
+path relative to `source_root` (`/` separators, code-point order: `sub-10` sorts before `sub-2`,
+so zero-pad labels such as `sub-02` for a natural order), `--max-files-per-dataset` keeps the
+first N, and the datasets are concatenated in YAML order (`skip: true` ones left out). The
+position in that list is the file **index** used by `--only-index`, `status` and the SLURM
+array templates. A negative or unknown `--only-index` value is an error (exit code `2`).
+
+`neurodags inputs` freezes that list in a file, so the indices cannot change while you work
+with it (new files on disk are ignored):
 
 ```bash
-neurodags count-inputs pipeline.yml                          # number of input entries (size of the --only-index range)
-neurodags count-inputs pipeline.yml --derivative CleanedEEG  # count for a specific derivative
+neurodags inputs pipeline.yml -o inputs.tsv        # write the list (omit -o to print it)
+neurodags inputs pipeline.yml -d other.yml -o inputs.tsv
 ```
+
+The file starts with `# neurodags-inputs naming_version=1`, followed by one
+`index<TAB>dataset<TAB>rel` line per input (`rel`: path relative to the dataset's
+`source_root`, `/` separators), so the same list works on every mount point.
+
+`run`, `dry-run`, `status`, `count-inputs` and `dataframe` accept `--inputs FILE` (relative to
+the current working directory; Python API: `inputs=`). The list replaces discovery; files on
+disk that it does not contain are reported and skipped, and listed files that no longer exist
+are reported as `missing-source` at their index (`status` shows them, `run` skips them,
+`--only-index` on them is an error). `--inputs` cannot be combined with
+`--max-files-per-dataset`. See {doc}`hpc` for the array-job workflow.
+
+## Source File Count
+
+Print the number of input entries, i.e. the size of the `--only-index` range (`0` to `N-1`). Useful for sanity-checking datasets before a long run and for sizing SLURM arrays. Note: this counts input entries, not output files — one input file may produce multiple output files depending on the derivatives, and a file listed under two dataset entries counts twice.
+
+```bash
+neurodags count-inputs pipeline.yml                        # number of input entries (discovery)
+neurodags count-inputs pipeline.yml --inputs inputs.tsv    # number of entries in a frozen list
+```
+
+`--derivative` is still accepted but does not change the count.
 
 ## Dataframe Assembly
 

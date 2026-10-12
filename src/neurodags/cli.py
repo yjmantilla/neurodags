@@ -12,6 +12,15 @@ from pathlib import Path
 import pandas as pd
 
 from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.iterators import (
+    InputEnumeration,
+    InputsError,
+    InputsFileError,
+    discover_inputs,
+    enumerate_inputs,
+    format_inputs,
+    write_inputs_file,
+)
 from neurodags.loaders import ConfigVersionError, load_pipeline_configuration
 from neurodags.loggers import configure_logging
 from neurodags.mermaid import (
@@ -30,6 +39,7 @@ from neurodags.utils import (
     check_derivative_names,
     expand_path,
     inspect_dataset_paths,
+    resolve_dataset_paths,
 )
 
 # Help text shared by every subcommand that takes -d/--datasets (see #43).
@@ -37,6 +47,14 @@ DATASETS_HELP = (
     "Optional path to a datasets YAML that overrides the pipeline's 'datasets' key. "
     "Resolved relative to the current working directory (~ and $VARS are expanded). "
     "Relative paths inside that YAML are resolved against the YAML's own directory."
+)
+
+# Help text shared by every subcommand that takes --inputs (spec §8.6).
+INPUTS_HELP = (
+    "Frozen input list written by 'neurodags inputs' (path relative to the current working "
+    "directory). It replaces discovery: indices come from the list, files added on disk "
+    "later are ignored, and listed files that no longer exist are reported as "
+    "missing-source. Cannot be combined with --max-files-per-dataset."
 )
 
 
@@ -106,6 +124,38 @@ def resolve_cli_datasets_path(datasets: str | None) -> str | None:
     )
 
 
+def resolve_cli_inputs_path(inputs: str | None) -> str | None:
+    """Resolve a CLI ``--inputs`` path to an absolute path (cwd-relative, ``~``/``$VARS``).
+
+    Raises
+    ------
+    InputsFileError
+        If a referenced environment variable is unset/empty or the file does not exist.
+    """
+    if inputs is None:
+        return None
+    try:
+        expanded = expand_path(inputs, field="--inputs")
+    except ValueError as exc:
+        raise InputsFileError(str(exc)) from exc
+    path = Path(os.path.abspath(expanded))
+    if not path.is_file():
+        raise InputsFileError(
+            f"input list '{inputs}' not found (tried {path}). "
+            "CLI paths are relative to the current working directory."
+        )
+    return str(path)
+
+
+def _cli_enumeration(args: argparse.Namespace) -> InputEnumeration:
+    """Enumerate the inputs once for a CLI invocation (discovery or ``--inputs``)."""
+    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+        args.config, datasets_input=args.datasets
+    )
+    resolve_dataset_paths(datasets, mount_point)
+    return enumerate_inputs(datasets, mount_point, inputs=getattr(args, "inputs", None))
+
+
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
     if derivatives:
         return derivatives
@@ -141,8 +191,10 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         nargs="*",
         default=None,
-        help="Restrict processing to these file indices.",
+        help="Restrict processing to these file indices (unknown or negative indices are an "
+        "error).",
     )
+    parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
     parser.add_argument(
         "--raise-on-error",
         action="store_true",
@@ -178,8 +230,9 @@ def _slurm_per_file(config_path: str, derivatives: list[str]) -> str:
 # per-file: one array task per file — all derivatives run in dependency order per task.
 # Derivatives: {deriv_names}
 #
-# Submit:
-#   N=$(neurodags count-inputs {config_path})
+# Submit (freeze the input list once; every task reads the same list, see the HPC guide):
+#   neurodags inputs {config_path} -o inputs.tsv
+#   N=$(neurodags count-inputs {config_path} --inputs inputs.tsv)
 #   sbatch --array=0-$((N - 1)) run_array.sh
 #
 #SBATCH --job-name=neurodags
@@ -201,6 +254,7 @@ config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),
+    inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
     skip_errors=True,
@@ -217,8 +271,9 @@ def _slurm_flat(config_path: str, derivatives: list[str]) -> str:
 # flat: one array task per file x derivative (maximum parallelism).
 # WARNING: use only when derivatives are independent (no inter-derivative dependencies).
 #
-# Submit:
-#   N=$(neurodags count-inputs {config_path})
+# Submit (freeze the input list once; every task reads the same list, see the HPC guide):
+#   neurodags inputs {config_path} -o inputs.tsv
+#   N=$(neurodags count-inputs {config_path} --inputs inputs.tsv)
 #   TOTAL=$(( N * {n} ))
 #   sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
 #
@@ -247,6 +302,7 @@ config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),
+    inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
     derivatives=["$DERIVATIVE"],
     only_index=$FILE_INDEX,
     raise_on_error=True,
@@ -264,7 +320,9 @@ def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
         "#",
         "# Usage: bash submit_pipeline.sh",
         "",
-        f"N=$(neurodags count-inputs {config_path})",
+        "# Freeze the input list once; every task reads the same list (see the HPC guide).",
+        f"neurodags inputs {config_path} -o inputs.tsv",
+        f"N=$(neurodags count-inputs {config_path} --inputs inputs.tsv)",
         'ARRAY="0-$((N - 1))"',
         "",
     ]
@@ -310,6 +368,7 @@ config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),
+    inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
     derivatives=["$DERIVATIVE"],
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
@@ -378,13 +437,15 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
         plan = row.get("plan", [])
         idx = _status_scalar(row.get("index"))
         dataset = _status_scalar(row.get("dataset"))
+        # Listed in a frozen input list (--inputs) but gone from disk (spec §8.6).
+        missing_source = _status_scalar(row.get("source_status")) == "missing-source"
         rows.append(
             {
                 "index": None if idx is None else int(idx),
                 "dataset": None if dataset is None else str(dataset),
                 "derivative": row.get("derivative", "unknown"),
                 "file_path": row.get("file_path", ""),
-                "status": _status_classify(plan),
+                "status": "missing-source" if missing_source else _status_classify(plan),
                 "error_path": _status_error_path(plan),
             }
         )
@@ -407,19 +468,30 @@ def _cmd_status(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
 
+    # With --inputs, enumerate here (once, shared with the dry run) to also report the
+    # files on disk that are not in the list; otherwise run_pipeline enumerates once.
+    enumeration = _cli_enumeration(args) if getattr(args, "inputs", None) else None
     result = run_pipeline(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
         derivatives=derivatives,
         dry_run=True,
         n_jobs=args.n_jobs,
+        enumeration=enumeration,
     )
 
     fmt = getattr(args, "format", "table")
     include_files = getattr(args, "include_files", False)
     rows = [] if result is None or result.empty else _status_rows(result)
 
-    grand = {"total": 0, "done": 0, "skipped": 0, "missing": 0, "errored": 0}
+    grand = {
+        "total": 0,
+        "done": 0,
+        "skipped": 0,
+        "missing": 0,
+        "errored": 0,
+        "missing-source": 0,
+    }
     per_deriv: dict[str, dict[str, int]] = {}
     all_derivs = sorted({r["derivative"] for r in rows})
     total_files = len({r["file_path"] for r in rows})
@@ -431,8 +503,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
         for k, v in per_deriv[deriv].items():
             grand[k] += v
 
-    complete = grand["missing"] == 0 and grand["errored"] == 0
+    complete = grand["missing"] == 0 and grand["errored"] == 0 and grand["missing-source"] == 0
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
+    missing_source_indices = _status_indices(rows, ("missing-source",))
+    n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
+    inputs_file = enumeration.inputs_file if enumeration is not None else None
 
     if fmt == "indices":
         if args.list_missing and not args.list_errors:
@@ -453,6 +528,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "complete": complete,
             "missing_indices": _status_indices(rows, ("missing",)),
             "errored_indices": _status_indices(rows, ("errored",)),
+            "inputs": inputs_file,
+            "missing_source_indices": missing_source_indices,
+            "not_in_list": n_not_in_list,
         }
         if include_files:
             payload["files"] = [
@@ -469,8 +547,22 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return exit_code
 
+    def _print_input_list_report() -> None:
+        if n_not_in_list:
+            print(
+                f"\n{n_not_in_list} file(s) on disk are not in the input list "
+                f"{inputs_file} and were ignored."
+            )
+        if missing_source_indices:
+            print(
+                f"\n{len(missing_source_indices)} listed input(s) no longer exist on disk "
+                f"(missing-source), not processed: indices "
+                f"{' '.join(map(str, missing_source_indices))}"
+            )
+
     if not rows:
         print("No files found.")
+        _print_input_list_report()
         return 0
 
     # --- table output ---
@@ -482,6 +574,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     sep = "─" * len(header)
 
     print(f"config: {args.config}")
+    if inputs_file:
+        print(f"inputs: {inputs_file}")
     print(f"files:  {total_files}")
     print()
     print(header)
@@ -506,6 +600,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "'skipped' means a .skip marker exists — the derivative was intentionally not "
         "computed for that source file (e.g. condition absent from the recording)."
     )
+    _print_input_list_report()
 
     if grand["errored"]:
         print(f"\n{grand['errored']} error(s) found.", end="")
@@ -636,8 +731,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         nargs="*",
         default=None,
-        help="Restrict processing to these file indices.",
+        help="Restrict processing to these file indices (unknown or negative indices are an "
+        "error).",
     )
+    dataframe_parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
     dataframe_parser.add_argument(
         "--format",
         choices=("wide", "long"),
@@ -703,9 +800,28 @@ def build_parser() -> argparse.ArgumentParser:
     view_parser = subparsers.add_parser("view", help="Launch the Dash NC/FIF explorer.")
     view_parser.add_argument("path", help="Path to a .nc or .fif file.")
 
+    inputs_parser = subparsers.add_parser(
+        "inputs",
+        help="Write the frozen input list (index, dataset, path below source_root).",
+    )
+    inputs_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
+    inputs_parser.add_argument(
+        "-d",
+        "--datasets",
+        default=None,
+        help=DATASETS_HELP,
+    )
+    inputs_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="FILE",
+        help="Output path (relative to the current working directory). Omit to print to stdout.",
+    )
+
     count_parser = subparsers.add_parser(
         "count-inputs",
-        help="Print the number of unique source (input) files the pipeline will process.",
+        help="Print the number of input entries (the size of the --only-index range).",
     )
     count_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
     count_parser.add_argument(
@@ -719,8 +835,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         dest="derivatives",
         default=None,
-        help="Derivative to use for counting. Repeat to add more. Defaults to first in DerivativeList.",
+        help="Accepted for compatibility; the count does not depend on the derivative.",
     )
+    count_parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
 
     status_parser = subparsers.add_parser(
         "status",
@@ -740,6 +857,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Derivative to check. Repeat to add more. Defaults to all in DerivativeList.",
     )
+    status_parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
     status_parser.add_argument(
         "--list-errors",
         action="store_true",
@@ -957,6 +1075,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
         n_jobs=args.n_jobs,
         joblib_backend=args.joblib_backend,
         joblib_prefer=args.joblib_prefer,
+        inputs=args.inputs,
     )
 
     if dry_run and result is not None:
@@ -976,6 +1095,7 @@ def _cmd_dataframe(args: argparse.Namespace) -> int:
         preserve_complex_values=args.preserve_complex_values,
         raise_on_error=args.raise_on_error,
         n_jobs=args.n_jobs,
+        inputs=args.inputs,
     )
     if args.output:
         output_path = _save_dataframe(df, args.output, "derivative_dataframe.csv")
@@ -1019,25 +1139,26 @@ def _cmd_dag(args: argparse.Namespace) -> int:
 
 
 def _cmd_count(args: argparse.Namespace) -> int:
-    config = _load_pipeline_config(args.config)
-    derivatives = args.derivatives or (list(config.get("DerivativeList") or [])[:1])
-    if not derivatives:
-        raise ValueError("No derivatives found. Pass --derivative or define DerivativeList.")
-    result = run_pipeline(
-        pipeline_configuration=args.config,
-        datasets_configuration=args.datasets,
-        derivatives=derivatives,
-        dry_run=True,
+    _load_pipeline_config(args.config)
+    # Number of index entries, the unit --only-index selects (the same file listed under
+    # two dataset entries has two indices). With --inputs: the number of listed entries,
+    # missing-source ones included, so the array covers every index of the list.
+    print(len(_cli_enumeration(args).entries))
+    return 0
+
+
+def _cmd_inputs(args: argparse.Namespace) -> int:
+    _load_pipeline_config(args.config)
+    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+        args.config, datasets_input=args.datasets
     )
-    if result is None or result.empty:
-        count = 0
-    elif "index" in result.columns:
-        # Count (dataset, file) entries, the unit --only-index selects: the same file listed
-        # under two dataset entries has two indices and needs two array tasks.
-        count = int(result["index"].nunique())
+    resolve_dataset_paths(datasets, mount_point)
+    enumeration = discover_inputs(datasets, mount_point)
+    if args.output:
+        path = write_inputs_file(enumeration, args.output)
+        print(f"wrote {len(enumeration.entries)} input(s) to {path}")
     else:
-        count = int(result["file_path"].nunique())
-    print(count)
+        sys.stdout.write(format_inputs(enumeration.entries))
     return 0
 
 
@@ -1104,8 +1225,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     try:
+        if getattr(args, "inputs", None) is not None:
+            args.inputs = resolve_cli_inputs_path(args.inputs)
         return _dispatch(parser, args)
-    except (ConfigVersionError, DatasetConfigError) as exc:
+    except (ConfigVersionError, DatasetConfigError, InputsError) as exc:
         # Configuration errors are user errors: one clean message, no traceback.
         print(f"neurodags: error: {exc}", file=sys.stderr)
         return 2
@@ -1128,6 +1251,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return _cmd_view(args)
     if args.command == "count-inputs":
         return _cmd_count(args)
+    if args.command == "inputs":
+        return _cmd_inputs(args)
     if args.command == "status":
         return _cmd_status(args)
     if args.command == "slurm-script":
