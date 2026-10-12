@@ -267,7 +267,7 @@ How the `-d` path is resolved (`validate`, `run`, `dry-run`, `dataframe`, `count
 
 1. `~` and `$VARS` are expanded, exactly as for the `datasets:` key (an unset or empty variable is an error).
 2. A relative path is resolved against the **current working directory** — the directory you run `neurodags` from, like every other CLI path.
-3. **Deprecated fallback:** if the file does not exist there but does exist relative to the pipeline YAML's directory (the behaviour up to 0.3.4), that file is used and a `FutureWarning` is printed with the cwd-relative path to pass instead. This fallback will be removed in a future release.
+3. **Deprecated fallback:** if the file does not exist there but does exist relative to the pipeline YAML's directory (the behaviour up to 0.3.4), that file is used and one warning line is printed to stderr with the cwd-relative path to pass instead, e.g. `neurodags: warning: -d 'datasets_alt.yml' was found relative to the pipeline YAML; this lookup is deprecated and will be removed in a future release. Pass '-d pipelines/x/datasets_alt.yml' instead.` This fallback will be removed in a future release.
 4. If neither exists, the command stops with a short error naming both paths it tried and exits with code `2` (no traceback).
 
 The `datasets:` key written *inside* `pipeline.yml` is unaffected: it stays relative to the pipeline YAML.

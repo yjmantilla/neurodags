@@ -25,7 +25,8 @@
   **Behaviour change:** a relative `-d` path that exists relative to the working directory is
   now used even if a different file with that name exists next to the pipeline YAML. For
   backward compatibility, a path that only exists relative to the pipeline YAML is still used,
-  with a `FutureWarning` showing the cwd-relative path to pass instead; this YAML-relative
+  with a one-line `neurodags: warning: ...` on stderr showing the cwd-relative path to pass
+  instead (a `FutureWarning` from `neurodags.cli.resolve_cli_datasets_path`); this YAML-relative
   fallback will be removed in a future release. The Python API is unchanged: a relative
   `datasets_configuration` string passed to `run_pipeline` / `iterate_derivative_pipeline` /
   `build_derivative_dataframe` is still resolved relative to the pipeline YAML (now

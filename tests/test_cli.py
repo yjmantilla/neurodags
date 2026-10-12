@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from neurodags.cli import main
+from neurodags.cli import main, resolve_cli_datasets_path
 
 
 def test_importing_cli_keeps_stdout_clean():
@@ -968,13 +968,39 @@ def test_datasets_path_expands_env_vars(tmp_path, monkeypatch, capsys):
 def test_datasets_path_yaml_relative_fallback_warns(tmp_path, monkeypatch, capsys):
     _write_nested_pipeline(tmp_path)
     monkeypatch.chdir(tmp_path)
-    with pytest.warns(FutureWarning, match="deprecated") as record:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)  # must not leak as a Python warning
         rc = main(["validate", "p/x/pipeline.yml", "-d", "alt.yml"])
+    captured = capsys.readouterr()
     assert rc == 0
-    assert "datasets: alt" in capsys.readouterr().out
-    msg = str(record[0].message)
-    assert "future release" in msg
-    assert f"-d {Path('p') / 'x' / 'alt.yml'}" in msg  # the cwd-relative path to use
+    assert "datasets: alt" in captured.out
+    suggestion = Path("p") / "x" / "alt.yml"
+    assert captured.err == (
+        "neurodags: warning: -d 'alt.yml' was found relative to the pipeline YAML; this "
+        "lookup is deprecated and will be removed in a future release. "
+        f"Pass '-d {suggestion}' instead.\n"
+    )
+
+
+def test_resolve_cli_datasets_path_emits_future_warning(tmp_path, monkeypatch):
+    _, alt = _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.warns(FutureWarning, match="deprecated"):
+        assert resolve_cli_datasets_path("alt.yml", "p/x/pipeline.yml") == str(alt)
+
+
+def test_datasets_path_fallback_subprocess_prints_one_clean_line(tmp_path):
+    _write_nested_pipeline(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "neurodags.cli", "validate", "p/x/pipeline.yml", "-d", "alt.yml"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("neurodags: warning: -d 'alt.yml'")
 
 
 def test_datasets_path_cwd_wins_over_yaml_relative(tmp_path, monkeypatch):

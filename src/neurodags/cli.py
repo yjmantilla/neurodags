@@ -69,8 +69,9 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
 
     For backward compatibility, a path that does not exist relative to the
     current working directory but does exist relative to the pipeline YAML's
-    directory (the behaviour up to 0.3.4) is still used, with a ``FutureWarning``;
-    that fallback will be removed in a future release.
+    directory (the behaviour up to 0.3.4) is still used, with a ``FutureWarning``
+    (the CLI prints it as one ``neurodags: warning: ...`` line); that fallback will be
+    removed in a future release.
 
     Parameters
     ----------
@@ -110,10 +111,8 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
             except ValueError:  # different drive on Windows
                 suggestion = str(yaml_path)
             warnings.warn(
-                f"-d/--datasets '{datasets}' was not found relative to the current working "
-                f"directory and was resolved relative to the pipeline YAML instead "
-                f"({yaml_path}). This YAML-relative lookup is deprecated and will be removed "
-                f"in a future release: CLI paths are relative to where you run the command. "
+                f"-d '{datasets}' was found relative to the pipeline YAML; this lookup is "
+                f"deprecated and will be removed in a future release. "
                 f"Pass '-d {suggestion}' instead.",
                 FutureWarning,
                 stacklevel=2,
@@ -126,6 +125,23 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
         f"datasets file '{datasets}' not found (tried {tried_str}). "
         "CLI paths are relative to the current working directory."
     )
+
+
+def _resolve_cli_datasets_or_exit(
+    datasets: str | None, config: str | None, prog: str
+) -> str | None:
+    """Run :func:`resolve_cli_datasets_path` for a CLI entry point.
+
+    The deprecation ``FutureWarning`` is caught and printed as a single
+    ``<prog>: warning: ...`` line on stderr (no Python warning prefix). Raises
+    :class:`DatasetsPathError` like the wrapped function.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", FutureWarning)
+        resolved = resolve_cli_datasets_path(datasets, config)
+    for w in caught:
+        print(f"{prog}: warning: {w.message}", file=sys.stderr)
+    return resolved
 
 
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
@@ -1078,7 +1094,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if getattr(args, "datasets", None) is not None:
         try:
-            args.datasets = resolve_cli_datasets_path(args.datasets, getattr(args, "config", None))
+            args.datasets = _resolve_cli_datasets_or_exit(
+                args.datasets, getattr(args, "config", None), "neurodags"
+            )
         except DatasetsPathError as exc:
             print(f"neurodags: error: {exc}", file=sys.stderr)
             return 2
