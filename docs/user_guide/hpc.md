@@ -213,8 +213,9 @@ same index the per-file and chained arrays use as `SLURM_ARRAY_TASK_ID` (see
 {doc}`inspection`). `--format indices` prints just those indices, space-separated:
 
 ```bash
-# status exits 1 when something is missing/errored — keep `|| true` under `set -e`
-IDX=$(neurodags status pipeline.yml --format indices 2>/dev/null || true)
+# --exit-zero: exit 0 even when something is missing/errored, but still fail on a
+# broken config, so `set -e` keeps protecting you
+IDX=$(neurodags status pipeline.yml --format indices --exit-zero)
 [ -z "$IDX" ] && { echo "nothing to resubmit"; exit 0; }
 
 # run them locally / in one job ...
@@ -223,6 +224,21 @@ neurodags run pipeline.yml --only-index $IDX
 # ... or as a sparse per-file array (sbatch wants a comma-separated list)
 sbatch --array=$(echo "$IDX" | tr ' ' ',') retry_array.sh
 ```
+
+**Report / resubmission jobs chained with `--dependency=afterok`.** By default `status` exits
+`1` whenever anything is missing or errored, which is the expected state after a partial run
+or a staged array — so a report job would fail and SLURM would cancel every job chained after
+it. Use `--exit-zero` in such jobs: `status` then exits `0` whenever the report was produced,
+in every `--format`, while real failures (missing or invalid config, unset environment
+variable, unreadable `-d` file) still exit non-zero and correctly break the chain.
+
+```bash
+REPORT=$(sbatch --parsable --dependency=afterok:$COMPUTE_JOB \
+    --wrap "neurodags status pipeline.yml --format json --exit-zero > status.json")
+```
+
+Do not use `|| true` for this (as older versions of this guide did): it also turns a broken
+config or an unset `$VAR` into a "successful" job with an empty or misleading report.
 
 Narrow the list with `--list-missing` or `--list-errors`, and per derivative with
 `--derivative` (for the chained pattern, resubmit each derivative's array with its own list:
@@ -250,7 +266,7 @@ Things to keep in mind:
   TASKS=()
   for D in "${!DERIVATIVES[@]}"; do
     for F in $(neurodags status pipeline.yml --derivative "${DERIVATIVES[$D]}" \
-                 --format indices 2>/dev/null || true); do
+                 --format indices --exit-zero); do
       TASKS+=($(( F * N_DERIVATIVES + D )))
     done
   done

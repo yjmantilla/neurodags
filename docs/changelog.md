@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`neurodags status --exit-zero`** (#45): exit `0` whenever the report was produced, even
+  if derivatives are missing or errored, so `status` can run as a pure report — e.g. a short
+  job chained with `--dependency=afterok`, where exit `1` would cancel everything after it.
+  Works with every `--format` (`table`, `json`, `indices`). Real failures (missing or invalid
+  config, unset environment variable, unreadable `-d` file) still exit non-zero. The default
+  exit codes are unchanged (`1` when anything is missing or errored). The HPC and inspection
+  guides now recommend `--exit-zero` instead of `|| true`, which also hid config errors.
+
+### Changed
+
+- **`-d/--datasets` is resolved relative to the current working directory** (#43): every
+  subcommand that takes `-d` (`validate`, `run`, `dry-run`, `dataframe`, `count-inputs`,
+  `status`, `slurm-script`, `tui`, and the legacy `neurodags-tui`) now resolves the path
+  against the directory the command is run from, after expanding `~` and `$VARS` like the
+  `datasets:` key. Previously it was joined onto the pipeline YAML's directory, so
+  `neurodags run pipelines/x/pipeline.yml -d pipelines/x/alt.yml` looked for
+  `pipelines/x/pipelines/x/alt.yml`. The rule is now: CLI paths are relative to where you run
+  the command; paths inside the YAML (the `datasets:` key) stay relative to the YAML.
+  **Behaviour change:** a relative `-d` path that exists relative to the working directory is
+  now used even if a different file with that name exists next to the pipeline YAML. For
+  backward compatibility, a path that only exists relative to the pipeline YAML is still used,
+  with a `FutureWarning` showing the cwd-relative path to pass instead; this YAML-relative
+  fallback will be removed in a future release. The Python API is unchanged: a relative
+  `datasets_configuration` string passed to `run_pipeline` / `iterate_derivative_pipeline` /
+  `build_derivative_dataframe` is still resolved relative to the pipeline YAML (now
+  documented in their docstrings).
+
+### Fixed
+
+- **Missing `-d/--datasets` file crashed with a traceback** (#43): when the file exists
+  neither relative to the working directory nor relative to the pipeline YAML, or references
+  an unset environment variable, the CLI now prints a one-line error naming the paths it tried
+  and exits with code `2`, instead of an `OSError` traceback from the YAML loader.
+
 ## 0.3.4 — 2026-10-12
 
 ### Added

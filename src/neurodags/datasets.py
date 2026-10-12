@@ -37,6 +37,10 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
     datasets_input : dict or path-like, optional
         Optional datasets configuration as a dictionary or a path to a YAML file.
         If provided, it overrides the 'datasets' section of the pipeline configuration.
+        ``~`` and ``$VARS`` are expanded; a relative path is resolved relative to the
+        pipeline YAML's directory when ``pipeline_input`` is a path (same rule as the
+        ``datasets:`` key). The CLI's ``-d/--datasets`` is resolved against the current
+        working directory before it reaches this function.
 
     Returns
     -------

@@ -1,6 +1,10 @@
 # CLI Reference
 
-NeuroDAGs installs a unified `neurodags` command with several subcommands. Every subcommand that accepts a pipeline file also accepts `-d/--datasets <path>` to override the datasets YAML defined inside the pipeline file — useful when the same pipeline is run against different dataset collections.
+NeuroDAGs installs a unified `neurodags` command with several subcommands. Every subcommand that accepts a pipeline file also accepts `-d/--datasets <path>` to override the datasets YAML defined inside the pipeline file — useful when the same pipeline is run against different dataset collections. See *Per-subcommand Dataset Override* at the end of this page for how that path is resolved.
+
+```{important}
+**CLI paths are relative to where you run the command; paths inside the YAML are relative to the YAML.** `-d/--datasets` is resolved against the current working directory (like any other CLI path), while the `datasets:` key *inside* `pipeline.yml` is resolved against the directory of `pipeline.yml`.
+```
 
 ## Global Options
 
@@ -155,6 +159,13 @@ Exit code `0` only when all derivatives are complete (no missing, no errored); `
 neurodags status pipeline.yml || sbatch resubmit.sh
 ```
 
+Pass `--exit-zero` to use `status` purely as a report: it exits `0` whenever the report was produced, even if files are missing or errored, while real failures (missing or invalid config, unset environment variable, unreadable `-d` file) still exit non-zero. This is what a report job chained with `--dependency=afterok` wants (see {doc}`hpc`):
+
+```bash
+neurodags status pipeline.yml --exit-zero                  # report only; 0 even if incomplete
+neurodags status pipeline.yml --format indices --exit-zero # works with every --format
+```
+
 See {doc}`inspection` for status definitions and `.error` marker behaviour.
 
 ## Source File Count
@@ -250,4 +261,21 @@ All subcommands that take a pipeline file also accept:
 
 | Flag | Description |
 |------|-------------|
-| `-d / --datasets <path>` | Override the `datasets` key in the pipeline YAML |
+| `-d / --datasets <path>` | Override the `datasets` key in the pipeline YAML. The path is relative to the current working directory |
+
+How the `-d` path is resolved (`validate`, `run`, `dry-run`, `dataframe`, `count-inputs`, `status`, `slurm-script`, `tui`, and the legacy `neurodags-tui`):
+
+1. `~` and `$VARS` are expanded, exactly as for the `datasets:` key (an unset or empty variable is an error).
+2. A relative path is resolved against the **current working directory** — the directory you run `neurodags` from, like every other CLI path.
+3. **Deprecated fallback:** if the file does not exist there but does exist relative to the pipeline YAML's directory (the behaviour up to 0.3.4), that file is used and a `FutureWarning` is printed with the cwd-relative path to pass instead. This fallback will be removed in a future release.
+4. If neither exists, the command stops with a short error naming both paths it tried and exits with code `2` (no traceback).
+
+The `datasets:` key written *inside* `pipeline.yml` is unaffected: it stays relative to the pipeline YAML.
+
+```bash
+# run from the repository root; the pipeline lives in pipelines/x/
+neurodags run pipelines/x/pipeline.yml -d pipelines/x/datasets_alt.yml   # cwd-relative (correct)
+neurodags run pipelines/x/pipeline.yml -d datasets_alt.yml               # YAML-relative: still works, with a deprecation warning
+```
+
+In the Python API (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`), a relative `datasets_configuration` string keeps the library rule — relative to the pipeline YAML's directory, like the `datasets:` key. Pass an absolute path to avoid ambiguity.

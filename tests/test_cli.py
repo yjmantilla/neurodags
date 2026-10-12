@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,13 +28,16 @@ def test_importing_cli_keeps_stdout_clean():
     assert result.stdout == "", f"unexpected stdout on import: {result.stdout!r}"
 
 
-def test_tui_subcommand_launches_app():
+def test_tui_subcommand_launches_app(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "datasets.yml").write_text("{}\n")
     with (
         patch("neurodags.cli.NeuroDagsApp", create=True),
         patch("neurodags.cli._cmd_tui") as cmd,
     ):
         cmd.return_value = 0
         assert main(["tui", "pipeline.yml", "--datasets", "datasets.yml"]) == 0
+    assert cmd.call_args.args[0].datasets == str(tmp_path / "datasets.yml")
 
 
 def test_validate_prints_summary(tmp_path, capsys):
@@ -913,3 +917,150 @@ def test_log_file_flag_passed_to_configure_logging(dummy_pipeline, tmp_path):
         assert main(["--log-file", log_path, "count-inputs", "pipeline.yml"]) == 0
         _, kwargs = mock_log.call_args
         assert kwargs.get("log_file") == log_path
+
+
+# ---------------------------------------------------------------------------
+# -d/--datasets path resolution (#43)
+# ---------------------------------------------------------------------------
+
+
+def _write_nested_pipeline(root: Path) -> tuple[Path, Path]:
+    """``root/p/x/pipeline.yml`` + ``root/p/x/alt.yml`` (dataset name ``alt``)."""
+    pdir = root / "p" / "x"
+    pdir.mkdir(parents=True)
+    pipe = pdir / "pipeline.yml"
+    pipe.write_text(
+        "datasets: alt.yml\n"
+        "mount_point: null\n"
+        "DerivativeDefinitions:\n"
+        "  BasicPrep: {}\n"
+        "DerivativeList:\n"
+        "  - BasicPrep\n"
+    )
+    alt = pdir / "alt.yml"
+    alt.write_text(
+        "alt:\n"
+        "  name: Alt\n"
+        f"  file_pattern: {root}/**/*.vhdr\n"
+        f"  derivatives_path: {root}/derivatives\n"
+    )
+    return pipe, alt
+
+
+def test_datasets_path_is_cwd_relative(tmp_path, monkeypatch, capsys):
+    _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)  # the cwd-relative form must not warn
+        rc = main(["validate", "p/x/pipeline.yml", "-d", "p/x/alt.yml"])
+    assert rc == 0
+    assert "datasets: alt" in capsys.readouterr().out
+
+
+def test_datasets_path_expands_env_vars(tmp_path, monkeypatch, capsys):
+    _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ND_TEST_DIR", str(tmp_path / "p"))
+    assert main(["validate", "p/x/pipeline.yml", "-d", "$ND_TEST_DIR/x/alt.yml"]) == 0
+    assert "datasets: alt" in capsys.readouterr().out
+
+
+def test_datasets_path_yaml_relative_fallback_warns(tmp_path, monkeypatch, capsys):
+    _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.warns(FutureWarning, match="deprecated") as record:
+        rc = main(["validate", "p/x/pipeline.yml", "-d", "alt.yml"])
+    assert rc == 0
+    assert "datasets: alt" in capsys.readouterr().out
+    msg = str(record[0].message)
+    assert "future release" in msg
+    assert f"-d {Path('p') / 'x' / 'alt.yml'}" in msg  # the cwd-relative path to use
+
+
+def test_datasets_path_cwd_wins_over_yaml_relative(tmp_path, monkeypatch):
+    _write_nested_pipeline(tmp_path)
+    (tmp_path / "alt.yml").write_text("{}\n")  # same name, in the cwd
+    monkeypatch.chdir(tmp_path)
+    with patch("neurodags.cli._cmd_validate", return_value=0) as cmd:
+        assert main(["validate", "p/x/pipeline.yml", "-d", "alt.yml"]) == 0
+    assert cmd.call_args.args[0].datasets == str(tmp_path / "alt.yml")
+
+
+def test_datasets_path_missing_is_clean_error(tmp_path, monkeypatch, capsys):
+    _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rc = main(["validate", "p/x/pipeline.yml", "-d", "nope.yml"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "Traceback" not in err
+    assert str(tmp_path / "nope.yml") in err
+    assert str(tmp_path / "p" / "x" / "nope.yml") in err
+
+
+def test_datasets_path_unset_env_var_is_clean_error(tmp_path, monkeypatch, capsys):
+    _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ND_TEST_UNSET", raising=False)
+    rc = main(["status", "p/x/pipeline.yml", "-d", "$ND_TEST_UNSET/alt.yml", "--exit-zero"])
+    assert rc == 2
+    assert "ND_TEST_UNSET" in capsys.readouterr().err
+
+
+def test_datasets_path_missing_subprocess_has_no_traceback(tmp_path):
+    _write_nested_pipeline(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "neurodags.cli", "run", "p/x/pipeline.yml", "-d", "nope.yml"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "not found" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run"],
+        ["dry-run", "--output", "out.csv"],
+        ["count-inputs"],
+        ["status"],
+        ["dataframe", "--output", "out.csv"],
+    ],
+)
+def test_datasets_path_resolved_for_every_subcommand(tmp_path, monkeypatch, argv):
+    _, alt = _write_nested_pipeline(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()) as rp,
+        patch("neurodags.cli.build_derivative_dataframe", return_value=pd.DataFrame()) as bd,
+    ):
+        main([argv[0], "p/x/pipeline.yml", "-d", "p/x/alt.yml", *argv[1:]])
+    called = bd if argv[0] == "dataframe" else rp
+    assert called.call_args.kwargs["datasets_configuration"] == str(alt)
+
+
+# ---------------------------------------------------------------------------
+# status --exit-zero (#45)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", ["table", "json", "indices"])
+def test_status_exit_zero_with_missing(dummy_pipeline, capsys, fmt):
+    df = _indexed_status_df()
+    assert _run_status_with(dummy_pipeline, df, ["--format", fmt]) == 1  # default unchanged
+    assert _run_status_with(dummy_pipeline, df, ["--format", fmt, "--exit-zero"]) == 0
+    if fmt == "indices":
+        assert capsys.readouterr().out.splitlines()[-1] == "1 4 9"
+
+
+def test_status_exit_zero_bad_config_still_fails(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "neurodags.cli", "status", "missing.yml", "--exit-zero"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""

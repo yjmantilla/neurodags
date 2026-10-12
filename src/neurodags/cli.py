@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -24,7 +26,19 @@ from neurodags.orchestrators import (
     build_derivative_dataframe,
     run_pipeline,
 )
-from neurodags.utils import resolve_dataset_paths
+from neurodags.utils import expand_path, resolve_dataset_paths
+
+# Help text shared by every subcommand that takes -d/--datasets (see #43).
+DATASETS_HELP = (
+    "Optional path to a datasets YAML that overrides the pipeline's 'datasets' key. "
+    "Resolved relative to the current working directory (~ and $VARS are expanded). "
+    "Deprecated fallback: if it is not found there but exists next to the pipeline YAML, "
+    "that file is used with a warning."
+)
+
+
+class DatasetsPathError(ValueError):
+    """A ``-d/--datasets`` path given on the command line could not be resolved."""
 
 
 def _save_dataframe(df: pd.DataFrame, output_path: str | None, default_name: str) -> Path:
@@ -46,6 +60,74 @@ def _load_pipeline_config(config_path: str) -> dict:
     return load_configuration(config_path)
 
 
+def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str | None:
+    """Resolve a CLI ``-d/--datasets`` path to an absolute path.
+
+    CLI paths are relative to where the command is run; paths written inside the
+    pipeline YAML (its ``datasets:`` key) stay relative to the YAML and are not
+    handled here. ``~`` and ``$VARS`` are expanded as for the ``datasets:`` key.
+
+    For backward compatibility, a path that does not exist relative to the
+    current working directory but does exist relative to the pipeline YAML's
+    directory (the behaviour up to 0.3.4) is still used, with a ``FutureWarning``;
+    that fallback will be removed in a future release.
+
+    Parameters
+    ----------
+    datasets : str or None
+        The value passed to ``-d/--datasets``. ``None`` is returned unchanged.
+    config : str or None
+        Path to the pipeline YAML, used only for the deprecated fallback.
+
+    Returns
+    -------
+    str or None
+        The absolute path of the datasets YAML, or ``None``.
+
+    Raises
+    ------
+    DatasetsPathError
+        If a referenced environment variable is unset/empty, or the file exists
+        neither relative to the working directory nor relative to the pipeline YAML.
+    """
+    if datasets is None:
+        return None
+    try:
+        expanded = expand_path(datasets, field="--datasets")
+    except ValueError as exc:
+        raise DatasetsPathError(str(exc)) from exc
+
+    cwd_path = Path(os.path.abspath(expanded))
+    if cwd_path.is_file():
+        return str(cwd_path)
+
+    tried = [cwd_path]
+    if config is not None and not Path(expanded).is_absolute():
+        yaml_path = Path(config).resolve().parent / expanded
+        if yaml_path.is_file():
+            try:
+                suggestion = os.path.relpath(yaml_path)
+            except ValueError:  # different drive on Windows
+                suggestion = str(yaml_path)
+            warnings.warn(
+                f"-d/--datasets '{datasets}' was not found relative to the current working "
+                f"directory and was resolved relative to the pipeline YAML instead "
+                f"({yaml_path}). This YAML-relative lookup is deprecated and will be removed "
+                f"in a future release: CLI paths are relative to where you run the command. "
+                f"Pass '-d {suggestion}' instead.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            return str(yaml_path)
+        tried.append(yaml_path)
+
+    tried_str = " and ".join(str(p) for p in tried)
+    raise DatasetsPathError(
+        f"datasets file '{datasets}' not found (tried {tried_str}). "
+        "CLI paths are relative to the current working directory."
+    )
+
+
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
     if derivatives:
         return derivatives
@@ -61,7 +143,7 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
     parser.add_argument(
         "--derivative",
@@ -366,7 +448,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             grand[k] += v
 
     complete = grand["missing"] == 0 and grand["errored"] == 0
-    exit_code = 0 if complete else 1
+    exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
 
     if fmt == "indices":
         if args.list_missing and not args.list_errors:
@@ -511,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
 
     validate_parser = subparsers.add_parser("validate", help="Load a config and print a summary.")
@@ -520,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
     validate_parser.add_argument(
         "--derivative",
@@ -550,7 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
     dataframe_parser.add_argument(
         "--include-derivative",
@@ -646,7 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
     count_parser.add_argument(
         "--derivative",
@@ -665,7 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
     status_parser.add_argument(
         "--derivative",
@@ -704,7 +786,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Output format: 'table' (default), 'json', or 'indices' (only the sorted, "
             "space-separated file indices that are missing or errored — narrow with "
             "--list-missing / --list-errors — ready for --only-index or sbatch --array). "
-            "The exit code is 1 whenever anything is missing or errored, in every format."
+            "The exit code is 1 whenever anything is missing or errored, in every format "
+            "(unless --exit-zero)."
+        ),
+    )
+    status_parser.add_argument(
+        "--exit-zero",
+        action="store_true",
+        help=(
+            "Exit 0 whenever the report was produced, even if files are missing or errored "
+            "(for report jobs chained with --dependency=afterok). Real failures such as a "
+            "missing or invalid config or an unset environment variable still exit non-zero."
         ),
     )
     status_parser.add_argument(
@@ -726,7 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--datasets",
         default=None,
-        help="Optional path to a datasets YAML override.",
+        help=DATASETS_HELP,
     )
     slurm_parser.add_argument(
         "--derivative",
@@ -983,6 +1075,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=args.log_level,
         log_file=args.log_file,
     )
+
+    if getattr(args, "datasets", None) is not None:
+        try:
+            args.datasets = resolve_cli_datasets_path(args.datasets, getattr(args, "config", None))
+        except DatasetsPathError as exc:
+            print(f"neurodags: error: {exc}", file=sys.stderr)
+            return 2
 
     if args.command == "tui":
         return _cmd_tui(args)
