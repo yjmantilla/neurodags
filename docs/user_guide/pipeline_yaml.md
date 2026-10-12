@@ -134,21 +134,22 @@ Each entry in `nodes` is a step with a unique `id`. Steps execute in topological
   derivative: CleanedEEG.fif
 ```
 
-- `derivative`: `<DerivativeName>.<ext>` — resolves the named derivative for the current file; use the YAML name, not the on-disk name (see {ref}`Derivative references <naming-references>`)
+- `derivative`: `<DerivativeName><suffix>` — resolves the named derivative for the current file and selects the artifact whose suffix is **exactly** `<suffix>` (`CleanedEEG.fif` selects `.fif`, never `.report.html`); use the YAML name, not the on-disk name (see {ref}`Derivative references <naming-references>`)
+- A bare `<DerivativeName>` is allowed only when the derivative has exactly one artifact
 - Use `SourceFile` to load the raw input file
 
-If the upstream derivative is already cached on disk, the matching file is loaded. If the upstream derivative has not yet been written (it is being computed in the same run), the in-memory `NodeResult` is used directly — both paths produce identical results.
+If the upstream derivative is already done on disk, the selected artifact's file is loaded. If it has not been written yet (it is computed in the same run, or has `save: false`), the selected artifact of the in-memory `NodeResult` is used. Selection is the same in both cases.
 
 ##### Selecting one artifact from a multi-artifact derivative
 
-When an upstream derivative is a **splitter** — a node that returns one artifact per condition, segment type, or split key — the same `<DerivativeName>.<ext>` syntax selects a specific artifact:
+When an upstream derivative is a **splitter** — a node that returns one artifact per condition, segment type, or split key — write the artifact's full suffix:
 
 ```yaml
 - id: 0
-  derivative: EpochSplitter.EO_baseline.fif   # selects only the EO_baseline artifact
+  derivative: EpochSplitter.EO_baseline.fif   # selects only the .EO_baseline.fif artifact
 ```
 
-This works whether `EpochSplitter` is cached on disk or in memory.  If the requested extension is absent from the upstream derivative's artifacts, a warning is logged and the full `NodeResult` is passed as a fallback.
+`EpochSplitter.fif` does **not** select `.EO_baseline.fif`: suffixes are compared for equality, not by their ending. A suffix the upstream derivative did not produce, or a bare `EpochSplitter`, fails the consuming unit with `neurodags.dag.ArtifactSelectionError` listing the available suffixes (`'.EC_baseline.fif', '.EO_baseline.fif'`). There is no fallback to another artifact or to the whole result.
 
 ```yaml
 # Splitter example
@@ -174,7 +175,7 @@ DerivativeDefinitions:
 
 #### id.N References
 
-`id.<N>` in args resolves to the output of step `N`. When a step produces multiple artifacts, the artifact matching the node's expected argument type is selected by the `_unwrap_for_arg` heuristic (first `.fif` for MNE objects, first artifact otherwise). To select a specific artifact from a multi-artifact upstream derivative, use the `derivative: Name.ext` reuse step (see above) rather than relying on `id.<N>` heuristics.
+`id.<N>` in args resolves to the output of step `N`. When a step produces multiple artifacts, the artifact matching the node's expected argument type is selected by the `_unwrap_for_arg` heuristic (first `.fif` for MNE objects, first artifact otherwise). To select a specific artifact from a multi-artifact upstream derivative, use the `derivative: Name.suffix` reuse step (see above) rather than relying on `id.<N>` heuristics.
 
 #### Field access: `id.N.field`
 
