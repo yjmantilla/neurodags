@@ -77,7 +77,11 @@ def _worker_cwds(n_jobs: int = 2) -> set[str]:
 
 
 def _outputs(root: Path) -> list[str]:
-    return sorted(p.relative_to(root).as_posix() for p in (root / "out").rglob("*@Meta*"))
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in (root / "out").rglob("*@Meta*")
+        if p.suffix != ".done"  # each unit also has its .done manifest
+    )
 
 
 EXPECTED_OUTPUTS = ["out/sub-01/rec_raw.fif@Meta.json", "out/sub-02/rec_raw.fif@Meta.json"]

@@ -392,10 +392,10 @@ def test_cached_dict_no_ext_resolved_to_first_path(tmp_path):
                 return {"cached": [fake_cached_path]}
             return original_run(definition, derivative_name, *args, **kwargs)
 
-        # _artifact_candidates_for returns [] so cached_here=False → we recurse into Child
+        # _cached_unit returns None so cached_here=False → we recurse into Child
         with (
             patch("neurodags.dag.run_derivative", side_effect=mock_run),
-            patch("neurodags.dag._artifact_candidates_for", return_value=[]),
+            patch("neurodags.dag._cached_unit", return_value=None),
         ):
             result = original_run(
                 consumer_def,

@@ -6,6 +6,7 @@ import mne
 from neurodags.definitions import Artifact, NodeResult
 from neurodags.loaders import load_meeg
 from neurodags.loggers import get_logger
+from neurodags.writers import save_mne
 
 from . import register_node
 
@@ -23,7 +24,7 @@ def keep_channels(mne_object, channel_names, save=False) -> NodeResult:
     if save:
 
         def writer(path):
-            return mne_object.save(path, overwrite=True)
+            return save_mne(mne_object, path)
 
     else:
         writer = None
@@ -149,9 +150,7 @@ def basic_preprocessing(
             section="Metadata",
         )
 
-    artifacts = {
-        ".fif": Artifact(item=mne_object, writer=lambda path: mne_object.save(path, overwrite=True))
-    }
+    artifacts = {".fif": Artifact(item=mne_object, writer=lambda path: save_mne(mne_object, path))}
 
     if extra_artifacts:
         artifacts[".report.html"] = Artifact(

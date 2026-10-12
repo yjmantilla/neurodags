@@ -628,12 +628,13 @@ class NeuroDagsApp(App):
             self.notify("No files found.", severity="warning")
             return
 
-        table.add_columns("Derivative", "Total", "Done", "Missing", "Errored")
+        table.add_columns("Derivative", "Total", "Done", "Incomplete", "Missing", "Errored")
         for r in rows:
             table.add_row(
                 r["derivative"],
                 str(r["total"]),
                 str(r["done"]),
+                str(r["incomplete"]),
                 str(r["missing"]),
                 str(r["errored"]),
             )
@@ -641,6 +642,7 @@ class NeuroDagsApp(App):
             "[bold]Total[/bold]",
             str(grand["total"]),
             str(grand["done"]),
+            str(grand["incomplete"]),
             str(grand["missing"]),
             str(grand["errored"]),
         )
@@ -648,7 +650,8 @@ class NeuroDagsApp(App):
         files_label = grand["total"] // max(len(rows), 1) if rows else 0
         summary.update(
             f"files: {files_label}  |  "
-            f"done: {grand['done']}  missing: {grand['missing']}  errored: {grand['errored']}"
+            f"done: {grand['done']}  incomplete: {grand['incomplete']}  "
+            f"missing: {grand['missing']}  errored: {grand['errored']}"
         )
 
         if errored_files:
@@ -661,7 +664,8 @@ class NeuroDagsApp(App):
 
         severity = "error" if grand["errored"] else "information"
         self.notify(
-            f"done={grand['done']} missing={grand['missing']} errored={grand['errored']}",
+            f"done={grand['done']} incomplete={grand['incomplete']} "
+            f"missing={grand['missing']} errored={grand['errored']}",
             severity=severity,
         )
 
@@ -741,7 +745,7 @@ def _status_sync(
     )
 
     if result is None or result.empty:
-        return [], {"total": 0, "done": 0, "missing": 0, "errored": 0}, []
+        return [], {"total": 0, "done": 0, "incomplete": 0, "missing": 0, "errored": 0}, []
 
     rows_by_deriv: dict[str, dict] = {}
     errored_files: list[tuple[str, str, str | None]] = []
@@ -757,6 +761,7 @@ def _status_sync(
                 "derivative": deriv,
                 "total": 0,
                 "done": 0,
+                "incomplete": 0,
                 "missing": 0,
                 "errored": 0,
             }
@@ -768,7 +773,7 @@ def _status_sync(
             errored_files.append((deriv, fpath, _status_error_path(plan)))
 
     rows = sorted(rows_by_deriv.values(), key=lambda r: r["derivative"])
-    grand: dict[str, int] = {"total": 0, "done": 0, "missing": 0, "errored": 0}
+    grand: dict[str, int] = {"total": 0, "done": 0, "incomplete": 0, "missing": 0, "errored": 0}
     for r in rows:
         for k in grand:
             grand[k] += r[k]

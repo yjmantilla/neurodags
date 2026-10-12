@@ -772,7 +772,9 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
         "grand_total",
         "complete",
         "missing_indices",
+        "incomplete_indices",
         "errored_indices",
+        "unlisted_files",
         "inputs",
         "missing_source_indices",
         "not_in_list",
@@ -781,11 +783,20 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
     assert data["errored_indices"] == [4, 9]
     assert all(type(i) is int for i in data["missing_indices"] + data["errored_indices"])
     for counts in data["derivatives"].values():
-        assert set(counts) == {"total", "done", "skipped", "missing", "errored", "missing-source"}
+        assert set(counts) == {
+            "total",
+            "done",
+            "skipped",
+            "incomplete",
+            "missing",
+            "errored",
+            "missing-source",
+        }
     assert data["derivatives"]["BasicPrep"] == {
         "total": 4,
         "done": 1,
         "skipped": 0,
+        "incomplete": 0,
         "missing": 2,
         "errored": 1,
         "missing-source": 0,
@@ -807,7 +818,15 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         (4, "Spectrum"),
         (9, "BasicPrep"),
     ]
-    assert set(files[0]) == {"index", "dataset", "file_path", "derivative", "status", "error_path"}
+    assert set(files[0]) == {
+        "index",
+        "dataset",
+        "file_path",
+        "derivative",
+        "status",
+        "error_path",
+        "unlisted",
+    }
     rec = next(f for f in files if f["index"] == 4 and f["derivative"] == "Spectrum")
     assert rec == {
         "index": 4,
@@ -816,6 +835,7 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "derivative": "Spectrum",
         "status": "errored",
         "error_path": "/o/e.e",
+        "unlisted": [],
     }
     assert files[0]["error_path"] is None
 
@@ -872,6 +892,7 @@ def test_status_empty_result_json_is_valid(dummy_pipeline, capsys):
         "total": 0,
         "done": 0,
         "skipped": 0,
+        "incomplete": 0,
         "missing": 0,
         "errored": 0,
         "missing-source": 0,

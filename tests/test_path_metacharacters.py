@@ -9,50 +9,53 @@ import shutil
 import yaml
 
 from neurodags.cli import main
-from neurodags.dag import _artifact_candidates_for
 from neurodags.mermaid import pipeline_to_mermaid
 from neurodags.orchestrators import run_pipeline
+from neurodags.outputs import build_manifest, manifest_artifacts, unit_state, write_manifest
 
 # ---------------------------------------------------------------------------
-# Cache lookup with glob metacharacters
+# Cache lookup with glob metacharacters (manifest-based, spec 6.2)
 # ---------------------------------------------------------------------------
+
+
+def _done(prefix: str, name: str, suffixes=(".nc",)) -> dict:
+    paths = {}
+    for suffix in suffixes:
+        with open(prefix + suffix, "w") as fh:
+            fh.write("x")
+        paths[suffix] = [prefix + suffix]
+    write_manifest(prefix, build_manifest(prefix, name, dataset="d", rel="x", artifacts=paths))
+    return {k: list(v) for k, v in paths.items()}
 
 
 def test_cached_artifact_found_under_bracketed_parent_dir(tmp_path):
     study = tmp_path / "study [2024]"
     study.mkdir()
-    artifact = study / "sub-01.vhdr@BandPower.nc"
-    artifact.write_text("x")
+    prefix = str(study / "sub-01.vhdr@BandPower")
+    expected = _done(prefix, "BandPower")
 
-    assert _artifact_candidates_for((study / "sub-01.vhdr@BandPower").as_posix()) == [
-        artifact.as_posix()
-    ]
+    assert manifest_artifacts(prefix, "BandPower") == expected
+    assert unit_state(prefix, "BandPower").state == "done"
 
 
 def test_cached_artifact_found_for_bracketed_source_name(tmp_path):
-    artifact = tmp_path / "a[1]*?.fif@Fit.nc"
-    artifact.write_text("x")
-    (tmp_path / "a[1]*?.fif@Fit.error").write_text("boom")
+    prefix = str(tmp_path / "a[1]*?.fif@Fit")
+    expected = _done(prefix, "Fit")
 
-    assert _artifact_candidates_for((tmp_path / "a[1]*?.fif@Fit").as_posix()) == [
-        artifact.as_posix()
-    ]
+    assert manifest_artifacts(prefix, "Fit") == expected
 
 
 def test_bracketed_source_does_not_match_other_source_outputs(tmp_path):
-    (tmp_path / "a1.fif@Fit.nc").write_text("x")
+    _done(str(tmp_path / "a1.fif@Fit"), "Fit")
 
-    assert _artifact_candidates_for((tmp_path / "a[1].fif@Fit").as_posix()) == []
+    assert manifest_artifacts(str(tmp_path / "a[1].fif@Fit"), "Fit") is None
+    assert unit_state(str(tmp_path / "a[1].fif@Fit"), "Fit").state == "missing"
 
 
-def test_artifact_candidates_ignore_directories(tmp_path):
+def test_unit_state_ignores_directories(tmp_path):
     (tmp_path / "sub-01.vhdr@Fit.d").mkdir()
-    artifact = tmp_path / "sub-01.vhdr@Fit.nc"
-    artifact.write_text("x")
 
-    assert _artifact_candidates_for((tmp_path / "sub-01.vhdr@Fit").as_posix()) == [
-        artifact.as_posix()
-    ]
+    assert unit_state(str(tmp_path / "sub-01.vhdr@Fit"), "Fit").state == "missing"
 
 
 def test_pipeline_under_bracketed_dir_is_cached_and_reported_done(dummy_pipeline, tmp_path, capsys):

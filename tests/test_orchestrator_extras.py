@@ -6,102 +6,55 @@ import pandas as pd
 import pytest
 
 from neurodags.orchestrators import (
-    _resolve_reference_base,
-    _sanitize_reference_base,
     build_derivative_dataframe,
     iterate_derivative_pipeline,
 )
+from neurodags.outputs import entry_reference_base, output_reference_base
 
 # ---------------------------------------------------------------------------
-# _sanitize_reference_base — unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_sanitize_reference_base_replaces_at_in_filename():
-    result = _sanitize_reference_base("/derivatives/sub-01.vhdr@BasicPrep.fif")
-    assert result == "/derivatives/sub-01.vhdr&BasicPrep.fif"
-
-
-def test_sanitize_reference_base_multiple_at_signs():
-    # double-@ (already-chained path): both replaced
-    result = _sanitize_reference_base("/derivatives/sub-01.vhdr@First@Second.fif")
-    assert result == "/derivatives/sub-01.vhdr&First&Second.fif"
-
-
-def test_sanitize_reference_base_no_at_unchanged():
-    path = "/derivatives/sub-01.vhdr"
-    assert _sanitize_reference_base(path) == path
-
-
-def test_sanitize_reference_base_preserves_directory_components():
-    # @ in directory path must NOT be touched
-    result = _sanitize_reference_base("/path/with@dir/sub-01@BasicPrep.fif")
-    assert result == "/path/with@dir/sub-01&BasicPrep.fif"
-
-
-def test_sanitize_reference_base_no_directory():
-    assert _sanitize_reference_base("sub-01@BasicPrep.fif") == "sub-01&BasicPrep.fif"
-
-
-# ---------------------------------------------------------------------------
-# _resolve_reference_base — no derivatives_path branch
+# output_reference_base — the one layout rule (spec 4.1)
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_reference_base_no_derivatives_path(tmp_path):
+def test_reference_base_replaces_at_in_basename_only():
+    result = output_reference_base("with@dir/sub-01.vhdr@BasicPrep.fif", "/unused", "/derivs")
+    assert result == "/derivs/with@dir/sub-01.vhdr&BasicPrep.fif"
+
+
+def test_reference_base_multiple_at_signs():
+    result = output_reference_base("sub-01.vhdr@First@Second.fif", "/unused", "/derivs")
+    assert result == "/derivs/sub-01.vhdr&First&Second.fif"
+
+
+def test_reference_base_without_derivatives_path_is_next_to_source(tmp_path):
+    source = str(tmp_path / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
+    result = output_reference_base("sub-01/sub-01.vhdr@BasicPrep.fif", source, None)
+    assert result == str(tmp_path / "sub-01" / "sub-01.vhdr&BasicPrep.fif")
+
+
+@pytest.mark.parametrize("rel", ["", "/abs/x.fif", "../x.fif", "a//b.fif", "./x.fif"])
+def test_reference_base_rejects_non_canonical_rel(rel):
+    with pytest.raises(ValueError, match="relative to source_root"):
+        output_reference_base(rel, "/src/x.fif", "/derivs")
+
+
+def test_entry_reference_base_uses_source_root_and_subdir(tmp_path):
     from neurodags.definitions import DatasetConfig
-
-    ds_config = DatasetConfig(
-        name="test",
-        source_root=str(tmp_path),
-        file_pattern=str(tmp_path / "**/*.vhdr"),
-        derivatives_path=None,
-    )
-    file_path = str(tmp_path / "sub-01" / "file.vhdr")
-    ref_str, _ref_path = _resolve_reference_base(file_path, ds_config, None, None)
-    assert ref_str == file_path
-
-
-def test_resolve_reference_base_sanitizes_at_no_derivatives_path(tmp_path):
-    """Source filename with @ (neurodags derivative used as input) is sanitized."""
-    from neurodags.definitions import DatasetConfig
-
-    ds_config = DatasetConfig(
-        name="test",
-        source_root=str(tmp_path),
-        file_pattern=str(tmp_path / "**/*.fif"),
-        derivatives_path=None,
-    )
-    # Simulate a neurodags derivative file used as a new source
-    file_path = str(tmp_path / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
-    ref_str, ref_path = _resolve_reference_base(file_path, ds_config, None, None)
-    assert "@" not in ref_str
-    assert "&" in ref_str
-    assert ref_str == str(tmp_path / "sub-01" / "sub-01.vhdr&BasicPrep.fif")
-    assert ref_path == tmp_path / "sub-01" / "sub-01.vhdr&BasicPrep.fif"
-
-
-def test_resolve_reference_base_sanitizes_at_with_derivatives_path(tmp_path):
-    """@ in source filename is sanitized when a separate derivatives_path is set."""
-    from neurodags.definitions import DatasetConfig
+    from neurodags.iterators import InputEntry
 
     raw_dir = tmp_path / "rawdata"
     deriv_dir = tmp_path / "derivatives"
-    deriv_dir.mkdir()
-
     ds_config = DatasetConfig(
         name="test",
         source_root=str(raw_dir),
         file_pattern=str(raw_dir / "**/*.fif"),
         derivatives_path=str(deriv_dir),
+        derivatives_subdir="stage1",
     )
-    file_path = str(raw_dir / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
-    ref_str, _ref_path = _resolve_reference_base(file_path, ds_config, str(raw_dir), None)
-    assert "@" not in ref_str
-    assert "&" in ref_str
-    # derivative goes into deriv_dir with sanitized filename
-    assert ref_str.startswith(str(deriv_dir))
-    assert "sub-01.vhdr&BasicPrep.fif" in ref_str
+    entry = InputEntry(0, "test", "sub-01/sub-01.vhdr@BasicPrep.fif", str(raw_dir / "sub-01" / "x"))
+    assert entry_reference_base(entry, ds_config) == str(
+        deriv_dir / "stage1" / "sub-01" / "sub-01.vhdr&BasicPrep.fif"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +392,7 @@ def _write_fif_project(root, relpaths):
     ds = {
         "d": {
             "name": "d",
-            "source_root": str(root),
+            "source_root": str(root / "in"),
             "file_pattern": str(root / "in" / "**" / "*_raw.fif"),
             "derivatives_path": str(root / "out" / "derivatives"),
         }
@@ -530,7 +483,7 @@ def test_real_run_still_creates_nested_output_dirs(tmp_path):
 
 @pytest.mark.parametrize("n_jobs", [1, 2])
 def test_single_file_dataset_outputs_land_inside_derivatives(tmp_path, n_jobs):
-    """#34: a one-file dataset writes <derivatives>/<file>@Meta.json, not a sibling."""
+    """#34, spec 4.5: a one-file dataset writes inside derivatives, keeping its folders."""
     from neurodags.orchestrators import run_pipeline
 
     pipe = _write_fif_project(tmp_path, ["sub-01/only_raw.fif"])
@@ -538,56 +491,48 @@ def test_single_file_dataset_outputs_land_inside_derivatives(tmp_path, n_jobs):
 
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == ["derivatives"]
-    assert (out / "derivatives" / "only_raw.fif@Meta.json").is_file()
+    assert (out / "derivatives" / "sub-01" / "only_raw.fif@Meta.json").is_file()
+    assert (out / "derivatives" / "sub-01" / "only_raw.fif@Meta.done").is_file()
 
     # Dry-run plan and dataframe find the same cached output.
     plan = iterate_derivative_pipeline(str(pipe), "Meta", dry_run=True)
     final = plan["plan"].iloc[0][0]
     assert final["cached"] is True
-    assert final["prefix"] == str(out / "derivatives" / "only_raw.fif@Meta")
+    assert final["prefix"] == str(out / "derivatives" / "sub-01" / "only_raw.fif@Meta")
+    assert final["state"] == "done"
     df = build_derivative_dataframe(str(pipe), raise_on_error=True)
     assert len(df) == 1
     assert any(c.startswith("Meta") for c in df.columns)
 
 
-def test_resolve_reference_base_file_as_common_root(tmp_path):
-    """#34 guard: a common_root equal to the file itself still yields a path inside."""
+def test_reference_bases_do_not_depend_on_the_discovered_set(tmp_path):
+    """Spec 4.1: the layout comes from source_root and each file's own path only."""
     from neurodags.definitions import DatasetConfig
+    from neurodags.iterators import discover_inputs
 
-    deriv = tmp_path / "derivatives"
-    ds_config = DatasetConfig(
-        name="t",
-        source_root=str(tmp_path),
-        file_pattern=str(tmp_path / "*.fif"),
-        derivatives_path=str(deriv),
-    )
-    src = str(tmp_path / "in" / "x_raw.fif")
-    ref_str, _ = _resolve_reference_base(src, ds_config, src, None)
-    assert ref_str == str(deriv / "x_raw.fif")
-
-
-def test_multi_file_reference_bases_unchanged(tmp_path):
-    """Cache compatibility (#34): multi-file reference bases are byte-for-byte unchanged."""
-    from neurodags.definitions import DatasetConfig
-    from neurodags.iterators import get_all_files_across_datasets
-
-    _write_fif_project(
-        tmp_path, ["sub-01/ses-1/a_raw.fif", "sub-02/ses-1/b_raw.fif", "sub-02/ses-2/c_raw.fif"]
-    )
+    _write_fif_project(tmp_path, ["sub-01/ses-1/a_raw.fif"])
     deriv = tmp_path / "out" / "derivatives"
-    ds_config = DatasetConfig(
-        name="d",
-        source_root=str(tmp_path),
-        file_pattern=str(tmp_path / "in" / "**" / "*_raw.fif"),
-        derivatives_path=str(deriv),
-    )
-    files_per_dataset, _, roots = get_all_files_across_datasets({"d": ds_config})
-    assert roots["d"] == str(tmp_path / "in")
-    refs = sorted(
-        _resolve_reference_base(f, ds_config, roots["d"], None)[0] for f in files_per_dataset["d"]
-    )
-    assert refs == [
+
+    def bases(pattern):
+        ds_config = DatasetConfig(
+            name="d",
+            source_root=str(tmp_path / "in"),
+            file_pattern=pattern,
+            derivatives_path=str(deriv),
+        )
+        enumeration = discover_inputs({"d": ds_config})
+        return {e.rel: entry_reference_base(e, ds_config) for e in enumeration.entries}
+
+    one = bases(str(tmp_path / "in" / "**" / "*_raw.fif"))
+    # A single discovered file keeps its folders below source_root (no common root).
+    assert one == {"sub-01/ses-1/a_raw.fif": f"{deriv}/sub-01/ses-1/a_raw.fif"}
+    _write_fif_project(tmp_path, ["sub-02/ses-1/b_raw.fif", "sub-02/ses-2/c_raw.fif"])
+    full = bases(str(tmp_path / "in" / "**" / "*_raw.fif"))
+    assert full["sub-01/ses-1/a_raw.fif"] == one["sub-01/ses-1/a_raw.fif"]
+    assert sorted(full.values()) == [
         f"{deriv}/sub-01/ses-1/a_raw.fif",
         f"{deriv}/sub-02/ses-1/b_raw.fif",
         f"{deriv}/sub-02/ses-2/c_raw.fif",
     ]
+    narrowed = bases(str(tmp_path / "in" / "sub-02" / "ses-2" / "*_raw.fif"))
+    assert narrowed == {"sub-02/ses-2/c_raw.fif": f"{deriv}/sub-02/ses-2/c_raw.fif"}

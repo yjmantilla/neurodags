@@ -26,8 +26,8 @@ from neurodags.loggers import get_logger
 from neurodags.naming import ColumnCollisionError, error_column, validate_derivative_name
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
+from neurodags.outputs import check_output_collisions, entry_reference_base
 from neurodags.utils import (
-    check_derivative_names,
     expand_path,
     resolve_dataset_field,
     resolve_dataset_paths,
@@ -43,7 +43,9 @@ class _FileJob:
     file_path: str
     dataset_config: dict[str, Any]
     mount_point: Any
-    common_root: str | None
+    # Absolute reference base of the source (spec 4.1), resolved in the parent with
+    # neurodags.outputs.entry_reference_base; outputs are "<reference_base>@<name>...".
+    reference_base: str
     is_node: bool
     node_name: str | None
     derivative_name: str | None
@@ -62,6 +64,8 @@ class _FileJob:
     # Reused loky workers keep a stale cwd, so they must never see a relative
     # path (#35).
     source_path: str | None = None
+    # Source path relative to source_root (POSIX), recorded in the .done manifest.
+    source_rel: str | None = None
 
 
 @dataclass(slots=False)  # break parallelization?
@@ -98,22 +102,6 @@ def _missing_source_result(entry: InputEntry, inputs_file: str | None, label: st
     )
 
 
-def _sanitize_reference_base(path: str) -> str:
-    """Replace ``@`` with ``&`` in the filename component of *path*.
-
-    ``@`` is the delimiter between source name and derivative name
-    (``source@DerivativeName.ext``).  When a neurodags derivative is itself
-    used as a source, its filename already contains ``@``.  Replacing that
-    ``@`` with ``&`` preserves the one-``@``-per-filename invariant so that
-    derivative paths remain unambiguous.
-
-    Only the basename is rewritten; directory components are left untouched.
-    """
-    dirpart, basename = os.path.split(path)
-    sanitized = basename.replace("@", "&")
-    return os.path.join(dirpart, sanitized) if dirpart else sanitized
-
-
 def _dataset_job_payload(dataset_config: Any, mount_point: Any) -> dict:
     """Serialize *dataset_config* for a worker with its path fields resolved.
 
@@ -140,32 +128,24 @@ def _absolute(path: Any) -> Any:
     return path
 
 
-def _worker_source_paths(file_path: str, common_root: str | None) -> tuple[str, str | None]:
-    """Absolute ``(file_path, common_root)`` for a worker job (#35).
+def _reference_bases(
+    entries: list[InputEntry], datasets_configs: Mapping[str, Any], mount_point: Any
+) -> dict[int, str]:
+    """Absolute reference base per enumerated input, checked for collisions (spec 4.1, 4.3).
 
-    Both are made absolute against the parent's cwd, so the relative structure
-    ``relpath(file_path, common_root)`` (and hence the derivative layout) is
-    unchanged. An empty ``common_root`` (files directly in the cwd) means the
-    cwd itself.
+    Uses the one layout rule of :func:`neurodags.outputs.entry_reference_base` (from
+    ``source_root``, never from the discovered set). Pure path computation: nothing is
+    written. Raises :class:`neurodags.utils.DatasetConfigError` when two sources map to
+    the same outputs.
     """
-    abs_root = os.path.abspath(common_root) if common_root is not None else None
-    return os.path.abspath(file_path), abs_root
-
-
-def _check_derivative_names(config_dict: dict) -> None:
-    """Preflight: reject invalid or colliding derivative names (#42).
-
-    Every name in ``DerivativeDefinitions`` is checked, not only the run set:
-    dependencies are pulled in from outside the run set, and all derivatives of
-    a pipeline share one derivatives directory across runs, so a collision
-    between any two definitions corrupts cached outputs sooner or later. Pure
-    computation, so it runs before anything is written.
-    """
-    defs = config_dict.get("DerivativeDefinitions") or {}
-    mapping = check_derivative_names(defs)
-    renamed = {name: file_name for name, file_name in mapping.items() if name != file_name}
-    if renamed:
-        log.debug("Derivative on-disk names differ from YAML names", renamed=renamed)
+    bases = {
+        entry.index: entry_reference_base(entry, datasets_configs[entry.dataset], mount_point)
+        for entry in entries
+    }
+    check_output_collisions(
+        (f"{entry.dataset}: {entry.rel}", bases[entry.index]) for entry in entries
+    )
+    return bases
 
 
 def _resolve_definition_paths(
@@ -206,35 +186,6 @@ def _resolve_definition_paths(
     return definition_paths, base_dir, tuple(resolved_definition_paths)
 
 
-def _resolve_reference_base(
-    file_path: str,
-    dataset_config: DatasetConfig,
-    common_root: str | None,
-    mount_point: Any,
-    create_dirs: bool = False,
-) -> tuple[str, Path]:
-    """Return the per-file output prefix (``reference_base``) as ``(str, Path)``.
-
-    Pure path computation unless *create_dirs* is True, in which case the
-    reference base's parent directory is created. Inspection paths (dry-run,
-    ``status``, ``count-inputs``) must leave it False so they never write (#33).
-    """
-    derivatives_path = resolve_dataset_field(dataset_config, "derivatives_path", mount_point)
-    if derivatives_path:
-        reference_base = os.path.relpath(file_path, start=common_root) if common_root else file_path
-        if reference_base == os.curdir:
-            # common_root is the file itself (e.g. a hand-passed root): keep the
-            # output inside derivatives_path instead of "<derivatives>@Deriv" (#34).
-            reference_base = os.path.basename(file_path)
-        reference_base = os.path.join(derivatives_path, reference_base)
-        reference_base = _sanitize_reference_base(reference_base)
-        if create_dirs:
-            os.makedirs(os.path.dirname(reference_base), exist_ok=True)
-    else:
-        reference_base = _sanitize_reference_base(file_path)
-    return reference_base, Path(reference_base)
-
-
 def _process_file_job(job: _FileJob) -> _FileResult:
     if job.custom_node_paths:
         load_node_definitions(job.custom_node_paths)
@@ -247,14 +198,11 @@ def _process_file_job(job: _FileJob) -> _FileResult:
 
     dataset_config = DatasetConfig(**job.dataset_config)
     source_path = job.source_path or job.file_path
+    reference_base_str, reference_base_path = job.reference_base, Path(job.reference_base)
     try:
-        reference_base_str, reference_base_path = _resolve_reference_base(
-            source_path,
-            dataset_config,
-            job.common_root,
-            job.mount_point,
-            create_dirs=not job.dry_run,
-        )
+        if job.is_node and not job.dry_run:
+            # Direct node jobs write next to reference_base themselves.
+            os.makedirs(os.path.dirname(reference_base_str), exist_ok=True)
     except Exception as setup_error:  # pragma: no cover - safety net
         return _FileResult(
             index=job.index,
@@ -294,6 +242,8 @@ def _process_file_job(job: _FileJob) -> _FileResult:
                 mount_point=job.mount_point,
                 dry_run=job.dry_run,
                 skip_errors=job.skip_errors,
+                source_dataset=job.dataset,
+                source_rel=job.source_rel,
             )
             if job.dry_run:
                 dry_payload = result
@@ -406,8 +356,8 @@ def iterate_derivative_pipeline(
         datasets_configuration=datasets_configuration,
     )
 
+    # Refuses an unmigrated config and invalid derivative names before anything runs.
     config_dict = load_pipeline_configuration(pipeline_configuration)
-    _check_derivative_names(config_dict)
 
     definition_paths, definitions_dir, custom_node_paths = _resolve_definition_paths(
         config_dict, pipeline_configuration, base_dir
@@ -442,7 +392,8 @@ def iterate_derivative_pipeline(
             "enumeration= cannot be combined with inputs= or max_files_per_dataset= "
             "(they are already applied to the enumeration)."
         )
-    common_roots = enumeration.common_roots
+    # Output locations from source_root (spec 4.1); collisions fail before any write.
+    reference_bases = _reference_bases(enumeration.entries, datasets_configs, mount_point)
     # Sorted, limited, indexed; only_index filters it (unknown indices raise).
     selected_entries = enumeration.select(only_index)
 
@@ -514,16 +465,16 @@ def iterate_derivative_pipeline(
                 datasets_configs[dataset_name], mount_point
             )
         dataset_payload = dataset_payloads[dataset_name]
-        source_path, common_root = _worker_source_paths(file_path, common_roots.get(dataset_name))
         jobs.append(
             _FileJob(
                 index=index,
                 dataset=dataset_name,
                 file_path=file_path,
-                source_path=source_path,
+                source_path=os.path.abspath(file_path),
+                source_rel=input_entry.rel,
                 dataset_config=dataset_payload,
                 mount_point=mount_point,
-                common_root=common_root,
+                reference_base=reference_bases[index],
                 is_node=node_callable is not None,
                 node_name=derivative_label if node_callable is not None else None,
                 derivative_name=derivative_entry.name if derivative_entry is not None else None,
@@ -855,12 +806,11 @@ def run_pipeline(
         Returns a combined dataframe with dry-run details when ``dry_run=True``; otherwise ``None``.
         Inputs are enumerated once and shared by every derivative.
     """
-    # Refuses a configuration without naming_version: 1 before anything else.
+    # Refuses a configuration without naming_version: 1, or with invalid derivative
+    # names (spec 2.2), before anything else.
     config = load_pipeline_configuration(pipeline_configuration)
-
-    # Preflight (#42): colliding derivative on-disk names fail before anything is
-    # written, instead of silently sharing cached files.
-    _check_derivative_names(config)
+    for name in derivatives or []:
+        validate_derivative_name(name)
 
     # Preflight: resolve ~/$VARS in every active dataset's path fields before
     # anything is written (code snapshot, derivative dirs), so an unset variable
@@ -892,6 +842,8 @@ def run_pipeline(
                 "(they are already applied to the enumeration)."
             )
         enumeration.select(only_index)  # validate --only-index up front
+        # Output collisions (spec 4.3) fail before the snapshot writes anything.
+        _reference_bases(enumeration.entries, _ds_configs, _mount)
 
     if (
         not dry_run
@@ -1041,7 +993,6 @@ def build_derivative_dataframe(
             "No 'DerivativeDefinitions' found in the configuration. Returning empty dataframe."
         )
         return pd.DataFrame()
-    _check_derivative_names(config_dict)
 
     # Load custom node definitions so save=False derivatives using custom nodes work.
     # The absolute paths are also sent to the workers, which load them too (#36).
@@ -1076,10 +1027,6 @@ def build_derivative_dataframe(
                 missing_derivatives=missing_derivatives,
             )
 
-    # Column names embed the derivative name verbatim and must split back (spec 7.1).
-    for derivative_name in selected_derivatives:
-        validate_derivative_name(derivative_name)
-
     if not selected_derivatives:
         log.warning(
             "No derivatives eligible for dataframe collection were found. Returning empty dataframe."
@@ -1099,7 +1046,7 @@ def build_derivative_dataframe(
         max_files_per_dataset=max_files_per_dataset,
         inputs=inputs,
     )
-    common_roots = enumeration.common_roots
+    reference_bases = _reference_bases(enumeration.entries, datasets_configs, mount_point)
     selected_entries = enumeration.select(only_index)
     for missing_entry in (e for e in selected_entries if e.missing):
         log.error(
@@ -1109,7 +1056,7 @@ def build_derivative_dataframe(
             file_path=missing_entry.path,
             inputs_file=enumeration.inputs_file,
         )
-    all_files = [(e.index, e.dataset, e.path) for e in selected_entries if not e.missing]
+    all_files = [(e.index, e.dataset, e.path, e.rel) for e in selected_entries if not e.missing]
 
     log.debug("build_derivative_dataframe: enumerated files", total_files=len(all_files))
 
@@ -1125,7 +1072,7 @@ def build_derivative_dataframe(
     # derivatives_path is resolved here, in the parent (#28).
     dataset_payloads = {
         name: _dataset_job_payload(datasets_configs[name], mount_point)
-        for name in {dataset_name for _, dataset_name, _ in all_files}
+        for name in {dataset_name for _, dataset_name, _, _ in all_files}
     }
 
     job_args = [
@@ -1134,7 +1081,9 @@ def build_derivative_dataframe(
             dataset_name,
             file_path,
             dataset_payloads[dataset_name],
-            *_worker_source_paths(file_path, common_roots.get(dataset_name)),
+            os.path.abspath(file_path),
+            reference_bases[index],
+            rel,
             mount_point,
             selected_derivatives,
             derivative_definitions,
@@ -1144,7 +1093,7 @@ def build_derivative_dataframe(
             n_files,
             custom_node_paths,
         )
-        for index, dataset_name, file_path in all_files
+        for index, dataset_name, file_path, rel in all_files
     ]
 
     if effective_n_jobs == 1:
@@ -1169,15 +1118,9 @@ def build_derivative_dataframe(
     return pd.DataFrame(rows)
 
 
-def _build_reference_base(
-    file_path: str, dataset_config, common_root: str | None, mount_point: Path | None
-) -> Path:
-    # Read-only: dataframe collection mostly reads cached artifacts. When it must
-    # compute, run_derivative creates the output directory itself (#33).
-    _, reference_base_path = _resolve_reference_base(
-        file_path, dataset_config, common_root, mount_point
-    )
-    return reference_base_path
+def _build_reference_base(reference_base: str) -> Path:
+    """The (already resolved, absolute) reference base of one dataframe row as a Path."""
+    return Path(reference_base)
 
 
 def _check_row_collisions(
@@ -1205,7 +1148,8 @@ def _collect_dataframe_file(
     file_path: str,
     dataset_config_dict: dict,
     source_path: str,
-    common_root: str | None,
+    reference_base: str,
+    source_rel: str,
     mount_point: Any,
     selected_derivatives: list[str],
     derivative_definitions: dict,
@@ -1218,8 +1162,9 @@ def _collect_dataframe_file(
     """Worker function for parallel dataframe collection — one call per file.
 
     ``file_path`` is the discovered spelling reported in the row; ``source_path``
-    and ``common_root`` are absolute (resolved in the parent, #35) and used for
-    all processing.
+    and ``reference_base`` are absolute (resolved in the parent, #35) and used for
+    all processing. Reading is read-only: when a derivative must be computed,
+    run_derivative creates the output directory itself (#33).
     """
     from neurodags.loggers import configure_logging
 
@@ -1244,9 +1189,7 @@ def _collect_dataframe_file(
     ):
         log.info("Collecting dataframe row", total=n_files)
         try:
-            reference_base = _build_reference_base(
-                source_path, dataset_config, common_root, mount_point
-            )
+            reference_base_path = _build_reference_base(reference_base)
             row: dict[str, Any] = {"index": index, "dataset": dataset_name, "file_path": file_path}
             # Which derivative wrote each column, so cross-derivative collisions can be reported.
             column_owner: dict[str, str] = dict.fromkeys(row, "<row metadata>")
@@ -1259,9 +1202,11 @@ def _collect_dataframe_file(
                             derivative_def,
                             derivative_name,
                             source_path,
-                            reference_base=reference_base,
+                            reference_base=reference_base_path,
                             dataset_config=dataset_config,
                             mount_point=mount_point,
+                            source_dataset=dataset_name,
+                            source_rel=source_rel,
                             preserve_complex_values=preserve_complex_values,
                             flatten_xarray_artifacts=not preserve_complex_values,
                         )
