@@ -12,7 +12,8 @@ and the artifact suffix — plus `&`, which replaces `@` when a derivative is it
 source. Whether outputs look BIDS-like depends on how your inputs are named.
 
 ```{note}
-The naming rules on this page describe the current behaviour. A redesign is planned for 0.4.0;
+The naming rules on this page describe the current behaviour. A redesign is planned for 0.4.0
+([#49](https://github.com/yjmantilla/neurodags/issues/49));
 until then they are kept stable so existing caches stay valid.
 ```
 
@@ -167,7 +168,8 @@ a valid `id.N.field` raise an error instead of being passed through.
   a single file, the common root is that file's directory, so outputs land at
   `<derivatives_path>/<file name>@...`. The common root depends on which files match: changing
   `file_pattern` (or `exclude_pattern`) so the matched set has a different common root moves where
-  outputs are expected.
+  outputs are expected (making this layout stable is tracked in
+  [#50](https://github.com/yjmantilla/neurodags/issues/50)).
 - **Without `derivatives_path`**: outputs are written next to the source file
   (`<source path>@<OnDiskName><suffix>`).
 - **`@` in the source basename becomes `&`**: when the source file name already contains `@`
