@@ -25,7 +25,7 @@ log = get_logger(__name__)
 
 
 @register_node(name="bids_parse", override=True)
-def bids_parse(path):
+def bids_parse(path: str | os.PathLike) -> NodeResult:
     """Parse BIDS entities from a file path into a flat dict.
 
     Parameters
