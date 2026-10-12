@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 — 2026-10-11
+## Unreleased
 
 ### Added
 
@@ -8,12 +8,20 @@
   returns a flat dict of properties; downstream args can now pull a single field with
   `id.N.field` (e.g. `subject: id.1.subject`) instead of each node re-parsing the path.
   New built-in `bids_parse` extracts BIDS entities via `mne_bids.get_entities_from_fname`.
-  The arg resolver was extended to support `id.N.field` alongside the existing whole-result
-  `id.N` (fully backward compatible). **Field keys must be plain identifiers** — `.` is the
-  reference separator, so dotted/dashed/nested paths (`id.1.a.b`, `id.1.some-key`) are
-  rejected with a clear error; parser output must stay flat with identifier keys (values are
-  unconstrained). See the new *Parser Nodes* user guide. (`nodes.parsers.bids_parse`,
-  `dag._resolve_refs`)
+  The arg resolver supports `id.N.field` alongside the existing whole-result `id.N`.
+  **Field keys must be plain identifiers** — `.` is the reference separator, so
+  dotted/dashed/nested paths (`id.1.a.b`, `id.1.some-key`) are rejected with a clear error;
+  parser output must stay flat with identifier keys (values are unconstrained). Field access
+  also works when the parser derivative is served from cache (`derivative: Name.json`): the
+  cached `.json` artifact is loaded back into a mapping; field access on any other cached
+  artifact raises. Mermaid diagrams draw edges for `id.N.field` references. See the new
+  *Parser Nodes* user guide. (`nodes.parsers.bids_parse`, `dag._resolve_refs`)
+
+  **Behaviour change:** a literal string arg that starts with `id.<digits>.` (e.g.
+  `"id.1.subject"` or `"id.2.a.b"`) is no longer passed through verbatim — it now resolves
+  as a field reference or raises an error.
+
+## 0.3.1 — 2026-10-11
 
 ### Fixed
 
