@@ -9,6 +9,7 @@
 # overlap, resample to 256 Hz. Writes <file>@Preprocessed.fif (the epochs) and
 # <file>@Preprocessed.report.html (MNE Report with the PSD before/after each step,
 # averaged across channels so the filter roll-offs are easy to see).
+naming_version: 1
 datasets: datasets_quickstart_preprocessing.yml
 mount_point: null
 new_definitions: null

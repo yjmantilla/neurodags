@@ -157,12 +157,14 @@ File discovery, output naming, dependency ordering, and aggregation are handled 
 # datasets.yml
 my_dataset:
   name: MyStudy
+  source_root: /data/bids
   file_pattern: /data/bids/**/*.vhdr
   derivatives_path: /data/derivatives
 ```
 
 ```yaml
 # pipeline.yml
+naming_version: 1
 DerivativeList:
   - Preprocessed
   - BandPower

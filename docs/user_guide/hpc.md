@@ -85,12 +85,14 @@ source activate myenv
 
 python - <<'EOF'
 import os
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("pipeline.yml")
+config_path = os.path.abspath("pipeline.yml")
+config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
+    base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
     skip_errors=True,
@@ -135,12 +137,14 @@ DERIVATIVE=${DERIVATIVES[$DERIV_INDEX]}
 source activate myenv
 
 python - <<EOF
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("pipeline.yml")
+config_path = os.path.abspath("pipeline.yml")
+config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
+    base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
     derivatives=["$DERIVATIVE"],
     only_index=$FILE_INDEX,
     raise_on_error=True,
@@ -190,12 +194,14 @@ source activate myenv
 
 python - <<EOF
 import os
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("pipeline.yml")
+config_path = os.path.abspath("pipeline.yml")
+config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
+    base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
     derivatives=["$DERIVATIVE"],
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
@@ -301,7 +307,8 @@ run_pipeline(config, only_index=index, skip_errors=True)
 
 | Concern | Recommendation |
 |---------|---------------|
-| Cluster paths differ from local | Set `mount_point: hpc` in `pipeline.yml` |
+| Cluster paths differ from local | Set `mount_point: hpc` in `pipeline.yml`; give `source_root`, `file_pattern` and `derivatives_path` an `hpc:` entry each (`neurodags validate` prints the resolved values for the active mount) |
+| Relative dataset paths | Since 0.4.0 they are resolved against the datasets YAML's directory, not the job's working directory; a config passed as a dict needs `base_dir=` (the generated `slurm-script` templates pass it) |
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
 | Partial reruns | Caching is automatic — resubmit the full array, cached files are skipped |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |

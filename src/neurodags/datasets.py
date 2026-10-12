@@ -16,19 +16,32 @@ import mne
 import numpy as np
 
 from neurodags.definitions import DatasetConfig, PathLike
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_configuration, load_pipeline_configuration
 from neurodags.utils import expand_path, get_num_digits
 
 
 def get_datasets_and_mount_point_from_pipeline_configuration(
     pipeline_input: dict[str, Any] | PathLike,
     datasets_input: dict[str, Any] | PathLike | None = None,
-) -> dict[str, Any]:
+    *,
+    base_dir: PathLike | None = None,
+) -> tuple[dict[str, DatasetConfig], Any]:
     """
     Load the pipeline configuration and return the datasets section and mount point.
 
     If datasets_input is provided, it overrides any datasets defined in the
-    pipeline configuration.
+    pipeline configuration. The pipeline configuration must declare
+    ``naming_version: 1`` (:func:`neurodags.loaders.load_pipeline_configuration`).
+
+    Each returned :class:`~neurodags.definitions.DatasetConfig` remembers the directory
+    its relative path fields (``source_root``, ``file_pattern``, ``exclude_pattern``,
+    ``derivatives_path``) resolve against (spec §1.3):
+
+    - datasets read from a datasets YAML: that YAML's directory;
+    - an inline ``datasets:`` mapping in a pipeline YAML: the pipeline YAML's directory;
+    - a mapping given in memory (``datasets_input`` dict, or inline datasets of a
+      ``pipeline_input`` dict): *base_dir*. Without *base_dir*, relative paths in such a
+      mapping are an error when they are resolved.
 
     Parameters
     ----------
@@ -39,8 +52,12 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         If provided, it overrides the 'datasets' section of the pipeline configuration.
         ``~`` and ``$VARS`` are expanded; a relative path is resolved relative to the
         pipeline YAML's directory when ``pipeline_input`` is a path (same rule as the
-        ``datasets:`` key). The CLI's ``-d/--datasets`` is resolved against the current
-        working directory before it reaches this function.
+        ``datasets:`` key), else relative to *base_dir* (or the current working
+        directory when *base_dir* is not given). The CLI's ``-d/--datasets`` is resolved
+        against the current working directory before it reaches this function.
+    base_dir : path-like, optional
+        Directory that relative paths of in-memory dataset mappings resolve against
+        (see above). Ignored for datasets read from a YAML file.
 
     Returns
     -------
@@ -51,16 +68,28 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
 
     Raises
     ------
+    ConfigVersionError
+        If the pipeline configuration lacks ``naming_version: 1``.
     ValueError
         If the datasets section is missing or invalid.
     """
-    pipeline_config = load_configuration(pipeline_input)
+    pipeline_config = load_pipeline_configuration(pipeline_input)
     mount_point = pipeline_config.get("mount_point", None)
+    pipeline_is_file = isinstance(pipeline_input, str | os.PathLike)
+    memory_base = os.path.abspath(os.fspath(base_dir)) if base_dir is not None else None
 
     if datasets_input is not None:
         datasets = datasets_input
+        # A datasets mapping given to the API is relative to base_dir only.
+        origin_dir = memory_base
     else:
         datasets = pipeline_config.get("datasets", None)
+        # Inline datasets in a pipeline YAML are relative to that YAML.
+        origin_dir = (
+            os.path.dirname(os.path.abspath(os.fspath(pipeline_input)))
+            if pipeline_is_file
+            else memory_base
+        )
 
     if datasets is None:
         raise ValueError("No 'datasets' configuration provided or found in the pipeline.")
@@ -70,19 +99,28 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         # pipeline file; otherwise "$PROJ/ds.yml" would be joined onto the
         # pipeline directory first (#28).
         datasets = expand_path(os.fspath(datasets), field="datasets")
-        if isinstance(pipeline_input, str | os.PathLike):
-            datasets_path_obj = Path(datasets)
-            if not datasets_path_obj.is_absolute():
+        datasets_path_obj = Path(datasets)
+        if not datasets_path_obj.is_absolute():
+            if pipeline_is_file:
                 datasets = str(Path(pipeline_input).resolve().parent / datasets_path_obj)
-        datasets = load_configuration(datasets)
+            elif memory_base is not None:
+                datasets = os.path.join(memory_base, datasets)
+        datasets_file = os.path.abspath(datasets)
+        datasets = load_configuration(datasets_file)
+        # Paths inside a datasets YAML are relative to that YAML (0.4.0).
+        origin_dir = os.path.dirname(datasets_file)
     elif not isinstance(datasets, dict):
         raise ValueError("'datasets' must be a dict or a path to a YAML file.")
 
     # At this point, datasets should be a dict
     # Make them into DatasetConfig instances
-    datasets = {name: DatasetConfig(**cfg) for name, cfg in datasets.items()}
+    configs: dict[str, DatasetConfig] = {}
+    for name, cfg in datasets.items():
+        dataset_config = DatasetConfig(**cfg)
+        dataset_config._base_dir = origin_dir
+        configs[name] = dataset_config
 
-    return datasets, mount_point
+    return configs, mount_point
 
 
 def replace_brainvision_filename(fpath: PathLike, newname: str) -> None:

@@ -115,12 +115,14 @@ def dummy_pipeline(tmp_path: Path) -> dict[str, Any]:
     datasets = {
         "test_dataset": {
             "name": "TestDataset",
+            "source_root": str(data_dir),
             "file_pattern": str(data_dir / "**" / "*.vhdr"),
             "derivatives_path": str(out_dir),
         }
     }
 
     config = {
+        "naming_version": 1,
         "datasets": datasets,
         "mount_point": None,
         "DerivativeDefinitions": {

@@ -132,12 +132,16 @@ DerivativeList:
 
 ```yaml
 # pipeline.yml
+naming_version: 1    # required since 0.4.0
 mount_point: local   # or: hpc
 ```
 
 ```yaml
-# datasets.yml
+# datasets.yml (relative paths are relative to this file's folder)
 my_dataset:
+  source_root:
+    local: data
+    hpc: /cluster/BIDS
   file_pattern:
     local: data/**/*.vhdr
     hpc: /cluster/BIDS/**/*.vhdr
@@ -155,6 +159,7 @@ Dataset entries can declare a `vars:` block. Any pipeline node arg whose string 
 ```yaml
 # datasets.yml
 eeg_study_EO:
+  source_root: { local: data }
   file_pattern: { local: data/**/*@CleanedPrepRaw.fif }
   derivatives_path: { local: outputs/features/EO_baseline }
   vars:

@@ -289,12 +289,14 @@ def channel_statistics(data) -> NodeResult:
 # datasets.yml
 my_study:
   name: MyStudy
+  source_root: data
   file_pattern: data/**/*.csv
   derivatives_path: derivatives/
 ```
 
 ```yaml
 # pipeline.yml
+naming_version: 1
 new_definitions: custom_nodes.py
 
 DerivativeList:

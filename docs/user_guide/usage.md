@@ -7,7 +7,20 @@ NeuroDAGs installs a unified `neurodags` command with several subcommands. Every
 
 - **Paths you type on the command line** (the pipeline file, `-d/--datasets`): the current working directory.
 - **The `datasets:` key inside `pipeline.yml`**: the directory of `pipeline.yml`.
-- **Paths inside a datasets YAML** (`file_pattern`, `derivatives_path`, `exclude_pattern`): the current working directory, *not* the datasets YAML's directory. Use absolute paths or `$VARS` there if you run from different directories. (Planned to become relative to the datasets YAML in 0.4.0, see [#50](https://github.com/yjmantilla/neurodags/issues/50).)
+- **Paths inside a datasets YAML** (`source_root`, `file_pattern`, `exclude_pattern`, `derivatives_path`): the directory of **that datasets YAML** (changed in 0.4.0; in 0.3.x they were relative to the current working directory).
+- **The same keys in an inline `datasets:` mapping inside `pipeline.yml`**: the directory of `pipeline.yml`.
+- **The same keys in a dict passed to the Python API**: the `base_dir=` argument (relative paths without it are an error).
+
+`~` and `$VARS` are expanded first; a path that is absolute after expansion is used as is.
+```
+
+```{admonition} Changed in 0.4.0
+:class: important
+
+Every pipeline YAML must declare `naming_version: 1`. A configuration without it (or with
+another value) is refused by every command, the TUI and the Python API with a one-line error
+(exit code `2` on the CLI); to upgrade a 0.3.x configuration, run `neurodags migrate`
+(available in 0.4.0). See {doc}`pipeline_yaml`.
 ```
 
 ## Global Options
@@ -36,7 +49,7 @@ df = pd.read_json("run.jsonl", lines=True)
 
 ## Validation
 
-Load and summarise the configuration without running anything. Prints the resolved datasets, every derivative *defined* in the config, and the **effective run set** — the selected derivatives plus the intermediates that will be computed as their dependencies (what a `run` actually produces). Derivatives that are defined but not part of the run are listed separately, and `for_dataframe` outputs are flagged.
+Load and summarise the configuration without running anything. Prints, for each active dataset, the active mount point and the resolved `source_root`, `file_pattern`, `exclude_pattern`, `derivatives_path` (and `derivatives_subdir` with the resulting output folder), then every derivative *defined* in the config, and the **effective run set** — the selected derivatives plus the intermediates that will be computed as their dependencies (what a `run` actually produces). Derivatives that are defined but not part of the run are listed separately, and `for_dataframe` outputs are flagged.
 
 ```bash
 neurodags validate pipeline.yml                       # summary for the default run set (DerivativeList)
@@ -45,6 +58,18 @@ neurodags validate pipeline.yml --derivative BandPower  # effective set for a sp
 ```
 
 Pass `--derivative` (repeatable) to preview exactly what a `run --derivative …` would compute: dependencies are auto-resolved into `computed_with_dependencies`, while anything else defined shows under `not computed by this run`.
+
+Dataset configuration errors are printed to stderr, one `error: …` line each, and `validate` exits with code `1`: a missing `source_root` (with a suggested value derived from `file_pattern` when one exists), a `source_root` that is not an existing directory, a path that does not resolve for the active mount point, an invalid `derivatives_subdir`, or two active datasets sharing a `derivatives_path` with the same `derivatives_subdir`. `run`, `dry-run`, `status`, `count-inputs` and `dataframe` refuse the same configurations before touching any file (exit code `2`).
+
+```text
+  study:
+    mount: local
+    source_root: None
+    file_pattern: /data/study/rawdata/**/*.vhdr
+    derivatives_path: /data/study/derivatives
+...
+error: datasets.study.source_root is required (since 0.4.0): set it to the root folder of the dataset's source files; suggested for mount 'local': /data/study/rawdata
+```
 
 See {doc}`pipeline_yaml` for all pipeline keys and {doc}`datasets_yaml` for dataset fields.
 
@@ -271,15 +296,14 @@ How the `-d` path is resolved (`validate`, `run`, `dry-run`, `dataframe`, `count
 
 1. `~` and `$VARS` are expanded, exactly as for the `datasets:` key (an unset or empty variable is an error).
 2. A relative path is resolved against the **current working directory** — the directory you run `neurodags` from, like every other CLI path.
-3. **Deprecated fallback:** if the file does not exist there but does exist relative to the pipeline YAML's directory (the behaviour up to 0.3.4), that file is used and one warning line is printed to stderr with the cwd-relative path to pass instead, e.g. `neurodags: warning: -d 'datasets_alt.yml' was found relative to the pipeline YAML; this lookup is deprecated and will be removed in a future release. Pass '-d pipelines/x/datasets_alt.yml' instead.` This fallback will be removed in a future release.
-4. If neither exists, the command stops with a short error naming both paths it tried and exits with code `2` (no traceback).
+3. If the file does not exist there, the command stops with a short error naming the path it tried and exits with code `2` (no traceback). **Removed in 0.4.0:** the YAML-relative fallback (deprecated in 0.3.5) that looked the file up next to the pipeline YAML.
 
-The `datasets:` key written *inside* `pipeline.yml` is unaffected: it stays relative to the pipeline YAML.
+Paths written *inside* the datasets file passed with `-d` are resolved against that file's own directory (0.4.0). The `datasets:` key written *inside* `pipeline.yml` is unaffected: it stays relative to the pipeline YAML.
 
 ```bash
 # run from the repository root; the pipeline lives in pipelines/x/
 neurodags run pipelines/x/pipeline.yml -d pipelines/x/datasets_alt.yml   # cwd-relative (correct)
-neurodags run pipelines/x/pipeline.yml -d datasets_alt.yml               # YAML-relative: still works, with a deprecation warning
+neurodags run pipelines/x/pipeline.yml -d datasets_alt.yml               # error since 0.4.0 (not in the cwd)
 ```
 
-In the Python API (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`), a relative `datasets_configuration` string keeps the library rule — relative to the pipeline YAML's directory, like the `datasets:` key. Pass an absolute path to avoid ambiguity.
+In the Python API (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`), a relative `datasets_configuration` string keeps the library rule — relative to the pipeline YAML's directory, like the `datasets:` key (relative to `base_dir=` for an in-memory pipeline). Pass an absolute path to avoid ambiguity. A `datasets_configuration` dict with relative paths needs `base_dir=`.

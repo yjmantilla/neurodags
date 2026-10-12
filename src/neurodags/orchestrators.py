@@ -16,14 +16,14 @@ from neurodags.definitions import DatasetConfig
 from neurodags.derivatives import get_derivative, list_derivatives
 from neurodags.derivatives.pipeline import register_derivatives_from_dict
 from neurodags.iterators import get_all_files_from_pipeline_configuration
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.loggers import get_logger
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
 from neurodags.utils import (
     check_derivative_names,
     expand_path,
-    get_path,
+    resolve_dataset_field,
     resolve_dataset_paths,
 )
 
@@ -89,35 +89,21 @@ def _sanitize_reference_base(path: str) -> str:
 
 
 def _dataset_job_payload(dataset_config: Any, mount_point: Any) -> dict:
-    """Serialize *dataset_config* for a worker with ``derivatives_path`` resolved.
+    """Serialize *dataset_config* for a worker with its path fields resolved.
 
-    The active ``derivatives_path`` is selected and ``~``/``$VAR``-expanded in the
-    parent process, so workers (which may be reused loky processes holding a stale
-    environment) write exactly where the parent resolved (#28).
+    The active value of every path field (``source_root``, ``file_pattern``,
+    ``exclude_pattern``, ``derivatives_path``) is selected, ``~``/``$VAR``-expanded and
+    resolved against the dataset's origin directory in the parent process, so workers
+    (which may be reused loky processes holding a stale environment and cwd) see
+    absolute paths and write exactly where the parent resolved (#28, #35).
     """
     if hasattr(dataset_config, "model_dump"):
         payload = dataset_config.model_dump(mode="json")
     else:  # pragma: no cover - pydantic v1 fallback
         payload = dataset_config.dict()
-    # Resolve the active path fields here and make them absolute against the
-    # *parent's* cwd: reused loky workers keep the cwd (and environment) they
-    # were started with, so a relative path would resolve elsewhere there (#35).
-    for attr in ("file_pattern", "derivatives_path"):
+    for attr in ("source_root", "file_pattern", "exclude_pattern", "derivatives_path"):
         if payload.get(attr):
-            payload[attr] = _absolute(
-                get_path(
-                    payload[attr],
-                    mount_point=mount_point,
-                    field=f"datasets.{payload.get('name')}.{attr}",
-                )
-            )
-    if payload.get("exclude_pattern"):
-        payload["exclude_pattern"] = _absolute(
-            expand_path(
-                payload["exclude_pattern"],
-                field=f"datasets.{payload.get('name')}.exclude_pattern",
-            )
-        )
+            payload[attr] = _absolute(resolve_dataset_field(dataset_config, attr, mount_point))
     return payload
 
 
@@ -157,13 +143,14 @@ def _check_derivative_names(config_dict: dict) -> None:
 
 
 def _resolve_definition_paths(
-    config_dict: dict, pipeline_configuration: Any
+    config_dict: dict, pipeline_configuration: Any, memory_base_dir: Any = None
 ) -> tuple[list[Any], Path, tuple[str, ...]]:
     """Return ``(raw_paths, base_dir, absolute_paths)`` for ``new_definitions``.
 
-    Relative entries resolve against the pipeline file's directory (or the cwd for
-    an in-memory config). The absolute paths are what workers receive: fresh loky
-    workers have no custom nodes and reused ones have a stale cwd (#35, #36).
+    Relative entries resolve against the pipeline file's directory (or, for an
+    in-memory config, *memory_base_dir* when given, else the cwd). The absolute paths
+    are what workers receive: fresh loky workers have no custom nodes and reused ones
+    have a stale cwd (#35, #36).
     """
     new_definitions = config_dict.get("new_definitions")
     if not new_definitions:
@@ -175,7 +162,12 @@ def _resolve_definition_paths(
     else:
         raise TypeError("new_definitions must be a string or list of paths")
     is_path_like = isinstance(pipeline_configuration, str | os.PathLike)
-    base_dir = Path(pipeline_configuration).resolve().parent if is_path_like else Path.cwd()
+    if is_path_like:
+        base_dir = Path(pipeline_configuration).resolve().parent
+    elif memory_base_dir is not None:
+        base_dir = Path(os.path.abspath(os.fspath(memory_base_dir)))
+    else:
+        base_dir = Path.cwd()
     resolved_definition_paths = []
     for candidate in definition_paths:
         candidate_path = Path(candidate).expanduser()
@@ -201,13 +193,8 @@ def _resolve_reference_base(
     reference base's parent directory is created. Inspection paths (dry-run,
     ``status``, ``count-inputs``) must leave it False so they never write (#33).
     """
-    derivatives_path = dataset_config.derivatives_path
+    derivatives_path = resolve_dataset_field(dataset_config, "derivatives_path", mount_point)
     if derivatives_path:
-        derivatives_path = get_path(
-            derivatives_path,
-            mount_point=mount_point,
-            field=f"datasets.{dataset_config.name}.derivatives_path",
-        )
         reference_base = os.path.relpath(file_path, start=common_root) if common_root else file_path
         if reference_base == os.curdir:
             # common_root is the file itself (e.g. a hand-passed root): keep the
@@ -319,6 +306,8 @@ def iterate_derivative_pipeline(
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
+    *,
+    base_dir: str | os.PathLike | None = None,
 ) -> pd.DataFrame | None:
     """
     Iterate over all files specified in the pipeline configuration and call a given function on each file.
@@ -357,6 +346,14 @@ def iterate_derivative_pipeline(
         Backend passed to joblib's ``Parallel`` (defaults to joblib's default when not provided).
     joblib_prefer : str, optional
         Preference hint for joblib backend selection (e.g. ``"threads"`` or ``"processes"``).
+    base_dir : str | os.PathLike, optional
+        Directory that relative paths of in-memory configurations resolve against: the
+        ``source_root``/``file_pattern``/``exclude_pattern``/``derivatives_path`` of a
+        datasets mapping passed as a dict (inline in a dict ``pipeline_configuration``, or
+        as ``datasets_configuration``), a relative ``datasets:`` reference and
+        ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
+        against that file's directory instead. Without it, relative dataset paths in a
+        mapping are an error.
 
     Returns
     -------
@@ -369,17 +366,14 @@ def iterate_derivative_pipeline(
         datasets_configuration=datasets_configuration,
     )
 
-    is_path_like = isinstance(pipeline_configuration, str | os.PathLike)
-    config_dict = (
-        load_configuration(pipeline_configuration) if is_path_like else pipeline_configuration
-    )
+    config_dict = load_pipeline_configuration(pipeline_configuration)
     _check_derivative_names(config_dict)
 
-    definition_paths, base_dir, custom_node_paths = _resolve_definition_paths(
-        config_dict, pipeline_configuration
+    definition_paths, definitions_dir, custom_node_paths = _resolve_definition_paths(
+        config_dict, pipeline_configuration, base_dir
     )
     if definition_paths:
-        load_node_definitions(definition_paths, base_dir=base_dir)
+        load_node_definitions(definition_paths, base_dir=definitions_dir)
 
     if "DerivativeDefinitions" in config_dict:
         register_derivatives_from_dict(config_dict)
@@ -389,13 +383,17 @@ def iterate_derivative_pipeline(
         )
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_configuration, datasets_input=datasets_configuration
+        pipeline_configuration, datasets_input=datasets_configuration, base_dir=base_dir
     )
+    # Preflight: unresolved paths, missing/invalid source_root, invalid
+    # derivatives_subdir and shared derivatives_path fail before any file is touched.
+    resolve_dataset_paths(datasets_configs, mount_point)
 
     files_per_dataset, all_files, common_roots = get_all_files_from_pipeline_configuration(
         pipeline_configuration,
         datasets_input=datasets_configuration,
         max_files_per_dataset=None,  # gather all files, then filter locally
+        base_dir=base_dir,
     )
 
     dry_run_collection: list[dict[str, Any]] = []
@@ -708,11 +706,8 @@ def _snapshot_pipeline_config(
             continue
         if getattr(dataset_config, "skip", False):
             continue
-        derivatives_path = get_path(
-            dataset_config.derivatives_path,
-            mount_point=mount_point,
-            field=f"datasets.{dataset_config.name}.derivatives_path",
-        )
+        # The snapshot stays at <derivatives_path>/code/, not under derivatives_subdir.
+        derivatives_path = resolve_dataset_field(dataset_config, "derivatives_path", mount_point)
         code_dir = Path(derivatives_path) / "code"
         if str(code_dir) in seen_code_dirs:
             continue
@@ -748,6 +743,8 @@ def run_pipeline(
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
+    *,
+    base_dir: str | os.PathLike | None = None,
 ) -> pd.DataFrame | None:
     """
     Execute multiple derivatives from a pipeline configuration in dependency order.
@@ -785,17 +782,22 @@ def run_pipeline(
         Backend passed to joblib's ``Parallel``.
     joblib_prefer : str, optional
         Preference hint for joblib backend selection.
+    base_dir : str | os.PathLike, optional
+        Directory that relative paths of in-memory configurations resolve against: the
+        ``source_root``/``file_pattern``/``exclude_pattern``/``derivatives_path`` of a
+        datasets mapping passed as a dict (inline in a dict ``pipeline_configuration``, or
+        as ``datasets_configuration``), a relative ``datasets:`` reference and
+        ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
+        against that file's directory instead. Without it, relative dataset paths in a
+        mapping are an error.
 
     Returns
     -------
     None | pandas.DataFrame
         Returns a combined dataframe with dry-run details when ``dry_run=True``; otherwise ``None``.
     """
-    config = (
-        load_configuration(pipeline_configuration)
-        if isinstance(pipeline_configuration, str | os.PathLike)
-        else pipeline_configuration
-    )
+    # Refuses a configuration without naming_version: 1 before anything else.
+    config = load_pipeline_configuration(pipeline_configuration)
 
     # Preflight (#42): colliding derivative on-disk names fail before anything is
     # written, instead of silently sharing cached files.
@@ -807,7 +809,7 @@ def run_pipeline(
     # swallowed by the per-file error records (#28).
     try:
         _ds_configs, _mount = get_datasets_and_mount_point_from_pipeline_configuration(
-            pipeline_configuration, datasets_input=datasets_configuration
+            pipeline_configuration, datasets_input=datasets_configuration, base_dir=base_dir
         )
     except Exception as _load_err:
         # Loading errors resurface (and raise) when each derivative loads the
@@ -857,6 +859,7 @@ def run_pipeline(
             n_jobs=n_jobs,
             joblib_backend=joblib_backend,
             joblib_prefer=joblib_prefer,
+            base_dir=base_dir,
         )
         if dry_run and result is not None:
             dry_run_results.append(result)
@@ -877,6 +880,7 @@ def build_derivative_dataframe(
     preserve_complex_values: bool = False,
     raise_on_error: bool = False,
     n_jobs: int | None = None,
+    base_dir: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
     """
     Assemble a dataframe by collecting derivative artifacts for every file in a pipeline configuration.
@@ -911,6 +915,14 @@ def build_derivative_dataframe(
         Number of parallel workers for file-level collection. ``-1`` uses all cores, ``1`` or
         ``None`` runs serially. Parallelism is per-file using separate processes (loky) to avoid
         HDF5/NetCDF4 thread-safety issues — both wide and long output formats are fully supported.
+    base_dir : str | os.PathLike, optional
+        Directory that relative paths of in-memory configurations resolve against: the
+        ``source_root``/``file_pattern``/``exclude_pattern``/``derivatives_path`` of a
+        datasets mapping passed as a dict (inline in a dict ``pipeline_configuration``, or
+        as ``datasets_configuration``), a relative ``datasets:`` reference and
+        ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
+        against that file's directory instead. Without it, relative dataset paths in a
+        mapping are an error.
 
     Returns
     -------
@@ -924,11 +936,7 @@ def build_derivative_dataframe(
         datasets_configuration=datasets_configuration,
     )
 
-    config_dict = (
-        load_configuration(pipeline_configuration)
-        if isinstance(pipeline_configuration, str)
-        else pipeline_configuration
-    )
+    config_dict = load_pipeline_configuration(pipeline_configuration)
 
     if "DerivativeDefinitions" not in config_dict:
         log.warning(
@@ -939,11 +947,11 @@ def build_derivative_dataframe(
 
     # Load custom node definitions so save=False derivatives using custom nodes work.
     # The absolute paths are also sent to the workers, which load them too (#36).
-    definition_paths, base_dir, custom_node_paths = _resolve_definition_paths(
-        config_dict, pipeline_configuration
+    definition_paths, definitions_dir, custom_node_paths = _resolve_definition_paths(
+        config_dict, pipeline_configuration, base_dir
     )
     if definition_paths:
-        load_node_definitions(definition_paths, base_dir=base_dir)
+        load_node_definitions(definition_paths, base_dir=definitions_dir)
 
     register_derivatives_from_dict(config_dict)
 
@@ -977,19 +985,23 @@ def build_derivative_dataframe(
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_configuration, datasets_input=datasets_configuration
+        pipeline_configuration, datasets_input=datasets_configuration, base_dir=base_dir
     )
     # Preflight (#28): fail on unresolved ~/$VARS before any directory is touched.
     resolve_dataset_paths(datasets_configs, mount_point)
 
     _, _, common_roots = get_all_files_from_pipeline_configuration(
-        pipeline_configuration, datasets_input=datasets_configuration, max_files_per_dataset=None
+        pipeline_configuration,
+        datasets_input=datasets_configuration,
+        max_files_per_dataset=None,
+        base_dir=base_dir,
     )
 
     files_per_dataset, all_files, _ = get_all_files_from_pipeline_configuration(
         pipeline_configuration,
         datasets_input=datasets_configuration,
         max_files_per_dataset=max_files_per_dataset,
+        base_dir=base_dir,
     )
 
     log.debug(
@@ -1283,9 +1295,7 @@ if __name__ == "__main__":  # pragma: no cover
     )
     args = parser.parse_args()
 
-    from neurodags.loaders import load_configuration
-
-    pipeline_configuration_dict = load_configuration(args.config)
+    pipeline_configuration_dict = load_pipeline_configuration(args.config)
 
     derivative_list = pipeline_configuration_dict.get("DerivativeList", [])
     if not derivative_list:

@@ -39,6 +39,7 @@ def _write_project(root: Path, definitions: dict, derivative_list: list[str]) ->
             {
                 "d": {
                     "name": "d",
+                    "source_root": str(root / "in"),
                     "file_pattern": str(root / "in" / "*.txt"),
                     "derivatives_path": str(root / "out"),
                 }
@@ -49,6 +50,7 @@ def _write_project(root: Path, definitions: dict, derivative_list: list[str]) ->
     pipe.write_text(
         yaml.safe_dump(
             {
+                "naming_version": 1,
                 "datasets": "ds.yml",
                 "mount_point": None,
                 "DerivativeDefinitions": definitions,

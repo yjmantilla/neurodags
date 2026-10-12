@@ -2,7 +2,58 @@
 
 ## Unreleased (0.4.0)
 
+### Breaking
+
+- **`naming_version: 1` is required** at the top level of every pipeline configuration. A
+  configuration without it, or with another value, is refused before anything runs by every
+  entry point: all CLI subcommands (one `neurodags: error: ...` line, exit code `2`, no
+  traceback), the TUI (`neurodags tui`, `neurodags-tui`) and the Python API (`run_pipeline`,
+  `iterate_derivative_pipeline`, `build_derivative_dataframe`,
+  `get_datasets_and_mount_point_from_pipeline_configuration`, ...; raises
+  `neurodags.loaders.ConfigVersionError`). The message points to `neurodags migrate`
+  (available in 0.4.0). New helper `neurodags.loaders.load_pipeline_configuration` loads a
+  pipeline and checks the version.
+- **`source_root` is required for every dataset** (active or skipped; string or mount map).
+  For an active dataset it must resolve for the active mount point and be an existing
+  directory. A missing value is an error; `neurodags validate` suggests one from the fixed
+  part of `file_pattern` (never a filesystem root).
+- **Relative paths inside a datasets YAML are resolved against that YAML's directory**
+  (`source_root`, `file_pattern`, `exclude_pattern`, `derivatives_path`; in 0.3.x: the current
+  working directory). In an inline `datasets:` mapping they resolve against the pipeline YAML's
+  directory, and in a dict passed to the Python API against the new `base_dir=` argument
+  (relative paths without it are an error). `~`/`$VAR` expansion is unchanged and happens
+  first. Discovered file paths are therefore absolute when the pattern was relative.
+- **The YAML-relative `-d/--datasets` fallback is removed** (deprecated in 0.3.5): `-d` is
+  resolved against the current working directory only; a missing file is a clean error
+  (exit `2`). `neurodags.cli.resolve_cli_datasets_path` takes only the `-d` value now.
+- **Two active datasets resolving to the same `derivatives_path` must use different
+  `derivatives_subdir` values** (unset counts as one value); otherwise `validate` and every
+  run, dry run, `status`, `count-inputs` and `dataframe` refuse the configuration
+  (`neurodags.utils.DatasetConfigError`).
+- The generated `slurm-script` templates load the pipeline with
+  `load_pipeline_configuration` and pass `base_dir=` (the pipeline's directory) to
+  `run_pipeline`.
+
 ### Added
+
+- **`derivatives_subdir`** dataset field (optional): a relative subfolder of
+  `derivatives_path` for the dataset (validated: no `..`, not absolute, not `code/` or
+  `.neurodags/`). Validated and reported in this release step; the output layout that writes
+  under it lands with the rest of the 0.4.0 layout change. The `code/` snapshot stays at
+  `<derivatives_path>/code/`.
+- **`base_dir=`** argument on `run_pipeline`, `iterate_derivative_pipeline`,
+  `build_derivative_dataframe`, `get_all_files_from_pipeline_configuration` and
+  `get_datasets_and_mount_point_from_pipeline_configuration`: the directory relative paths of
+  in-memory dataset mappings (and, for a dict pipeline, a relative `datasets:` reference and
+  `new_definitions`) resolve against.
+- **`neurodags validate` dataset report**: per active dataset, the active mount point and the
+  resolved `source_root`, `file_pattern`, `exclude_pattern`, `derivatives_path`,
+  `derivatives_subdir` and resulting output folder; every dataset problem (with the
+  `source_root` suggestion) as an `error:` line on stderr, exit code `1`.
+- Helpers in `neurodags.utils` for the following 0.4.0 steps: `resolve_config_path`,
+  `resolve_dataset_field`, `suggest_source_root`, `relative_to_source_root` (lexical check that
+  a file lies strictly below `source_root`), `check_derivatives_subdir`,
+  `effective_derivatives_base` and `inspect_dataset_paths`.
 
 - **Internal `neurodags.naming` module** (#49, #50): pure functions that define the 0.4.0
   naming rules in one place: derivative-name grammar and validation (string keys, reserved
@@ -11,6 +62,12 @@
   `encode_number`/`decode_number` (`0p5`, `m1`), artifact suffix validation, output basenames (`<source>@<name><suffix>`), reference parsing, and
   reversible percent-encoded dataframe columns (`Name.nc@ch-C3_freq-8-12`, `Name.error`).
   Not yet used by the pipeline; behaviour is unchanged.
+
+### Changed
+
+- Example pipelines and datasets (`example_pipelines/`), the documentation and the gallery
+  examples use the 0.4.0 configuration surface. `datasets_psycho.yml`'s `fir` `file_pattern`
+  was a bare directory and is now a `**/*.vhdr` glob.
 
 ## 0.3.6 — 2026-10-12
 
