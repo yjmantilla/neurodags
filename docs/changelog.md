@@ -19,6 +19,22 @@
   `KeyError: Unknown node`. (`nodes/antropy.py`, `nodes/neurokit.py`, `nodes/spectral.py`,
   `datasets.py`)
 
+- **`~` and `$VARS` in dataset paths are now expanded** (#28): `file_pattern`,
+  `derivatives_path`, `exclude_pattern` and the `datasets:` reference in `pipeline.yml` expand
+  a leading `~` and `$NAME` / `${NAME}` (`%NAME%` on Windows) for the active mount point.
+  Previously they were used verbatim, so `derivatives_path: $SCRATCH/out` silently wrote
+  derivatives (and the `code/` snapshot) into a literal `./$SCRATCH` directory. The `datasets:`
+  reference is now expanded *before* being joined to the pipeline directory, and
+  `derivatives_path` is resolved in the parent process before dispatching parallel workers.
+  (`utils.expand_path`, `utils.get_path`, `utils.resolve_dataset_paths`)
+
+  **New error:** a referenced environment variable that is unset or empty now raises
+  `ValueError` naming the field and variable. `run_pipeline` / `neurodags run` / `dry-run` /
+  `status`, `build_derivative_dataframe` / `neurodags dataframe` and `neurodags validate` check
+  every active (non-skipped) dataset before anything is written, so the error is not
+  swallowed into per-file error records. Inactive mount-point entries are not checked.
+  `neurodags validate` now also prints the resolved paths for each dataset.
+
 - **Docs site now shows the released version**: the Docs workflow checked out without tags, so
   hatch-vcs fell back to `0.1.dev1+g<hash>` on the published documentation. The workflow now
   fetches full history and tags (`fetch-depth: 0`), and `docs/conf.py` displays the nearest

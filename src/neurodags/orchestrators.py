@@ -20,7 +20,7 @@ from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
-from neurodags.utils import get_path
+from neurodags.utils import expand_path, get_path, resolve_dataset_paths
 
 log = get_logger(__name__)
 
@@ -78,6 +78,26 @@ def _sanitize_reference_base(path: str) -> str:
     return os.path.join(dirpart, sanitized) if dirpart else sanitized
 
 
+def _dataset_job_payload(dataset_config: Any, mount_point: Any) -> dict:
+    """Serialize *dataset_config* for a worker with ``derivatives_path`` resolved.
+
+    The active ``derivatives_path`` is selected and ``~``/``$VAR``-expanded in the
+    parent process, so workers (which may be reused loky processes holding a stale
+    environment) write exactly where the parent resolved (#28).
+    """
+    if hasattr(dataset_config, "model_dump"):
+        payload = dataset_config.model_dump(mode="json")
+    else:  # pragma: no cover - pydantic v1 fallback
+        payload = dataset_config.dict()
+    if payload.get("derivatives_path"):
+        payload["derivatives_path"] = get_path(
+            payload["derivatives_path"],
+            mount_point=mount_point,
+            field=f"datasets.{payload.get('name')}.derivatives_path",
+        )
+    return payload
+
+
 def _resolve_reference_base(
     file_path: str,
     dataset_config: DatasetConfig,
@@ -86,7 +106,11 @@ def _resolve_reference_base(
 ) -> tuple[str, Path]:
     derivatives_path = dataset_config.derivatives_path
     if derivatives_path:
-        derivatives_path = get_path(derivatives_path, mount_point=mount_point)
+        derivatives_path = get_path(
+            derivatives_path,
+            mount_point=mount_point,
+            field=f"datasets.{dataset_config.name}.derivatives_path",
+        )
         os.makedirs(derivatives_path, exist_ok=True)
         reference_base = os.path.relpath(file_path, start=common_root) if common_root else file_path
         reference_base = os.path.join(derivatives_path, reference_base)
@@ -359,13 +383,14 @@ def iterate_derivative_pipeline(
     derivative_definitions_map = config_dict.get("DerivativeDefinitions", {}) or {}
 
     jobs: list[_FileJob] = []
+    dataset_payloads: dict[str, dict] = {}
     for index, dataset_name, file_path in all_files:
         log.debug("Processing file", index=index, dataset=dataset_name, file_path=file_path)
-        dataset_config = datasets_configs[dataset_name]
-        if hasattr(dataset_config, "model_dump"):
-            dataset_payload = dataset_config.model_dump(mode="json")  # type: ignore[arg-type]
-        else:  # pragma: no cover - pydantic v1 fallback
-            dataset_payload = dataset_config.dict()
+        if dataset_name not in dataset_payloads:
+            dataset_payloads[dataset_name] = _dataset_job_payload(
+                datasets_configs[dataset_name], mount_point
+            )
+        dataset_payload = dataset_payloads[dataset_name]
         jobs.append(
             _FileJob(
                 index=index,
@@ -546,7 +571,7 @@ def _snapshot_pipeline_config(
 
     datasets_src = datasets_configuration or config_dict.get("datasets")
     if isinstance(datasets_src, str | os.PathLike):
-        p = Path(datasets_src)
+        p = Path(expand_path(os.fspath(datasets_src), field="datasets"))
         if not p.is_absolute():
             p = pipeline_dir / p
         p = p.resolve()
@@ -583,7 +608,13 @@ def _snapshot_pipeline_config(
     for dataset_config in datasets_configs.values():
         if not dataset_config.derivatives_path:
             continue
-        derivatives_path = get_path(dataset_config.derivatives_path, mount_point=mount_point)
+        if getattr(dataset_config, "skip", False):
+            continue
+        derivatives_path = get_path(
+            dataset_config.derivatives_path,
+            mount_point=mount_point,
+            field=f"datasets.{dataset_config.name}.derivatives_path",
+        )
         code_dir = Path(derivatives_path) / "code"
         if str(code_dir) in seen_code_dirs:
             continue
@@ -663,11 +694,28 @@ def run_pipeline(
         else pipeline_configuration
     )
 
-    if not dry_run and isinstance(pipeline_configuration, str | os.PathLike):
+    # Preflight: resolve ~/$VARS in every active dataset's path fields before
+    # anything is written (code snapshot, derivative dirs), so an unset variable
+    # fails loudly here instead of creating a literal "$VAR" directory or being
+    # swallowed by the per-file error records (#28).
+    try:
+        _ds_configs, _mount = get_datasets_and_mount_point_from_pipeline_configuration(
+            pipeline_configuration, datasets_input=datasets_configuration
+        )
+    except Exception as _load_err:
+        # Loading errors resurface (and raise) when each derivative loads the
+        # datasets itself; only the snapshot is skipped here, as before.
+        log.warning("Could not load datasets before execution", error=str(_load_err))
+        _ds_configs = None
+    if _ds_configs is not None:
+        resolve_dataset_paths(_ds_configs, _mount)
+
+    if (
+        not dry_run
+        and _ds_configs is not None
+        and isinstance(pipeline_configuration, str | os.PathLike)
+    ):
         try:
-            _ds_configs, _mount = get_datasets_and_mount_point_from_pipeline_configuration(
-                pipeline_configuration, datasets_input=datasets_configuration
-            )
             _snapshot_pipeline_config(
                 pipeline_configuration,
                 config,
@@ -818,6 +866,8 @@ def build_derivative_dataframe(
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
         pipeline_configuration, datasets_input=datasets_configuration
     )
+    # Preflight (#28): fail on unresolved ~/$VARS before any directory is touched.
+    resolve_dataset_paths(datasets_configs, mount_point)
 
     _, _, common_roots = get_all_files_from_pipeline_configuration(
         pipeline_configuration, datasets_input=datasets_configuration, max_files_per_dataset=None
@@ -856,18 +906,19 @@ def build_derivative_dataframe(
     n_files = len(all_files)
     effective_n_jobs = n_jobs if (n_jobs is not None and n_jobs != 1) else 1
 
-    # Serialize DatasetConfig objects once — joblib workers reconstruct them
-    def _dataset_payload(ds_cfg) -> dict:
-        if hasattr(ds_cfg, "model_dump"):
-            return ds_cfg.model_dump(mode="json")
-        return ds_cfg.dict()  # pragma: no cover - pydantic v1 fallback
+    # Serialize DatasetConfig objects once — joblib workers reconstruct them.
+    # derivatives_path is resolved here, in the parent (#28).
+    dataset_payloads = {
+        name: _dataset_job_payload(datasets_configs[name], mount_point)
+        for name in {dataset_name for _, dataset_name, _ in all_files}
+    }
 
     job_args = [
         (
             index,
             dataset_name,
             file_path,
-            _dataset_payload(datasets_configs[dataset_name]),
+            dataset_payloads[dataset_name],
             common_roots.get(dataset_name),
             mount_point,
             selected_derivatives,

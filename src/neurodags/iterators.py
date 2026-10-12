@@ -5,7 +5,7 @@ import re
 from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
 from neurodags.definitions import DatasetConfig
 from neurodags.loggers import get_logger
-from neurodags.utils import find_unique_root, get_path
+from neurodags.utils import expand_path, find_unique_root, get_path
 
 log = get_logger(__name__)
 
@@ -237,7 +237,19 @@ def get_all_files_across_datasets(
             )
             continue
 
-        resolved_pattern = get_path(pattern, mount_point=mount_point)
+        resolved_pattern = get_path(
+            pattern, mount_point=mount_point, field=f"datasets.{dataset_name}.file_pattern"
+        )
+        # exclude_pattern is a glob like file_pattern, so it gets the same ~/$VAR
+        # expansion (and fails loudly on unset variables) outside the catch below.
+        exclude_pattern = (
+            expand_path(
+                dataset_config.exclude_pattern,
+                field=f"datasets.{dataset_name}.exclude_pattern",
+            )
+            if dataset_config.exclude_pattern
+            else None
+        )
         log.debug(
             "get_all_files_across_datasets: resolved pattern",
             dataset=dataset_name,
@@ -251,7 +263,7 @@ def get_all_files_across_datasets(
         try:
             files = get_files_from_pattern(
                 resolved_pattern,
-                exclude_filter=dataset_config.exclude_pattern,
+                exclude_filter=exclude_pattern,
                 drop_split_continuations=drop_split_continuations and dataset_drop_splits,
             )
         except Exception as e:

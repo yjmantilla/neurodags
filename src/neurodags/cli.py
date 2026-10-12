@@ -24,6 +24,7 @@ from neurodags.orchestrators import (
     build_derivative_dataframe,
     run_pipeline,
 )
+from neurodags.utils import resolve_dataset_paths
 
 
 def _save_dataframe(df: pd.DataFrame, output_path: str | None, default_name: str) -> Path:
@@ -734,9 +735,14 @@ def _dependency_closure(defs: dict, selection: list[str]) -> list[str]:
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        args.config, datasets_input=args.datasets
-    )
+    try:
+        datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+            args.config, datasets_input=args.datasets
+        )
+        resolved_paths = resolve_dataset_paths(datasets, mount_point)
+    except (ValueError, KeyError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     defs = config.get("DerivativeDefinitions") or {}
     defined = list(defs.keys())
     derivative_list = list(config.get("DerivativeList") or [])
@@ -754,6 +760,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"config: {args.config}")
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
     print(f"mount_point: {mount_point}")
+    for ds_name, fields in resolved_paths.items():
+        print(f"  {ds_name}.file_pattern: {fields['file_pattern']}")
+        print(f"  {ds_name}.derivatives_path: {fields['derivatives_path']}")
+        if fields["exclude_pattern"]:
+            print(f"  {ds_name}.exclude_pattern: {fields['exclude_pattern']}")
     print(f"derivatives_defined ({len(defined)}): {', '.join(defined) or 'none'}")
     print(f"run_set [{selection_source}] ({len(selected)}): {', '.join(selected) or 'none'}")
     print(f"computed_with_dependencies ({len(computed)}): {', '.join(computed) or 'none'}")

@@ -17,7 +17,7 @@ import numpy as np
 
 from neurodags.definitions import DatasetConfig, PathLike
 from neurodags.loaders import load_configuration
-from neurodags.utils import get_num_digits, get_path
+from neurodags.utils import expand_path, get_num_digits
 
 
 def get_datasets_and_mount_point_from_pipeline_configuration(
@@ -62,12 +62,15 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         raise ValueError("No 'datasets' configuration provided or found in the pipeline.")
 
     if isinstance(datasets, str) or isinstance(datasets, os.PathLike):
+        # Expand ~/$VARS before deciding whether the reference is relative to the
+        # pipeline file; otherwise "$PROJ/ds.yml" would be joined onto the
+        # pipeline directory first (#28).
+        datasets = expand_path(os.fspath(datasets), field="datasets")
         if isinstance(pipeline_input, str | os.PathLike):
             datasets_path_obj = Path(datasets)
             if not datasets_path_obj.is_absolute():
                 datasets = str(Path(pipeline_input).resolve().parent / datasets_path_obj)
-        datasets_path = get_path(datasets, mount_point=mount_point)
-        datasets = load_configuration(datasets_path)
+        datasets = load_configuration(datasets)
     elif not isinstance(datasets, dict):
         raise ValueError("'datasets' must be a dict or a path to a YAML file.")
 
