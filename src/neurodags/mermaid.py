@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 import webbrowser
 from pathlib import Path
-from typing import Any
 
-_ID_REF = re.compile(r"^id\.(\d+)$")
+# Reuse the DAG resolver's reference parsing so ``id.N.field`` field references
+# produce the same ``idN --> idM`` edges as whole-result ``id.N`` references.
+from neurodags.dag import _collect_id_refs
 
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
@@ -60,24 +61,6 @@ _HTML_TEMPLATE_ELK = """\
 </body>
 </html>
 """
-
-
-def _collect_id_refs(obj: Any) -> set[int]:
-    refs: set[int] = set()
-    if isinstance(obj, str):
-        m = _ID_REF.match(obj)
-        if m:
-            refs.add(int(m.group(1)))
-        return refs
-    if isinstance(obj, dict):
-        for v in obj.values():
-            refs.update(_collect_id_refs(v))
-        return refs
-    if isinstance(obj, list | tuple | set):
-        for v in obj:
-            refs.update(_collect_id_refs(v))
-        return refs
-    return refs
 
 
 def _safe_label(text: str) -> str:

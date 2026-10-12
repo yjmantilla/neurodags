@@ -11,6 +11,7 @@ concepts
 pipeline_yaml
 datasets_yaml
 custom_nodes
+parser_nodes
 dataframe_assembly
 inspection
 parallelism

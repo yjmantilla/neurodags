@@ -2,6 +2,7 @@
 import glob
 import inspect
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -34,7 +35,15 @@ from neurodags.nodes import get_node
 from neurodags.utils import snake_to_camel
 
 log = get_logger(__name__)
-_ID_REF = re.compile(r"^id\.(\d+)$")
+# A node reference is ``id.N`` (whole result of node N) or, for a node that
+# returns a mapping (a "parser node"), ``id.N.field`` to pull a single field.
+# The field must be a plain identifier: ``.`` is the reference separator, so
+# dotted/nested keys would be ambiguous and are rejected (see _resolve_refs).
+_ID_REF = re.compile(r"^id\.(\d+)(?:\.([A-Za-z_]\w*))?$")
+# Anything shaped ``id.<digits>.<rest>`` that is NOT the single-field form above
+# (nested paths, dashed keys, trailing dot, ...) — used to raise a clear error
+# instead of silently passing the string through as a literal.
+_ID_REF_PREFIX = re.compile(r"^id\.\d+\.")
 _VAR_REF = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
 
 # ---------- helpers ----------
@@ -44,12 +53,75 @@ def _is_id_ref(x: Any) -> bool:
     return isinstance(x, str) and _ID_REF.match(x) is not None
 
 
+def _node_result_to_mapping(val: Any, ref: str) -> Any:
+    """Best-effort conversion of a stored node value to the mapping it carries.
+
+    Parser-style nodes return a ``NodeResult`` wrapping a single dict artifact;
+    ``id.N.field`` access needs that dict. When the referenced derivative was
+    served from cache, the store holds the artifact's *file path* instead, so a
+    ``.json`` artifact on disk is loaded back into a mapping. Any other existing
+    artifact file raises a clear error (only ``.json`` can be field-accessed).
+    Returns ``val`` unchanged when it is already a mapping or cannot be
+    converted to one (the caller then raises).
+    """
+    if isinstance(val, NodeResult):
+        if len(val.artifacts) == 1:
+            return next(iter(val.artifacts.values())).item
+        for art in val.artifacts.values():
+            if isinstance(art.item, Mapping):
+                return art.item
+        return val
+    if isinstance(val, str | os.PathLike):
+        path = Path(val)
+        if path.is_file():
+            if path.suffix.lower() != ".json":
+                raise ValueError(
+                    f"Field access '{ref}' resolved to the file '{path.as_posix()}' "
+                    f"(e.g. a cached derivative artifact); only '.json' artifacts can be "
+                    f"loaded for field access. Reference the parser derivative's JSON "
+                    f"artifact explicitly, e.g. 'derivative: <Name>.json'."
+                )
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    return json.load(handle)
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"Field access '{ref}' could not load JSON artifact "
+                    f"'{path.as_posix()}': {exc}"
+                ) from exc
+    return val
+
+
 def _resolve_refs(obj: Any, store: dict[int, Any]) -> Any:
-    if _is_id_ref(obj):
-        sid = int(_ID_REF.match(obj).group(1))
-        if sid not in store:
-            raise KeyError(f"Reference {obj} not computed yet")
-        return store[sid]
+    if isinstance(obj, str):
+        m = _ID_REF.match(obj)
+        if m:
+            sid = int(m.group(1))
+            field = m.group(2)
+            if sid not in store:
+                raise KeyError(f"Reference id.{sid} not computed yet")
+            if field is None:
+                return store[sid]
+            container = _node_result_to_mapping(store[sid], obj)
+            if not isinstance(container, Mapping):
+                raise ValueError(
+                    f"Field access '{obj}' requires node {sid} to return a mapping "
+                    f"(dict); got {type(container).__name__}."
+                )
+            if field not in container:
+                raise KeyError(
+                    f"Field '{field}' not found in id.{sid}; "
+                    f"available fields: {sorted(container)}"
+                )
+            return container[field]
+        if _ID_REF_PREFIX.match(obj):
+            raise ValueError(
+                f"Unsupported reference '{obj}': use 'id.N' or single-level "
+                f"'id.N.field' where field is a plain identifier "
+                f"(letters/digits/underscore). Nested, dotted, or dashed field "
+                f"paths are not supported."
+            )
+        return obj
     if isinstance(obj, dict):
         return {k: _resolve_refs(v, store) for k, v in obj.items()}
     if isinstance(obj, list | tuple):

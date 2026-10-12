@@ -139,6 +139,24 @@ DerivativeDefinitions:
 
 `id.<N>` in args resolves to the output of step `N`. When a step produces multiple artifacts, the artifact matching the node's expected argument type is selected by the `_unwrap_for_arg` heuristic (first `.fif` for MNE objects, first artifact otherwise). To select a specific artifact from a multi-artifact upstream derivative, use the `derivative: Name.ext` reuse step (see above) rather than relying on `id.<N>` heuristics.
 
+#### Field access: `id.N.field`
+
+When step `N` produces a **mapping** (a dict — e.g. a [parser node](parser_nodes.md) such as `bids_parse`), a downstream arg can pull a single field with `id.<N>.<field>`:
+
+```yaml
+- id: 1
+  node: bids_parse
+  args: {path: id.0}          # -> {"subject": "001", "task": "rest", ...}
+- id: 2
+  node: my_processing_node
+  args:
+    raw:     id.0
+    subject: id.1.subject      # "001"
+    task:    id.1.task         # "rest"
+```
+
+**Field-key constraint.** `.` is the reference separator, so an addressable `field` must be a **plain identifier** — letters, digits and underscores, not starting with a digit. Dotted, dashed, or nested paths (`id.1.a.b`, `id.1.some-key`) are **not** supported and raise a clear error; keep parser output flat with identifier keys (BIDS entities already comply). Values are unconstrained. To consume the whole mapping instead, reference `id.N` (no field) and index it inside the node.
+
 ---
 
 ## DerivativeList

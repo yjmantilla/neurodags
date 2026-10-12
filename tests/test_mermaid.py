@@ -81,6 +81,23 @@ class TestDerivativeToMermaid:
         result = derivative_to_mermaid(SIMPLE_DERIV, "MyDeriv")
         assert "%% MyDeriv" in result
 
+    def test_field_ref_edges(self):
+        deriv = {
+            "nodes": [
+                {"id": 0, "derivative": "SourceFile"},
+                {"id": 1, "node": "bids_parse", "args": {"path": "id.0"}},
+                {
+                    "id": 2,
+                    "node": "consumer",
+                    "args": {"raw": "id.0", "subject": "id.1.subject"},
+                },
+            ]
+        }
+        result = derivative_to_mermaid(deriv, "Parsed")
+        assert "id0 --> id1" in result
+        assert "id1 --> id2" in result
+        assert "id0 --> id2" in result
+
     def test_explicit_depends_on(self):
         deriv = {
             "nodes": [
