@@ -2,6 +2,7 @@
 import glob
 import inspect
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -52,12 +53,16 @@ def _is_id_ref(x: Any) -> bool:
     return isinstance(x, str) and _ID_REF.match(x) is not None
 
 
-def _node_result_to_mapping(val: Any) -> Any:
-    """Best-effort unwrap of a ``NodeResult`` to the mapping it carries.
+def _node_result_to_mapping(val: Any, ref: str) -> Any:
+    """Best-effort conversion of a stored node value to the mapping it carries.
 
     Parser-style nodes return a ``NodeResult`` wrapping a single dict artifact;
-    ``id.N.field`` access needs that dict. Returns ``val`` unchanged when it is
-    already a mapping or cannot be unwrapped to one (the caller then raises).
+    ``id.N.field`` access needs that dict. When the referenced derivative was
+    served from cache, the store holds the artifact's *file path* instead, so a
+    ``.json`` artifact on disk is loaded back into a mapping. Any other existing
+    artifact file raises a clear error (only ``.json`` can be field-accessed).
+    Returns ``val`` unchanged when it is already a mapping or cannot be
+    converted to one (the caller then raises).
     """
     if isinstance(val, NodeResult):
         if len(val.artifacts) == 1:
@@ -65,6 +70,25 @@ def _node_result_to_mapping(val: Any) -> Any:
         for art in val.artifacts.values():
             if isinstance(art.item, Mapping):
                 return art.item
+        return val
+    if isinstance(val, str | os.PathLike):
+        path = Path(val)
+        if path.is_file():
+            if path.suffix.lower() != ".json":
+                raise ValueError(
+                    f"Field access '{ref}' resolved to the file '{path.as_posix()}' "
+                    f"(e.g. a cached derivative artifact); only '.json' artifacts can be "
+                    f"loaded for field access. Reference the parser derivative's JSON "
+                    f"artifact explicitly, e.g. 'derivative: <Name>.json'."
+                )
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    return json.load(handle)
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"Field access '{ref}' could not load JSON artifact "
+                    f"'{path.as_posix()}': {exc}"
+                ) from exc
     return val
 
 
@@ -78,7 +102,7 @@ def _resolve_refs(obj: Any, store: dict[int, Any]) -> Any:
                 raise KeyError(f"Reference id.{sid} not computed yet")
             if field is None:
                 return store[sid]
-            container = _node_result_to_mapping(store[sid])
+            container = _node_result_to_mapping(store[sid], obj)
             if not isinstance(container, Mapping):
                 raise ValueError(
                     f"Field access '{obj}' requires node {sid} to return a mapping "

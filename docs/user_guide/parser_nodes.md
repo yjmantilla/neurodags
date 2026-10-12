@@ -88,8 +88,18 @@ error (`id.1.a.b`, `id.1.some-key` are rejected).
 
 - Return a **flat, JSON-serializable dict** whose keys are plain identifiers.
 - Do **no file I/O** — parse the path string only; keep the node pure and fast.
-- Typically set `save: False` on a parser-only derivative (the dict is ephemeral
-  and consumed in-memory). If saved, it is written as a readable `.json` sidecar.
+- Return the dict as a **`.json` artifact** (as `bids_parse` does). Within a
+  derivative, `id.N.field` reads the in-memory dict directly.
+- When the parser lives in its **own saved derivative** that other derivatives
+  reuse (`derivative: BidsInfo.json`), a later run may serve it from cache. The
+  store then holds the cached file path rather than the dict; for `id.N.field`
+  the resolver loads that `.json` file back into a mapping, so field access works
+  the same whether the parser ran or was cached. Reference the JSON artifact
+  explicitly (`Name.json`) when the derivative writes more than one artifact:
+  field access on any other cached file (`.fif`, `.nc`, …) raises a clear error
+  instead of guessing.
+- Set `save: False` on a parser-only derivative if you do not need the
+  `.json` sidecar (the dict is then always recomputed and consumed in memory).
 
 ## Unit-testing a parser
 
