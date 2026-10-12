@@ -43,7 +43,16 @@ def basic_preprocessing(
     epoch_config=None,
     notch_filter=None,
     extra_artifacts: bool = False,
+    average_psd: bool = False,
 ) -> NodeResult:
+    """Notch filter -> band-pass filter -> epoch -> resample an MNE object.
+
+    Steps run in that order and each is skipped when its argument is ``None``.
+    With ``extra_artifacts=True`` a ``.report.html`` MNE Report is also written,
+    with signal and PSD figures after each step; ``average_psd=True`` plots those
+    PSDs averaged across channels (one trace), which makes filter roll-offs
+    easier to see than one trace per channel.
+    """
 
     if isinstance(mne_object, NodeResult):
         if ".fif" in mne_object.artifacts:
@@ -65,7 +74,7 @@ def basic_preprocessing(
         log.debug("MNEReport: added raw data figure")
         # psd
         report.add_figure(
-            mne_object.compute_psd().plot(show=False),
+            mne_object.compute_psd().plot(average=average_psd, show=False),
             title="Power Spectral Density Before Preprocessing",
         )
         log.debug("MNEReport: added raw PSD figure")
@@ -75,7 +84,7 @@ def basic_preprocessing(
         log.debug("Notch Filter Applied", notch_filter=notch_filter)
         if extra_artifacts:
             report.add_figure(
-                mne_object.compute_psd().plot(show=False),
+                mne_object.compute_psd().plot(average=average_psd, show=False),
                 title="Power Spectral Density After Notch Filtering",
             )
             log.debug("MNEReport: added PSD after notch filtering figure")
@@ -85,7 +94,7 @@ def basic_preprocessing(
         log.debug("Filter Applied", filter_args=filter_args)
         if extra_artifacts:
             report.add_figure(
-                mne_object.compute_psd().plot(show=False),
+                mne_object.compute_psd().plot(average=average_psd, show=False),
                 title="Power Spectral Density After Filtering",
             )
             log.debug("MNEReport: added PSD after filtering figure")
@@ -119,7 +128,7 @@ def basic_preprocessing(
         log.debug("Resample Applied", resample=resample)
         if extra_artifacts:
             report.add_figure(
-                mne_object.compute_psd().plot(show=False),
+                mne_object.compute_psd().plot(average=average_psd, show=False),
                 title="Power Spectral Density After Resampling",
             )
             log.debug("MNEReport: added PSD after resampling figure")
@@ -129,6 +138,7 @@ def basic_preprocessing(
         "filter_args": filter_args,
         "epoch_config": epoch_config,
         "notch_filter": notch_filter,
+        "average_psd": average_psd,
     }
 
     # Also add metadata to the report
