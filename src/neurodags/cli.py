@@ -29,6 +29,7 @@ from neurodags.mermaid import (
     pipeline_to_html,
     pipeline_to_mermaid,
 )
+from neurodags.naming import NamingError
 from neurodags.orchestrators import (
     _derivative_topo_order,
     build_derivative_dataframe,
@@ -1228,8 +1229,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(args, "inputs", None) is not None:
             args.inputs = resolve_cli_inputs_path(args.inputs)
         return _dispatch(parser, args)
-    except (ConfigVersionError, DatasetConfigError, InputsError) as exc:
-        # Configuration errors are user errors: one clean message, no traceback.
+    except (ConfigVersionError, DatasetConfigError, InputsError, NamingError) as exc:
+        # Configuration errors are user errors: one clean message, no traceback. NamingError
+        # includes dataframe column collisions (naming.ColumnCollisionError).
         print(f"neurodags: error: {exc}", file=sys.stderr)
         return 2
 
