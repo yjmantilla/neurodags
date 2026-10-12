@@ -1038,7 +1038,14 @@ def _cmd_count(args: argparse.Namespace) -> int:
         derivatives=derivatives,
         dry_run=True,
     )
-    count = 0 if result is None or result.empty else int(result["file_path"].nunique())
+    if result is None or result.empty:
+        count = 0
+    elif "index" in result.columns:
+        # Count (dataset, file) entries, the unit --only-index selects: the same file listed
+        # under two dataset entries has two indices and needs two array tasks.
+        count = int(result["index"].nunique())
+    else:
+        count = int(result["file_path"].nunique())
     print(count)
     return 0
 

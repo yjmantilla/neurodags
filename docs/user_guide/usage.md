@@ -3,7 +3,11 @@
 NeuroDAGs installs a unified `neurodags` command with several subcommands. Every subcommand that accepts a pipeline file also accepts `-d/--datasets <path>` to override the datasets YAML defined inside the pipeline file — useful when the same pipeline is run against different dataset collections. See *Per-subcommand Dataset Override* at the end of this page for how that path is resolved.
 
 ```{important}
-**CLI paths are relative to where you run the command; paths inside the YAML are relative to the YAML.** `-d/--datasets` is resolved against the current working directory (like any other CLI path), while the `datasets:` key *inside* `pipeline.yml` is resolved against the directory of `pipeline.yml`.
+**Which directory a relative path is resolved against:**
+
+- **Paths you type on the command line** (the pipeline file, `-d/--datasets`): the current working directory.
+- **The `datasets:` key inside `pipeline.yml`**: the directory of `pipeline.yml`.
+- **Paths inside a datasets YAML** (`file_pattern`, `derivatives_path`, `exclude_pattern`): the current working directory, *not* the datasets YAML's directory. Use absolute paths or `$VARS` there if you run from different directories. (Planned to become relative to the datasets YAML in 0.4.0, see [#50](https://github.com/yjmantilla/neurodags/issues/50).)
 ```
 
 ## Global Options
@@ -173,7 +177,7 @@ See {doc}`inspection` for status definitions and `.error` marker behaviour.
 Print the number of unique source (input) files the pipeline will process. Useful for sanity-checking datasets before a long run. Note: this counts input files, not output files — one input file may produce multiple output files depending on the derivatives.
 
 ```bash
-neurodags count-inputs pipeline.yml                          # number of source files across all derivatives
+neurodags count-inputs pipeline.yml                          # number of input entries (size of the --only-index range)
 neurodags count-inputs pipeline.yml --derivative CleanedEEG  # count for a specific derivative
 ```
 

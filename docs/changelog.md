@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`count-inputs` undercounted when a file is listed under more than one dataset entry**: it
+  printed the number of unique file paths, while `--only-index` numbers (dataset entry, file)
+  pairs. With the same recordings in two dataset entries (e.g. one entry per condition), a
+  SLURM array sized with `N=$(neurodags count-inputs ...)` was too small and the last indices
+  never ran. It now prints the number of indices. Pipelines where each file appears in only
+  one dataset entry get the same number as before.
+
+### Documentation
+
+- The CLI reference said "paths inside the YAML are relative to the YAML", which is only true
+  for the `datasets:` key in `pipeline.yml`. Paths inside a datasets YAML (`file_pattern`,
+  `derivatives_path`, `exclude_pattern`) are resolved against the current working directory;
+  the page now lists each case.
+
 ## 0.3.5 — 2026-10-12
 
 ### Added
