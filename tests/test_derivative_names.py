@@ -74,6 +74,8 @@ COLLIDING = {"band_power": _chain(), "BandPower": _chain()}
         ("BandPower", "BandPower"),
         ("Fit_A", "FitA"),
         ("EO_Features", "EoFeatures"),
+        ("Ep_DetrendedFluctuation", "EpDetrendedfluctuation"),
+        ("ICA_cleaned", "IcaCleaned"),
         ("psd-welch", "psd-welch"),
     ],
 )

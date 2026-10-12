@@ -50,7 +50,15 @@
   to read a column back), with a worked example tree and a Do / Don't table. Core Concepts'
   output example now shows the source extension (`sub-1.fif@CleanedEEG.fif`), and Dataframe
   Assembly's example columns now match the real format (`BandPower.nc@freqbands-alpha`). The
-  `snake_to_camel` docstring explains why the conversion exists.
+  page notes that the collision check is per pipeline config (two pipelines sharing a
+  `derivatives_path` are not checked against each other), that `snake_to_camel` lowercases the
+  rest of each `_`-separated part (`ICA_cleaned` → `@IcaCleaned`), and that a naming redesign is
+  planned for 0.4.0. The `snake_to_camel` docstring explains why the conversion exists.
+- **Comparison page wording** (#42): NeuroDAGs is described as input-naming-convention agnostic
+  (input names kept, no BIDS validation, optional `bids_parse` node) instead of
+  "BIDS-Preserving", and the output strategy as appending `@<Derivative><suffix>` to the source
+  name, with the layout mirroring the input below the discovered files' common root, instead of
+  an unconditional "perfect mirror".
 
 ## 0.3.4 — 2026-10-12
 

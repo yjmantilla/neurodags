@@ -11,6 +11,11 @@ not) and only appends its own markers — `@` (source/derivative separator), the
 and the artifact suffix — plus `&`, which replaces `@` when a derivative is itself used as a
 source. Whether outputs look BIDS-like depends on how your inputs are named.
 
+```{note}
+The naming rules on this page describe the current behaviour. A redesign is planned for 0.4.0;
+until then they are kept stable so existing caches stay valid.
+```
+
 ## Rules at a glance
 
 | Do | Don't |
@@ -71,6 +76,9 @@ The on-disk name is derived from the name in `DerivativeDefinitions`
 - A name **with `_`** is split on `_`, each part is title-cased (Python `str.title()`) and the
   parts are joined: `fit_w_l06` → `@FitWL06`, `band_power` → `@BandPower`, `Fit_A` → `@FitA`,
   `EO_Features` → `@EoFeatures` (note the lower-cased `o`).
+- `str.title()` **lowercases the rest of each `_`-separated part**, so capitals inside a part are
+  lost: `Ep_DetrendedFluctuation` → `@EpDetrendedfluctuation`, `ICA_cleaned` → `@IcaCleaned`.
+  Check `neurodags validate` (or `snake_to_camel(name)`) for the exact name to search for.
 
 The conversion keeps the derivative name a single token without `_`, which many file-naming
 conventions (including BIDS) use as a separator. Names with `_` are accepted; just look for their
@@ -105,6 +113,13 @@ entry points (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_d
 | The name contains `/` or `\` | Path separator: outputs would go to a non-existent subdirectory. |
 | The name contains `*`, `?`, `[` or `]` | Glob characters in the cache lookup: `F*` would treat `@Fit…` files as its own. |
 | The name is `SourceFile` or empty | `derivative: SourceFile` always means the raw input file, so such a derivative could never be referenced. |
+
+```{important}
+The collision check is **per pipeline configuration**. Two *different* pipeline files writing to
+the same `derivatives_path` are not checked against each other: if one defines `band_power` and the
+other `BandPower`, both use `@BandPower` files and silently share cached outputs. Use distinct
+names (or distinct `derivatives_path`s) across pipelines that share an output directory.
+```
 
 Other names (with `_`, `-`, spaces, non-ASCII, ...) are accepted. `&` is accepted too but best
 avoided: it is the replacement for `@` in chained source names, so it makes those file names
