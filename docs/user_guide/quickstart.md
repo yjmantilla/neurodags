@@ -32,5 +32,6 @@ neurodags validate pipeline_quickstart_preprocessing.yml   # prints the resolved
 neurodags run pipeline_quickstart_preprocessing.yml
 ```
 
-Outputs land in `$OUTPUT_DIR/derivatives/` as `<file>@Preprocessed.fif` (the epochs) and
-`<file>@Preprocessed.report.html`.
+Outputs land in `$OUTPUT_DIR/derivatives/`, mirroring the folders below `$RAW_DATA`, as
+`<file>@Preprocessed.fif` (the epochs) and `<file>@Preprocessed.report.html`, plus the
+`<file>@Preprocessed.done` manifest that marks the file as done.

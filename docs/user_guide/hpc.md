@@ -318,7 +318,8 @@ config or an unset `$VAR` into a "successful" job with an empty or misleading re
 Narrow the list with `--list-missing` or `--list-errors`, and per derivative with
 `--derivative` (for the chained pattern, resubmit each derivative's array with its own list:
 `neurodags status pipeline.yml --derivative Spectrum --format indices`).
-`--format json` carries the same lists as `missing_indices` / `errored_indices`, and
+`--format json` carries the same lists as `missing_indices` / `incomplete_indices` /
+`errored_indices`, and
 `--format json --include-files` adds one record per file × derivative with the index,
 dataset and path, so a script can verify the index → path mapping before submitting.
 
@@ -328,8 +329,8 @@ Things to keep in mind:
   (and the ones `neurodags slurm-script` emits) pass `skip_errors=True`, which skips exactly
   the errored files you are trying to retry. Use a copy of the worker without it (the default
   `skip_errors=False` retries files with a `.error` marker), e.g. `retry_array.sh` = `run_array.sh`
-  minus the `skip_errors=True` line. If a failed run left partial outputs next to its `.error`
-  marker, delete them (or set `overwrite`) so the retry actually recomputes.
+  minus the `skip_errors=True` line. Partial outputs left by a failed or killed task have no
+  `.done` manifest, so the retry recomputes them without any cleanup.
 - **Flat-array task IDs are not file indices.** In the flat pattern
   `SLURM_ARRAY_TASK_ID = file_index * N_DERIVATIVES + derivative_index`, so never pass status
   indices straight to `run_array_per_deriv.sh`. Convert them per derivative, using the
@@ -382,7 +383,8 @@ run_pipeline(config, only_index=index, skip_errors=True)
 | Cluster paths differ from local | Set `mount_point: hpc` in `pipeline.yml`; give `source_root`, `file_pattern` and `derivatives_path` an `hpc:` entry each (`neurodags validate` prints the resolved values for the active mount) |
 | Relative dataset paths | Since 0.4.0 they are resolved against the datasets YAML's directory, not the job's working directory; a config passed as a dict needs `base_dir=` (the generated `slurm-script` templates pass it) |
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
-| Partial reruns | Caching is automatic — resubmit the full array, cached files are skipped |
+| Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed |
+| Outputs computed on another mount | Copy the derivatives tree as is: manifests list files relative to their folder, so the copy verifies on the new mount as long as the paths below `source_root` are the same |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
 | Array size limit | Most clusters cap at 1000–10000 tasks; split `--array` into index-range batches (e.g. `0-999`, `1000-1999`). With a frozen `inputs.tsv`, each task ID maps to the same file in every batch, so range batching is safe and idempotent — cached files are skipped automatically on resubmit |
 | Index order | Files are sorted by their path below `source_root` in code-point order (`sub-10` before `sub-2`); zero-pad labels (`sub-02`) for a natural order |

@@ -71,7 +71,7 @@ Relative paths resolved from the pipeline YAML location. Each module is executed
 
 ## DerivativeDefinitions
 
-Each key is a derivative name (CamelCase by convention, see [Derivative names](#derivative-names)). The value is a derivative definition:
+Each key is a derivative name (see [Derivative names](#derivative-names)). The value is a derivative definition:
 
 ```yaml
 DerivativeDefinitions:
@@ -90,24 +90,23 @@ DerivativeDefinitions:
 
 ### Derivative names
 
-Outputs are written as `<source>@<OnDiskName><artifact suffix>`. A name without `_` is used as
-is (`BandPower` → `@BandPower`, `psd-welch` → `@psd-welch`); a name with `_` is converted to
-CamelCase (`fit_w_l06` → `@FitWL06`, `band_power` → `@BandPower`), keeping the derivative name a
-single token without `_` (a separator in many naming conventions, including BIDS). Everything else — `DerivativeList`, reuse steps
-(`derivative: fit_w_l06.nc`), dataframe columns — uses the YAML name. `neurodags validate` shows
-each on-disk name that differs from its YAML name, and names that collide on disk (e.g.
-`band_power` and `BandPower`) or contain `.`, `@`, `/`, `\`, `*`, `?`, `[`, `]` are rejected
-before anything runs.
+Outputs are written as `<source>@<name><artifact suffix>`, with the name exactly as written
+here (`fit_w_l06` → `@fit_w_l06`, `BandPower` → `@BandPower`). The same spelling is used
+everywhere: `DerivativeList`, reuse steps (`derivative: fit_w_l06.nc`), `--derivative`, dataframe
+columns and `status`. Names must match `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`, be YAML strings
+(quote keys such as `"Yes"`), be unique ignoring case, not be `SourceFile`, and not define both
+`X` and `X-<digits>`; every entry point rejects invalid names before anything runs.
 
-See **[File Naming Conventions](naming.md)** for all naming rules: output files, marker files,
-references, the output layout, `&` in chained pipelines and dataframe column names.
+See **[File Naming and Output Layout](naming.md)** for all naming rules: output files, `.done`
+manifests and markers, references, the output layout, `&` in chained pipelines and dataframe
+column names.
 
 ### Derivative Flags
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `save` | bool | `True` | Persist output artifacts to disk. `False` = compute but don't write. |
-| `overwrite` | bool | `False` | Force recompute even if cached output exists. |
+| `overwrite` | bool | `False` | Force recompute even if the unit is done (valid `.done` manifest). |
 | `for_dataframe` | bool | `False` | Include this derivative when calling `build_derivative_dataframe`. |
 
 ### Node Steps
