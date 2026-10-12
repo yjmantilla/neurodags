@@ -24,6 +24,30 @@
   with `Unknown node`. The absolute custom definition paths are now sent to each worker and
   loaded there, as `run_pipeline` already did.
 
+- **Inspection commands no longer create output directories** (#33): `neurodags status`,
+  `dry-run`, `count-inputs` (and `run_pipeline(..., dry_run=True)`) created
+  `derivatives_path` and its per-file subdirectories as a side effect of computing output
+  paths. Computing the reference base is now pure; directories are created only when
+  something is about to be written — by real (non-dry) runs before each file is processed,
+  and by `run_derivative` just before it computes. `build_derivative_dataframe` therefore
+  only creates directories when it has to compute a derivative, not when it reads cached
+  outputs. (`orchestrators._resolve_reference_base`, `dag.run_derivative`)
+
+- **Single-file datasets write inside `derivatives_path`** (#34): for a dataset matching
+  exactly one file, `find_unique_root(..., mode="maximal")` returned the file itself, so
+  outputs were written as siblings of the derivatives directory
+  (`<parent>/derivatives@Meta.json`). The root is now always a strict ancestor of every
+  input (the file's parent directory for a single file), so outputs land at
+  `<derivatives_path>/<file name>@Meta.json` — the same layout as files sharing a
+  directory in a multi-file dataset. A reference base that would still resolve to `.` is
+  also mapped to the file name. (`utils.find_unique_root`, `orchestrators._resolve_reference_base`)
+
+  **Behaviour change (single-file datasets only):** outputs previously written as
+  `<derivatives_path>@<Derivative>.*` (next to `derivatives_path`, named after it) are not
+  found any more and will be recomputed; move them to
+  `<derivatives_path>/<source file name>@<Derivative>.*` to reuse them. Output paths for
+  datasets with two or more files are unchanged, so existing caches keep working.
+
 ## 0.3.2 — 2026-10-12
 
 ### Added

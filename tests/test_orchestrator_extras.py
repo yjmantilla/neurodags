@@ -390,3 +390,192 @@ def test_get_datasets_relative_to_pipeline_path(tmp_path):
     datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(pipeline_path)
     assert mount_point is None
     assert "demo" in datasets
+
+
+# ---------------------------------------------------------------------------
+# Output reference base: inspection is read-only (#33), single-file layout (#34)
+# ---------------------------------------------------------------------------
+
+_META_PIPELINE = {
+    "datasets": "ds.yml",
+    "mount_point": None,
+    "DerivativeDefinitions": {
+        "Meta": {
+            "save": True,
+            "for_dataframe": True,
+            "nodes": [
+                {"id": 0, "derivative": "SourceFile"},
+                {"id": 1, "node": "extract_meeg_metadata", "args": {"mne_object": "id.0"}},
+            ],
+        }
+    },
+    "DerivativeList": ["Meta"],
+}
+
+
+def _write_fif_project(root, relpaths):
+    """Write tiny raw FIF files at *relpaths* under ``root/in`` plus pipeline/dataset YAMLs.
+
+    Derivatives go to ``root/out/derivatives`` (which does not exist beforehand).
+    """
+    import mne
+    import numpy as np
+    import yaml
+
+    root.mkdir(parents=True, exist_ok=True)
+    for i, rel in enumerate(relpaths):
+        target = root / "in" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        info = mne.create_info(["a", "b"], 100.0, "eeg")
+        raw = mne.io.RawArray(np.random.default_rng(i).standard_normal((2, 500)) * 1e-5, info)
+        raw.save(target, verbose="error")
+    ds = {
+        "d": {
+            "name": "d",
+            "file_pattern": str(root / "in" / "**" / "*_raw.fif"),
+            "derivatives_path": str(root / "out" / "derivatives"),
+        }
+    }
+    (root / "ds.yml").write_text(yaml.safe_dump(ds))
+    pipe = root / "pl.yml"
+    pipe.write_text(yaml.safe_dump(_META_PIPELINE))
+    return pipe
+
+
+def _tree(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["status"], ["status", "--format", "json"], ["dry-run"], ["count-inputs"]],
+)
+@pytest.mark.parametrize("n_files", [1, 2])
+def test_inspection_commands_do_not_create_output_dirs(
+    tmp_path, monkeypatch, capsys, command, n_files
+):
+    """#33: status / dry-run / count-inputs must not write to the filesystem."""
+    from neurodags.cli import main
+
+    proj = tmp_path / "proj"
+    pipe = _write_fif_project(proj, ["sub-01/a_raw.fif", "sub-02/b_raw.fif"][:n_files])
+    # dry-run saves its CSV in cwd; keep cwd outside the tree under inspection.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    before = _tree(proj)
+
+    rc = main([command[0], str(pipe), *command[1:]])
+    # status exits 1 when derivatives are missing (nothing has been computed).
+    assert rc == (1 if command[0] == "status" else 0)
+
+    assert _tree(proj) == before
+    assert not (proj / "out").exists()
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_dry_run_api_does_not_create_output_dirs(tmp_path, n_jobs):
+    """#33: iterate_derivative_pipeline(dry_run=True) is read-only."""
+    pipe = _write_fif_project(tmp_path, ["sub-01/a_raw.fif", "sub-02/b_raw.fif"])
+    plan = iterate_derivative_pipeline(str(pipe), "Meta", dry_run=True, n_jobs=n_jobs)
+    assert isinstance(plan, pd.DataFrame)
+    assert len(plan) == 2
+    assert not (tmp_path / "out").exists()
+
+
+def test_dataframe_creates_dirs_only_when_computing(tmp_path):
+    """#33: dataframe collection creates output dirs on demand when it must compute."""
+    pipe = _write_fif_project(tmp_path, ["sub-01/ses-1/a_raw.fif", "sub-02/ses-1/b_raw.fif"])
+    derivs = tmp_path / "out" / "derivatives"
+
+    # Only precomputed (save=True, for_dataframe=True) derivatives are read and
+    # nothing is cached: no computation, so nothing may be created.
+    df = build_derivative_dataframe(str(pipe))
+    assert len(df) == 2
+    assert not (tmp_path / "out").exists()
+
+    # A save=False derivative is computed on the fly; its nested dirs are created
+    # only then (nodes may write next to reference_base).
+    import yaml
+
+    config = yaml.safe_load(pipe.read_text())
+    config["DerivativeDefinitions"]["Meta"]["save"] = False
+    pipe.write_text(yaml.safe_dump(config))
+    df = build_derivative_dataframe(str(pipe), raise_on_error=True)
+    assert len(df) == 2
+    assert any(c.startswith("Meta") for c in df.columns)
+    assert (derivs / "sub-01" / "ses-1").is_dir()
+    assert (derivs / "sub-02" / "ses-1").is_dir()
+
+
+def test_real_run_still_creates_nested_output_dirs(tmp_path):
+    """#33 guard: non-dry runs still create derivatives_path and nested subdirs."""
+    from neurodags.orchestrators import run_pipeline
+
+    pipe = _write_fif_project(tmp_path, ["sub-01/ses-1/a_raw.fif", "sub-02/ses-1/b_raw.fif"])
+    run_pipeline(str(pipe), raise_on_error=True)
+    derivs = tmp_path / "out" / "derivatives"
+    assert (derivs / "code" / "pl.yml").exists()
+    assert (derivs / "sub-01" / "ses-1" / "a_raw.fif@Meta.json").exists()
+    assert (derivs / "sub-02" / "ses-1" / "b_raw.fif@Meta.json").exists()
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_single_file_dataset_outputs_land_inside_derivatives(tmp_path, n_jobs):
+    """#34: a one-file dataset writes <derivatives>/<file>@Meta.json, not a sibling."""
+    from neurodags.orchestrators import run_pipeline
+
+    pipe = _write_fif_project(tmp_path, ["sub-01/only_raw.fif"])
+    run_pipeline(str(pipe), raise_on_error=True, n_jobs=n_jobs)
+
+    out = tmp_path / "out"
+    assert sorted(p.name for p in out.iterdir()) == ["derivatives"]
+    assert (out / "derivatives" / "only_raw.fif@Meta.json").is_file()
+
+    # Dry-run plan and dataframe find the same cached output.
+    plan = iterate_derivative_pipeline(str(pipe), "Meta", dry_run=True)
+    final = plan["plan"].iloc[0][0]
+    assert final["cached"] is True
+    assert final["prefix"] == str(out / "derivatives" / "only_raw.fif@Meta")
+    df = build_derivative_dataframe(str(pipe), raise_on_error=True)
+    assert len(df) == 1
+    assert any(c.startswith("Meta") for c in df.columns)
+
+
+def test_resolve_reference_base_file_as_common_root(tmp_path):
+    """#34 guard: a common_root equal to the file itself still yields a path inside."""
+    from neurodags.definitions import DatasetConfig
+
+    deriv = tmp_path / "derivatives"
+    ds_config = DatasetConfig(
+        name="t", file_pattern=str(tmp_path / "*.fif"), derivatives_path=str(deriv)
+    )
+    src = str(tmp_path / "in" / "x_raw.fif")
+    ref_str, _ = _resolve_reference_base(src, ds_config, src, None)
+    assert ref_str == str(deriv / "x_raw.fif")
+
+
+def test_multi_file_reference_bases_unchanged(tmp_path):
+    """Cache compatibility (#34): multi-file reference bases are byte-for-byte unchanged."""
+    from neurodags.definitions import DatasetConfig
+    from neurodags.iterators import get_all_files_across_datasets
+
+    _write_fif_project(
+        tmp_path, ["sub-01/ses-1/a_raw.fif", "sub-02/ses-1/b_raw.fif", "sub-02/ses-2/c_raw.fif"]
+    )
+    deriv = tmp_path / "out" / "derivatives"
+    ds_config = DatasetConfig(
+        name="d",
+        file_pattern=str(tmp_path / "in" / "**" / "*_raw.fif"),
+        derivatives_path=str(deriv),
+    )
+    files_per_dataset, _, roots = get_all_files_across_datasets({"d": ds_config})
+    assert roots["d"] == str(tmp_path / "in")
+    refs = sorted(
+        _resolve_reference_base(f, ds_config, roots["d"], None)[0] for f in files_per_dataset["d"]
+    )
+    assert refs == [
+        f"{deriv}/sub-01/ses-1/a_raw.fif",
+        f"{deriv}/sub-02/ses-1/b_raw.fif",
+        f"{deriv}/sub-02/ses-2/c_raw.fif",
+    ]

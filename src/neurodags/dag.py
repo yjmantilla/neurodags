@@ -308,6 +308,12 @@ def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
     return registered
 
 
+def _ensure_parent_dir(reference_base: str) -> None:
+    parent = os.path.dirname(reference_base)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def _artifact_candidates_for(prefix: str) -> list[str]:
     # Returns all non-error, non-skip files matching prefix.*. Used by the dry-run plan to set
     # cached=True when any artifact exists. Does NOT guarantee all expected artifact files
@@ -438,6 +444,11 @@ def run_derivative(
                 file_path=file_path,
             )
             return {"skipped_error": error_path}
+        # About to compute: make sure the output directory exists for artifact
+        # writers, .error/.skip markers and nodes writing next to reference_base.
+        # Done here (not when resolving reference_base) so dry-runs and cached
+        # dataframe reads never touch the filesystem (#33).
+        _ensure_parent_dir(base_reference)
 
     for sid in order:
         step = next(s for s in nodes if s["id"] == sid)
