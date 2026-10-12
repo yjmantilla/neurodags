@@ -516,13 +516,20 @@ def find_unique_root(
     prefix_len = len(PurePath(common_prefix).parts)
     log.debug("find_unique_root: prefix info", common_prefix=common_prefix, prefix_len=prefix_len)
 
-    # Try shallowest→deepest; collect all candidates
+    # Try shallowest→deepest; collect all candidates. A candidate must be a
+    # strict ancestor of every path (non-empty relative tail): otherwise a
+    # single-file input would yield the file itself as root and a relpath of
+    # "." (#34). With distinct multi-file inputs the common prefix is always a
+    # strict ancestor, so their roots are unaffected.
     candidates = []
     for i in range(1, prefix_len + 1):
         rels = []
         for parts in split:
             tail = parts[i:]
             rels.append(pmod.join(*tail) if tail else "")
+        if "" in rels:
+            log.debug("find_unique_root: candidate is not a strict ancestor", depth=i)
+            continue
         unique = len(rels) == len(set(rels))
         log.debug("find_unique_root: candidate check", depth=i, unique=unique)
         if unique:

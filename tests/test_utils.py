@@ -378,6 +378,34 @@ def test_no_suffix():
     assert result.name == "plainfile_extra.json"
 
 
+def test_maximal_mode_single_file_returns_parent_dir():
+    # #34: the root must be a directory, never the file itself, otherwise the
+    # relative path from it is "." and outputs escape derivatives_path.
+    root = find_unique_root(["/data/sub-01/rec.fif"], mode="maximal")
+    assert root == "/data/sub-01"
+    assert os.path.relpath("/data/sub-01/rec.fif", root) == "rec.fif"
+
+
+def test_maximal_mode_single_windows_file_returns_parent_dir():
+    root = find_unique_root(["C:\\data\\sub-01\\rec.fif"], mode="maximal")
+    assert root == "C:\\data\\sub-01"
+
+
+@pytest.mark.parametrize(
+    ("filepaths", "expected"),
+    [
+        (["/data/p/a.fif", "/data/p/b.fif"], "/data/p"),
+        (["/data/s1/x.fif", "/data/s2/x.fif"], "/data"),
+        (["/d/sub-01/ses-1/r.fif", "/d/sub-02/ses-1/r.fif", "/d/sub-02/ses-2/r.fif"], "/d"),
+        (["/data/project1/a.txt", "/data/project2/b.txt"], "/data"),
+    ],
+)
+def test_maximal_mode_multi_file_roots_unchanged(filepaths, expected):
+    # Cache compatibility (#34): multi-file roots (and hence derivative paths)
+    # must stay exactly as before the single-file fix.
+    assert find_unique_root(filepaths, mode="maximal") == expected
+
+
 if __name__ == "__main__":
     # pytest.main([__file__])
     test_identical_paths_edge_case()

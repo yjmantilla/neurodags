@@ -172,7 +172,14 @@ def _resolve_reference_base(
     dataset_config: DatasetConfig,
     common_root: str | None,
     mount_point: Any,
+    create_dirs: bool = False,
 ) -> tuple[str, Path]:
+    """Return the per-file output prefix (``reference_base``) as ``(str, Path)``.
+
+    Pure path computation unless *create_dirs* is True, in which case the
+    reference base's parent directory is created. Inspection paths (dry-run,
+    ``status``, ``count-inputs``) must leave it False so they never write (#33).
+    """
     derivatives_path = dataset_config.derivatives_path
     if derivatives_path:
         derivatives_path = get_path(
@@ -180,11 +187,15 @@ def _resolve_reference_base(
             mount_point=mount_point,
             field=f"datasets.{dataset_config.name}.derivatives_path",
         )
-        os.makedirs(derivatives_path, exist_ok=True)
         reference_base = os.path.relpath(file_path, start=common_root) if common_root else file_path
+        if reference_base == os.curdir:
+            # common_root is the file itself (e.g. a hand-passed root): keep the
+            # output inside derivatives_path instead of "<derivatives>@Deriv" (#34).
+            reference_base = os.path.basename(file_path)
         reference_base = os.path.join(derivatives_path, reference_base)
         reference_base = _sanitize_reference_base(reference_base)
-        os.makedirs(os.path.dirname(reference_base), exist_ok=True)
+        if create_dirs:
+            os.makedirs(os.path.dirname(reference_base), exist_ok=True)
     else:
         reference_base = _sanitize_reference_base(file_path)
     return reference_base, Path(reference_base)
@@ -204,7 +215,11 @@ def _process_file_job(job: _FileJob) -> _FileResult:
     source_path = job.source_path or job.file_path
     try:
         reference_base_str, reference_base_path = _resolve_reference_base(
-            source_path, dataset_config, job.common_root, job.mount_point
+            source_path,
+            dataset_config,
+            job.common_root,
+            job.mount_point,
+            create_dirs=not job.dry_run,
         )
     except Exception as setup_error:  # pragma: no cover - safety net
         return _FileResult(
@@ -1013,6 +1028,8 @@ def build_derivative_dataframe(
 def _build_reference_base(
     file_path: str, dataset_config, common_root: str | None, mount_point: Path | None
 ) -> Path:
+    # Read-only: dataframe collection mostly reads cached artifacts. When it must
+    # compute, run_derivative creates the output directory itself (#33).
     _, reference_base_path = _resolve_reference_base(
         file_path, dataset_config, common_root, mount_point
     )
