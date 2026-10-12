@@ -6,14 +6,13 @@ import argparse
 import os
 import subprocess
 import sys
-import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
 
 from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
-from neurodags.loaders import load_configuration
+from neurodags.loaders import ConfigVersionError, load_pipeline_configuration
 from neurodags.loggers import configure_logging
 from neurodags.mermaid import (
     derivative_to_html,
@@ -26,14 +25,18 @@ from neurodags.orchestrators import (
     build_derivative_dataframe,
     run_pipeline,
 )
-from neurodags.utils import check_derivative_names, expand_path, resolve_dataset_paths
+from neurodags.utils import (
+    DatasetConfigError,
+    check_derivative_names,
+    expand_path,
+    inspect_dataset_paths,
+)
 
 # Help text shared by every subcommand that takes -d/--datasets (see #43).
 DATASETS_HELP = (
     "Optional path to a datasets YAML that overrides the pipeline's 'datasets' key. "
     "Resolved relative to the current working directory (~ and $VARS are expanded). "
-    "Deprecated fallback: if it is not found there but exists next to the pipeline YAML, "
-    "that file is used with a warning."
+    "Relative paths inside that YAML are resolved against the YAML's own directory."
 )
 
 
@@ -57,28 +60,23 @@ def _save_dataframe(df: pd.DataFrame, output_path: str | None, default_name: str
 
 
 def _load_pipeline_config(config_path: str) -> dict:
-    return load_configuration(config_path)
+    # Refuses a configuration without naming_version: 1 (ConfigVersionError).
+    return load_pipeline_configuration(config_path)
 
 
-def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str | None:
+def resolve_cli_datasets_path(datasets: str | None) -> str | None:
     """Resolve a CLI ``-d/--datasets`` path to an absolute path.
 
-    CLI paths are relative to where the command is run; paths written inside the
-    pipeline YAML (its ``datasets:`` key) stay relative to the YAML and are not
-    handled here. ``~`` and ``$VARS`` are expanded as for the ``datasets:`` key.
-
-    For backward compatibility, a path that does not exist relative to the
-    current working directory but does exist relative to the pipeline YAML's
-    directory (the behaviour up to 0.3.4) is still used, with a ``FutureWarning``
-    (the CLI prints it as one ``neurodags: warning: ...`` line); that fallback will be
-    removed in a future release.
+    CLI paths are relative to where the command is run (the current working
+    directory); paths written inside the pipeline YAML (its ``datasets:`` key) stay
+    relative to the YAML and are not handled here. ``~`` and ``$VARS`` are expanded as
+    for the ``datasets:`` key. The YAML-relative fallback deprecated in 0.3.5 was
+    removed in 0.4.0.
 
     Parameters
     ----------
     datasets : str or None
         The value passed to ``-d/--datasets``. ``None`` is returned unchanged.
-    config : str or None
-        Path to the pipeline YAML, used only for the deprecated fallback.
 
     Returns
     -------
@@ -88,8 +86,8 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
     Raises
     ------
     DatasetsPathError
-        If a referenced environment variable is unset/empty, or the file exists
-        neither relative to the working directory nor relative to the pipeline YAML.
+        If a referenced environment variable is unset/empty, or the file does not
+        exist relative to the working directory.
     """
     if datasets is None:
         return None
@@ -102,46 +100,10 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
     if cwd_path.is_file():
         return str(cwd_path)
 
-    tried = [cwd_path]
-    if config is not None and not Path(expanded).is_absolute():
-        yaml_path = Path(config).resolve().parent / expanded
-        if yaml_path.is_file():
-            try:
-                suggestion = os.path.relpath(yaml_path)
-            except ValueError:  # different drive on Windows
-                suggestion = str(yaml_path)
-            warnings.warn(
-                f"-d '{datasets}' was found relative to the pipeline YAML; this lookup is "
-                f"deprecated and will be removed in a future release. "
-                f"Pass '-d {suggestion}' instead.",
-                FutureWarning,
-                stacklevel=2,
-            )
-            return str(yaml_path)
-        tried.append(yaml_path)
-
-    tried_str = " and ".join(str(p) for p in tried)
     raise DatasetsPathError(
-        f"datasets file '{datasets}' not found (tried {tried_str}). "
+        f"datasets file '{datasets}' not found (tried {cwd_path}). "
         "CLI paths are relative to the current working directory."
     )
-
-
-def _resolve_cli_datasets_or_exit(
-    datasets: str | None, config: str | None, prog: str
-) -> str | None:
-    """Run :func:`resolve_cli_datasets_path` for a CLI entry point.
-
-    The deprecation ``FutureWarning`` is caught and printed as a single
-    ``<prog>: warning: ...`` line on stderr (no Python warning prefix). Raises
-    :class:`DatasetsPathError` like the wrapped function.
-    """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", FutureWarning)
-        resolved = resolve_cli_datasets_path(datasets, config)
-    for w in caught:
-        print(f"{prog}: warning: {w.message}", file=sys.stderr)
-    return resolved
 
 
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
@@ -231,12 +193,14 @@ source activate myenv  # TODO: activate your environment
 
 python - <<'EOF'
 import os
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("{config_path}")
+config_path = os.path.abspath("{config_path}")
+config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
+    base_dir=os.path.dirname(config_path),
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
     skip_errors=True,
@@ -275,12 +239,14 @@ source activate myenv  # TODO: activate your environment
 
 python - <<EOF
 import os
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("{config_path}")
+config_path = os.path.abspath("{config_path}")
+config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
+    base_dir=os.path.dirname(config_path),
     derivatives=["$DERIVATIVE"],
     only_index=$FILE_INDEX,
     raise_on_error=True,
@@ -336,12 +302,14 @@ source activate myenv  # TODO: activate your environment
 
 python - <<EOF
 import os
-from neurodags.loaders import load_configuration
+from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("{config_path}")
+config_path = os.path.abspath("{config_path}")
+config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
+    base_dir=os.path.dirname(config_path),
     derivatives=["$DERIVATIVE"],
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
@@ -870,6 +838,9 @@ def build_parser() -> argparse.ArgumentParser:
 def _cmd_tui(args: argparse.Namespace) -> int:
     from neurodags.tui import NeuroDagsApp
 
+    if getattr(args, "config", None):
+        _load_pipeline_config(args.config)  # refuse an unmigrated config before the UI starts
+
     NeuroDagsApp(config_path=args.config, datasets_path=args.datasets).run()
     return 0
 
@@ -900,13 +871,37 @@ def _dependency_closure(defs: dict, selection: list[str]) -> list[str]:
     return sorted(result)
 
 
+def _print_dataset_report(
+    datasets: dict, resolved_paths: dict, mount_point: object, problems: list[str]
+) -> None:
+    """Print the resolved path fields per active dataset (stdout) and every problem (stderr)."""
+    for ds_name, cfg in datasets.items():
+        if getattr(cfg, "skip", False):
+            print(f"  {ds_name}: skipped")
+            continue
+        fields = resolved_paths.get(ds_name, {})
+        print(f"  {ds_name}:")
+        print(f"    mount: {mount_point}")
+        print(f"    source_root: {fields.get('source_root')}")
+        print(f"    file_pattern: {fields.get('file_pattern')}")
+        if fields.get("exclude_pattern"):
+            print(f"    exclude_pattern: {fields['exclude_pattern']}")
+        print(f"    derivatives_path: {fields.get('derivatives_path')}")
+        if fields.get("derivatives_subdir"):
+            print(f"    derivatives_subdir: {fields['derivatives_subdir']}")
+            print(f"    outputs under: {fields.get('derivatives_base')}")
+    for problem in problems:
+        # Errors (with source_root suggestions) go to stderr, one per line.
+        print(f"error: {problem}", file=sys.stderr)
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
     try:
         datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
             args.config, datasets_input=args.datasets
         )
-        resolved_paths = resolve_dataset_paths(datasets, mount_point)
+        resolved_paths, problems = inspect_dataset_paths(datasets, mount_point)
         file_names = check_derivative_names(config.get("DerivativeDefinitions") or {})
     except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -929,11 +924,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"config: {args.config}")
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
     print(f"mount_point: {mount_point}")
-    for ds_name, fields in resolved_paths.items():
-        print(f"  {ds_name}.file_pattern: {fields['file_pattern']}")
-        print(f"  {ds_name}.derivatives_path: {fields['derivatives_path']}")
-        if fields["exclude_pattern"]:
-            print(f"  {ds_name}.exclude_pattern: {fields['exclude_pattern']}")
+    _print_dataset_report(datasets, resolved_paths, mount_point, problems)
     print(f"derivatives_defined ({len(defined)}): {', '.join(defined) or 'none'}")
     if renamed:
         print(f"on-disk names differing from YAML names ({len(renamed)}):")
@@ -947,7 +938,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"  for_dataframe outputs: {', '.join(for_dataframe)}")
     if not_computed:
         print(f"not computed by this run ({len(not_computed)}): {', '.join(not_computed)}")
-    return 0
+    return 1 if problems else 0
 
 
 def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
@@ -1107,13 +1098,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if getattr(args, "datasets", None) is not None:
         try:
-            args.datasets = _resolve_cli_datasets_or_exit(
-                args.datasets, getattr(args, "config", None), "neurodags"
-            )
+            args.datasets = resolve_cli_datasets_path(args.datasets)
         except DatasetsPathError as exc:
             print(f"neurodags: error: {exc}", file=sys.stderr)
             return 2
 
+    try:
+        return _dispatch(parser, args)
+    except (ConfigVersionError, DatasetConfigError) as exc:
+        # Configuration errors are user errors: one clean message, no traceback.
+        print(f"neurodags: error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "tui":
         return _cmd_tui(args)
     if args.command == "validate":

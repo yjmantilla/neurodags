@@ -14,10 +14,11 @@ stderr).
 Inspect planned computations without executing any nodes. Returns a dataframe describing what would run and whether cached outputs already exist.
 
 ```python
-from neurodags.loaders import load_configuration
 from neurodags.orchestrators import iterate_derivative_pipeline, run_pipeline
 
-config = load_configuration("pipeline.yml")
+# Pass the path: relative paths then resolve against the YAML files. A dict loaded
+# in Python needs base_dir=... for relative dataset paths (0.4.0).
+config = "pipeline.yml"
 
 # Dry-run all derivatives in DerivativeList
 plan = run_pipeline(config, dry_run=True)

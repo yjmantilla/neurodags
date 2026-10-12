@@ -194,3 +194,68 @@ def load_meeg(meeg_file: PathLike, kwargs: dict | None = None):
             ) from e_epochs
 
     return meeg
+
+
+#: The ``naming_version`` this release of neurodags reads and writes (spec §1.1).
+NAMING_VERSION = 1
+
+#: How to upgrade an older configuration; one place so the wording is easy to update.
+MIGRATE_HINT = (
+    "To upgrade a neurodags 0.3.x configuration, run `neurodags migrate` (available in 0.4.0)."
+)
+
+
+class ConfigVersionError(ValueError):
+    """A pipeline configuration lacks ``naming_version: 1`` (or declares another version)."""
+
+
+def check_naming_version(config: Mapping[str, Any], *, source: str | None = None) -> None:
+    """Refuse a pipeline configuration without ``naming_version: 1``.
+
+    Every entry point that loads a pipeline (CLI, TUI, Python API) goes through
+    :func:`load_pipeline_configuration`, which calls this check.
+
+    Parameters
+    ----------
+    config : mapping
+        The loaded pipeline configuration.
+    source : str, optional
+        Where the configuration came from (a path), used in the error message.
+
+    Raises
+    ------
+    ConfigVersionError
+        If ``naming_version`` is missing or not exactly the integer ``1``.
+    """
+    where = f"pipeline configuration '{source}'" if source else "pipeline configuration"
+    if "naming_version" not in config:
+        raise ConfigVersionError(
+            f"{where} has no top-level 'naming_version'. neurodags 0.4.0 requires "
+            f"'naming_version: {NAMING_VERSION}'. {MIGRATE_HINT}"
+        )
+    value = config["naming_version"]
+    # bool is an int subclass: reject ``naming_version: true`` explicitly.
+    if type(value) is not int or value != NAMING_VERSION:
+        raise ConfigVersionError(
+            f"{where} declares naming_version: {value!r}; this neurodags supports only "
+            f"'naming_version: {NAMING_VERSION}'. {MIGRATE_HINT}"
+        )
+
+
+def load_pipeline_configuration(rules: RulesLike) -> dict[str, Any]:
+    """Load a **pipeline** configuration and check its ``naming_version``.
+
+    Same inputs as :func:`load_configuration` (mapping, path or file-like). Use this,
+    not :func:`load_configuration`, wherever a pipeline configuration (as opposed to a
+    datasets YAML or a derivative-definitions YAML) is loaded, so that an unmigrated
+    configuration is refused before anything runs.
+
+    Raises
+    ------
+    ConfigVersionError
+        If the configuration lacks ``naming_version: 1`` (see :func:`check_naming_version`).
+    """
+    config = load_configuration(rules)
+    source = os.fspath(rules) if isinstance(rules, str | os.PathLike) else None
+    check_naming_version(config, source=source)
+    return config

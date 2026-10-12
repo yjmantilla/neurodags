@@ -124,6 +124,7 @@ print(f"Generated {len(source_files)} source file(s)")
 DATASETS_YAML = f"""\
 dag_demo:
   name: DAG Demo
+  source_root: "{DATA_DIR}"
   file_pattern: "{DATA_DIR / '**' / '*.vhdr'}"
   derivatives_path: "{OUT_DIR}"
 """
@@ -142,6 +143,7 @@ print("Datasets:", list(datasets))
 # - **id.4** reads from *both* **id.2** and **id.3** → *fan-in*
 
 PIPELINE_YAML = """\
+naming_version: 1
 mount_point: null
 
 DerivativeDefinitions:

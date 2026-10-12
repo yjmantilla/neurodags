@@ -5,7 +5,8 @@
 ## Top-Level Keys
 
 ```yaml
-datasets: datasets.yml          # path to datasets.yml
+naming_version: 1               # required since 0.4.0
+datasets: datasets.yml          # path to datasets.yml (or an inline mapping)
 mount_point: local              # active mount point (matches key in datasets.yml)
 new_definitions: custom_nodes.py  # optional: custom node module(s)
 
@@ -22,13 +23,34 @@ DerivativeList:
   - ...
 ```
 
+## `naming_version`
+
+**Required since 0.4.0.** Must be exactly `naming_version: 1`. It declares that the
+configuration follows the 0.4.0 naming, output-layout and completion rules. A configuration
+without it, or with another value, is refused before anything runs by every entry point
+(all CLI subcommands, the TUI, `run_pipeline`, `iterate_derivative_pipeline`,
+`build_derivative_dataframe`, ...):
+
+```text
+neurodags: error: pipeline configuration 'pipeline.yml' has no top-level 'naming_version'. neurodags 0.4.0 requires 'naming_version: 1'. To upgrade a neurodags 0.3.x configuration, run `neurodags migrate` (available in 0.4.0).
+```
+
 ## `datasets`
 
-Path to `datasets.yml`. Relative paths are resolved from the pipeline YAML location.
+Path to `datasets.yml`, or an inline mapping of datasets (same fields as in
+{doc}`datasets_yaml`). A relative path is resolved from the pipeline YAML location.
+
+Relative paths *inside* the datasets definitions (`source_root`, `file_pattern`,
+`exclude_pattern`, `derivatives_path`) are resolved against the directory of the YAML file
+that contains them: the datasets YAML, or `pipeline.yml` for an inline mapping (changed in
+0.4.0; they used to be relative to the current working directory). For a configuration
+passed as a dict to the Python API, pass `base_dir=` to `run_pipeline` /
+`iterate_derivative_pipeline` / `build_derivative_dataframe`; relative dataset paths without
+it are an error.
 
 ## `mount_point`
 
-Selects which environment's paths to use from `datasets.yml`. Must match a key in each dataset's `file_pattern` / `derivatives_path` maps.
+Selects which environment's paths to use from `datasets.yml`. Must match a key in each dataset's `source_root` / `file_pattern` / `derivatives_path` maps.
 
 ## `new_definitions`
 
@@ -233,6 +255,7 @@ DerivativeList:
 ## Complete Example
 
 ```yaml
+naming_version: 1
 datasets: datasets.yml
 mount_point: local
 new_definitions: custom_nodes.py

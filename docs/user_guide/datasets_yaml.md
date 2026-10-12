@@ -2,13 +2,28 @@
 
 `datasets.yml` decouples data sources from processing logic, so the same dataset definitions can be reused across multiple pipelines.
 
+```{admonition} Changed in 0.4.0
+:class: important
+
+- `source_root` is **required** for every dataset (see below).
+- Relative paths in a datasets YAML (`source_root`, `file_pattern`, `exclude_pattern`,
+  `derivatives_path`) are resolved against **the directory of that datasets YAML**. In 0.3.x
+  they were resolved against the current working directory.
+- New optional `derivatives_subdir`; two active datasets resolving to the same
+  `derivatives_path` must use different `derivatives_subdir` values.
+- The pipeline YAML must declare `naming_version: 1` (see the
+  [pipeline.yml reference](pipeline_yaml.md)).
+```
+
 ## Structure
 
 ```yaml
 <dataset_key>:
   name: <string>
+  source_root: <string or mount-point map>   # required (0.4.0)
   file_pattern: <string or mount-point map>
   derivatives_path: <string or mount-point map>
+  derivatives_subdir: <relative path>        # optional (0.4.0)
   exclude_pattern: <glob string>             # optional
   drop_split_continuations: <bool>           # optional, default True
   skip: <bool>                               # optional, default False
@@ -21,12 +36,41 @@
 
 Human-readable dataset identifier. Used in logging and dataframe output.
 
+### `source_root`
+
+**Required since 0.4.0**, for every dataset (also skipped ones). The root folder of the
+dataset's source files, as a string or a mount-point map with an entry for the active mount
+point:
+
+```yaml
+source_root:
+  local: ~/data/study/rawdata
+  hpc: $SCRATCH/study/rawdata
+file_pattern:
+  local: ~/data/study/rawdata/**/*.vhdr
+  hpc: $SCRATCH/study/rawdata/**/*.vhdr
+```
+
+- For an active dataset it must be an existing directory; every file matched by
+  `file_pattern` must lie below it.
+- Choose the folder your recordings are organised under (e.g. the BIDS root), not a
+  subject folder: neurodags will mirror the tree below `source_root` inside
+  `derivatives_path`, so narrowing `file_pattern` for a test run (`rawdata/sub-01/**/*.vhdr`)
+  does not move the outputs.
+- Across mount points, the files below `source_root` must have the same relative paths
+  when the data is the same (neurodags cannot verify this; `neurodags validate` prints the
+  resolved root for the active mount).
+- When it is missing, `neurodags validate` prints a suggestion: the leading folders of the
+  expanded `file_pattern` before the first component containing `*`, `?` or `[` (a pattern
+  without wildcards suggests its parent folder). No suggestion is made when that would be a
+  filesystem root (`/`, `C:\`).
+
 ### `file_pattern`
 
 Glob pattern for finding source files. Supports mount-point maps for environment-specific paths:
 
 ```yaml
-# Single path
+# Single path (relative to this datasets YAML's folder)
 file_pattern: data/**/*.vhdr
 
 # Environment-specific (mount points)
@@ -50,14 +94,60 @@ derivatives_path:
   hpc: /cluster/scratch/out
 ```
 
+The `code/` snapshot of the configuration is written to `<derivatives_path>/code/`.
+
+### `derivatives_subdir`
+
+Optional (0.4.0), default unset. A relative subfolder of `derivatives_path` for this
+dataset's outputs (`/`-separated, no `..`, not absolute, not starting with `code` or
+`.neurodags`; used literally, without `~`/`$VAR` expansion).
+
+If two active datasets in one configuration resolve to the same `derivatives_path`, their
+`derivatives_subdir` values must differ (unset counts as one value); otherwise `validate`
+and every run refuse the configuration. Adding a second dataset therefore never moves the
+first one's outputs: only the new dataset needs a subfolder.
+
+```yaml
+study_a:
+  name: StudyA
+  source_root: /data/studyA
+  file_pattern: /data/studyA/**/*.vhdr
+  derivatives_path: /data/derivatives          # outputs of study_a (unchanged)
+
+study_b:
+  name: StudyB
+  source_root: /data/studyB
+  file_pattern: /data/studyB/**/*.vhdr
+  derivatives_path: /data/derivatives
+  derivatives_subdir: study_b                  # required: shares derivatives_path
+```
+
+Sharing a `derivatives_path` across *separate* pipeline configurations cannot be detected;
+avoid it. (In 0.4.0 the subfolder is validated and reported by `validate`; the output layout
+that places files under it lands with the 0.4.0 layout change.)
+
 ### `exclude_pattern`
 
 Optional glob to exclude files matching the pattern from processing. It is
 expanded like `file_pattern` (see below).
 
+### Relative paths (changed in 0.4.0)
+
+Relative values of `source_root`, `file_pattern`, `exclude_pattern` and
+`derivatives_path` are resolved, after `~`/`$VAR` expansion, against:
+
+| Where the dataset is defined | Relative paths are resolved against |
+|---|---|
+| a datasets YAML (`datasets: datasets.yml`, or `-d datasets.yml`) | the directory of **that datasets YAML** (0.3.x: the current working directory) |
+| an inline `datasets:` mapping inside `pipeline.yml` | the directory of `pipeline.yml` |
+| a dict passed to the Python API | the `base_dir=` argument; relative paths without it are an error |
+
+A path that is absolute after expansion is used as is. The result does not depend on
+where you run the command from, and workers always receive absolute paths.
+
 ### Environment variables and `~`
 
-`file_pattern`, `derivatives_path` and `exclude_pattern` (and the `datasets:`
+`source_root`, `file_pattern`, `derivatives_path` and `exclude_pattern` (and the `datasets:`
 reference in `pipeline.yml`) expand a leading `~` and environment variables
 written as `$NAME` or `${NAME}` (`%NAME%` is also accepted on Windows):
 
@@ -76,8 +166,8 @@ derivatives_path:
   error) without running anything.
 - A `$` not followed by a variable name (`a$1`, `foo$`) is kept literally.
   There is no escape syntax for a literal `$NAME`.
-- Relative paths are still resolved against the current working directory, as
-  before; expansion does not change that.
+- Expansion happens first; a path that is still relative afterwards is resolved as
+  described in "Relative paths" above.
 - Skipped datasets (`skip: True`) are not checked.
 
 This is unrelated to `vars` (below): `vars` are dataset-level values substituted
@@ -114,6 +204,8 @@ Dataset-level variables that are substituted into pipeline node args at runtime.
 ```yaml
 eeg_adhd_epilepsy_EO_baseline:
   name: eeg_adhd_epilepsy_EO_baseline
+  source_root:
+    local: data
   file_pattern:
     local: data/**/*@CleanedPrepRaw.fif
   derivatives_path:
@@ -169,6 +261,8 @@ List any number of datasets. All are processed when running `run_pipeline`:
 ```yaml
 dataset1:
   name: StudyA
+  source_root:
+    local: data/studyA
   file_pattern:
     local: data/studyA/**/*.vhdr
   derivatives_path:
@@ -176,6 +270,8 @@ dataset1:
 
 dataset2:
   name: StudyB
+  source_root:
+    local: data/studyB
   file_pattern:
     local: data/studyB/**/*.vhdr
   derivatives_path:
@@ -186,8 +282,11 @@ dataset2:
 
 ```yaml
 # pipeline.yml
+naming_version: 1         # required since 0.4.0
 datasets: datasets.yml    # path to datasets file
 mount_point: local        # which mount point to activate
 ```
 
-`datasets` can be an absolute or relative path. Relative paths are resolved from the pipeline YAML location.
+`datasets` can be an absolute or relative path. Relative paths are resolved from the pipeline
+YAML location; paths inside the datasets YAML are then resolved from the datasets YAML's
+location.

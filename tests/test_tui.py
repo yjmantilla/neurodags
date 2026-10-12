@@ -133,7 +133,7 @@ class TestAppStartup:
 
     def test_starts_with_config_path_preloads(self, tmp_path):
         yaml = tmp_path / "pipe.yaml"
-        yaml.write_text("Datasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
 
         async def _():
             async with NeuroDagsApp(config_path=str(yaml)).run_test() as pilot:
@@ -165,7 +165,7 @@ class TestAppStartup:
     def test_starts_with_datasets_path_preloads(self, tmp_path):
         yaml = tmp_path / "pipe.yaml"
         data_yaml = tmp_path / "datasets.yaml"
-        yaml.write_text("Datasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
         data_yaml.write_text("Datasets: {}\n")
 
         async def _():
@@ -186,7 +186,7 @@ class TestAppStartup:
 class TestConfigTab:
     def test_load_config_with_datasets_override(self, tmp_path):
         pipe_yaml = tmp_path / "p.yaml"
-        pipe_yaml.write_text("DerivativeDefinitions:\n  StepA: {}\n")
+        pipe_yaml.write_text("naming_version: 1\nDerivativeDefinitions:\n  StepA: {}\n")
         data_yaml = tmp_path / "d.yaml"
         data_yaml.write_text("Datasets:\n  ds1:\n    file_pattern: '*.vhdr'\n")
 
@@ -832,7 +832,7 @@ class TestMain:
 
     def test_main_with_config_arg(self, tmp_path):
         yaml = tmp_path / "p.yaml"
-        yaml.write_text("Datasets: {}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\n")
 
         with (
             patch.object(sys, "argv", ["neurodags-tui", str(yaml)]),
@@ -846,7 +846,7 @@ class TestMain:
     def test_main_with_datasets_arg(self, tmp_path):
         yaml = tmp_path / "p.yaml"
         datasets = tmp_path / "d.yaml"
-        yaml.write_text("Datasets: {}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\n")
         datasets.write_text("Datasets: {}\n")
 
         with (

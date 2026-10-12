@@ -330,12 +330,12 @@ class NeuroDagsApp(App):
                 self._load_config(path)
 
     def _load_config(self, path: str, datasets_path: str | None = None) -> None:
-        from neurodags.loaders import load_configuration
+        from neurodags.loaders import load_configuration, load_pipeline_configuration
 
         status = self.query_one("#config-status", Static)
         summary = self.query_one("#config-summary", Static)
         try:
-            self._config = load_configuration(path)
+            self._config = load_pipeline_configuration(path)
             self._config_path = path
             self._datasets_path = datasets_path
             self._derivatives = list(self._config.get("DerivativeDefinitions", {}).keys())
@@ -828,15 +828,19 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="NeuroDAGs TUI")
     parser.add_argument("config", nargs="?", help="Path to pipeline YAML config")
-    from neurodags.cli import DATASETS_HELP, DatasetsPathError, _resolve_cli_datasets_or_exit
+    from neurodags.cli import DATASETS_HELP, DatasetsPathError, resolve_cli_datasets_path
+    from neurodags.loaders import ConfigVersionError, load_pipeline_configuration
 
     parser.add_argument("-d", "--datasets", help=DATASETS_HELP)
     args = parser.parse_args()
+    if args.config:
+        try:
+            load_pipeline_configuration(args.config)  # refuse an unmigrated config up front
+        except ConfigVersionError as exc:
+            parser.exit(2, f"neurodags-tui: error: {exc}\n")
     if args.datasets:
         try:
-            args.datasets = _resolve_cli_datasets_or_exit(
-                args.datasets, args.config, "neurodags-tui"
-            )
+            args.datasets = resolve_cli_datasets_path(args.datasets)
         except DatasetsPathError as exc:
             parser.exit(2, f"neurodags-tui: error: {exc}\n")
         NeuroDagsApp(config_path=args.config, datasets_path=args.datasets).run()

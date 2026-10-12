@@ -96,6 +96,7 @@ for f in source_files:
 DATASETS_YAML = f"""\
 quickstart:
   name: Quickstart
+  source_root: "{DATA_DIR}"
   file_pattern: "{DATA_DIR / '**' / '*.vhdr'}"
   derivatives_path: "{OUT_DIR}"
 """
@@ -118,6 +119,7 @@ print("Datasets:", list(datasets))
 #   ``for_dataframe: true`` — included in the aggregated dataframe).
 
 PIPELINE_YAML = """\
+naming_version: 1
 mount_point: null
 
 DerivativeDefinitions:

@@ -103,30 +103,40 @@ def test_expand_path_percent_is_literal_on_posix():
     assert expand_path("data/%ND_TEST_OUT%/x") == "data/%ND_TEST_OUT%/x"
 
 
-def test_resolve_dataset_paths_skips_skipped_datasets(monkeypatch):
+def test_resolve_dataset_paths_skips_skipped_datasets(monkeypatch, tmp_path):
     monkeypatch.delenv("ND_TEST_UNSET", raising=False)
     monkeypatch.setenv("ND_TEST_OUT", "/scratch/me")
     datasets = {
         "a": DatasetConfig(
             name="a",
+            source_root=".",
             file_pattern="in/*.fif",
             derivatives_path="$ND_TEST_OUT/derivatives",
             exclude_pattern="$ND_TEST_OUT/bad*.fif",
         ),
         "b": DatasetConfig(
-            name="b", file_pattern="$ND_TEST_UNSET/*.fif", derivatives_path=None, skip=True
+            name="b",
+            source_root="$ND_TEST_UNSET",
+            file_pattern="$ND_TEST_UNSET/*.fif",
+            derivatives_path=None,
+            skip=True,
         ),
     }
+    # Relative paths resolve against the directory the dataset was defined in (0.4.0).
+    datasets["a"]._base_dir = str(tmp_path)
     resolved = resolve_dataset_paths(datasets)
     assert resolved == {
         "a": {
-            "file_pattern": "in/*.fif",
+            "source_root": str(tmp_path),
+            "file_pattern": str(tmp_path / "in" / "*.fif"),
             "derivatives_path": "/scratch/me/derivatives",
             "exclude_pattern": "/scratch/me/bad*.fif",
+            "derivatives_subdir": None,
+            "derivatives_base": "/scratch/me/derivatives",
         }
     }
     datasets["b"].skip = False
-    with pytest.raises(ValueError, match=r"datasets\.b\.file_pattern"):
+    with pytest.raises(ValueError, match=r"datasets\.b\.source_root.*ND_TEST_UNSET"):
         resolve_dataset_paths(datasets)
 
 
@@ -138,13 +148,11 @@ def test_resolve_dataset_paths_skips_skipped_datasets(monkeypatch):
 def test_datasets_reference_is_expanded_before_pipeline_dir_join(monkeypatch, tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / "ds.yml").write_text(
-        yaml.safe_dump({"d": {"name": "d", "file_pattern": "in/*.fif"}})
-    )
+    (proj / "ds.yml").write_text(yaml.safe_dump({"d": {"name": "d", "file_pattern": "in/*.fif"}}))
     pipe_dir = tmp_path / "pipe"
     pipe_dir.mkdir()
     pipe = pipe_dir / "pl.yml"
-    pipe.write_text("datasets: $ND_TEST_PROJ/ds.yml\nmount_point: null\n")
+    pipe.write_text("naming_version: 1\ndatasets: $ND_TEST_PROJ/ds.yml\nmount_point: null\n")
     monkeypatch.setenv("ND_TEST_PROJ", str(proj))
 
     datasets, _ = get_datasets_and_mount_point_from_pipeline_configuration(str(pipe))
@@ -188,6 +196,7 @@ def test_unset_exclude_pattern_variable_raises(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 PIPELINE = {
+    "naming_version": 1,
     "datasets": "ds.yml",
     "mount_point": "local",
     "DerivativeDefinitions": {
@@ -213,6 +222,7 @@ def _write_project(root: Path, derivatives_path: str) -> Path:
     ds = {
         "d": {
             "name": "d",
+            "source_root": {"local": str(root / "in"), "hpc": "$ND_TEST_HPC_ONLY"},
             # Absolute input glob: reused loky workers keep the cwd of the test that
             # spawned them, so a cwd-relative glob would break the n_jobs=2 case.
             "file_pattern": {
@@ -288,7 +298,10 @@ def test_validate_reports_resolved_paths_and_unset_variable(monkeypatch, tmp_pat
     pipe = _write_project(tmp_path, "$ND_TEST_OUTDIR/derivatives")
 
     assert main(["validate", str(pipe)]) == 0
-    assert f"d.derivatives_path: {tmp_path / 'scratch'}/derivatives" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"    derivatives_path: {tmp_path / 'scratch'}/derivatives" in out
+    assert f"    source_root: {tmp_path / 'in'}" in out
+    assert "    mount: local" in out
 
     monkeypatch.delenv("ND_TEST_OUTDIR")
     assert main(["validate", str(pipe)]) == 1

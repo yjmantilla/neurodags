@@ -233,7 +233,10 @@ my_project/
 ```yaml
 my_dataset:
   name: MyDataset
-  file_pattern:
+  source_root:               # required since 0.4.0
+    local: data
+    hpc: /cluster/BIDS
+  file_pattern:              # relative paths: relative to this file's folder
     local: data/**/*.vhdr
     hpc: /cluster/BIDS/**/*.vhdr
   derivatives_path:
@@ -243,6 +246,7 @@ my_dataset:
 
 **`pipeline.yml`**
 ```yaml
+naming_version: 1                 # required since 0.4.0
 datasets: datasets.yml
 mount_point: local
 new_definitions: custom_nodes.py  # optional
@@ -279,10 +283,11 @@ DerivativeList:
 
 **Python**
 ```python
-from neurodags.loaders import load_configuration
 from neurodags.orchestrators import run_pipeline
 
-config = load_configuration("pipeline.yml")
+# Pass the path: relative paths then resolve against the YAML files. A dict loaded
+# in Python needs base_dir=... for relative dataset paths (0.4.0).
+config = "pipeline.yml"
 
 # Run all derivatives in "DerivativeList", auto-sorted by dependency order
 run_pipeline(config)

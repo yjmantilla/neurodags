@@ -5,7 +5,7 @@ import re
 from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
 from neurodags.definitions import DatasetConfig
 from neurodags.loggers import get_logger
-from neurodags.utils import expand_path, find_unique_root, get_path
+from neurodags.utils import find_unique_root, resolve_dataset_field
 
 log = get_logger(__name__)
 
@@ -237,19 +237,12 @@ def get_all_files_across_datasets(
             )
             continue
 
-        resolved_pattern = get_path(
-            pattern, mount_point=mount_point, field=f"datasets.{dataset_name}.file_pattern"
-        )
-        # exclude_pattern is a glob like file_pattern, so it gets the same ~/$VAR
-        # expansion (and fails loudly on unset variables) outside the catch below.
-        exclude_pattern = (
-            expand_path(
-                dataset_config.exclude_pattern,
-                field=f"datasets.{dataset_name}.exclude_pattern",
-            )
-            if dataset_config.exclude_pattern
-            else None
-        )
+        # Relative patterns resolve against the directory of the YAML that defined the
+        # dataset (or base_dir= for in-memory mappings), after ~/$VAR expansion (§1.3).
+        resolved_pattern = resolve_dataset_field(dataset_config, "file_pattern", mount_point)
+        # exclude_pattern is a glob like file_pattern, so it gets the same resolution
+        # (and fails loudly on unset variables) outside the catch below.
+        exclude_pattern = resolve_dataset_field(dataset_config, "exclude_pattern", mount_point)
         log.debug(
             "get_all_files_across_datasets: resolved pattern",
             dataset=dataset_name,
@@ -319,7 +312,12 @@ def get_all_files_across_datasets(
 
 
 def get_all_files_from_pipeline_configuration(
-    pipeline_input, datasets_input=None, max_files_per_dataset=None, drop_split_continuations=True
+    pipeline_input,
+    datasets_input=None,
+    max_files_per_dataset=None,
+    drop_split_continuations=True,
+    *,
+    base_dir=None,
 ):
     """
     Given a pipeline configuration and an optional datasets configuration,
@@ -337,6 +335,9 @@ def get_all_files_from_pipeline_configuration(
     drop_split_continuations : bool, optional
         Global switch (default True) for dropping split-FIF continuation files,
         forwarded to :func:`get_all_files_across_datasets`.
+    base_dir : path-like, optional
+        Directory that relative dataset paths of in-memory mappings resolve against
+        (see :func:`get_datasets_and_mount_point_from_pipeline_configuration`).
 
     Returns
     -------
@@ -349,7 +350,7 @@ def get_all_files_from_pipeline_configuration(
     """
     log.debug("get_all_files_from_pipeline_configuration: called", pipeline_input=pipeline_input)
     datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_input, datasets_input=datasets_input
+        pipeline_input, datasets_input=datasets_input, base_dir=base_dir
     )
 
     files_per_dataset, all_files, common_roots = get_all_files_across_datasets(

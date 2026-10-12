@@ -69,6 +69,8 @@ def test_pipeline_under_bracketed_dir_is_cached_and_reported_done(dummy_pipeline
         "datasets": {
             "test_dataset": {
                 "name": "TestDataset",
+                # source_root is a literal path (no glob), so it is not escaped.
+                "source_root": (study / "rawdata").as_posix(),
                 # file_pattern is a user glob, so the literal directory is escaped there.
                 "file_pattern": glob.escape((study / "rawdata").as_posix()) + "/**/*.vhdr",
                 "derivatives_path": out_dir.as_posix(),

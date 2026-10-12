@@ -53,6 +53,7 @@ def test_resolve_reference_base_no_derivatives_path(tmp_path):
 
     ds_config = DatasetConfig(
         name="test",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.vhdr"),
         derivatives_path=None,
     )
@@ -67,6 +68,7 @@ def test_resolve_reference_base_sanitizes_at_no_derivatives_path(tmp_path):
 
     ds_config = DatasetConfig(
         name="test",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.fif"),
         derivatives_path=None,
     )
@@ -89,6 +91,7 @@ def test_resolve_reference_base_sanitizes_at_with_derivatives_path(tmp_path):
 
     ds_config = DatasetConfig(
         name="test",
+        source_root=str(raw_dir),
         file_pattern=str(raw_dir / "**/*.fif"),
         derivatives_path=str(deriv_dir),
     )
@@ -187,9 +190,11 @@ def test_iterate_pipeline_raise_on_error(dummy_pipeline):
 
 def test_iterate_pipeline_empty_dataset(tmp_path):
     cfg = {
+        "naming_version": 1,
         "datasets": {
             "empty": {
                 "name": "Empty",
+                "source_root": str(tmp_path),
                 "file_pattern": str(tmp_path / "**/*.vhdr"),
                 "derivatives_path": str(tmp_path / "deriv"),
             }
@@ -212,9 +217,11 @@ def test_iterate_pipeline_empty_dataset(tmp_path):
 
 def test_iterate_pipeline_empty_dataset_dry_run(tmp_path):
     cfg = {
+        "naming_version": 1,
         "datasets": {
             "empty": {
                 "name": "Empty",
+                "source_root": str(tmp_path),
                 "file_pattern": str(tmp_path / "**/*.vhdr"),
                 "derivatives_path": str(tmp_path / "deriv"),
             }
@@ -381,11 +388,12 @@ def test_get_datasets_relative_to_pipeline_path(tmp_path):
     datasets_path.write_text(
         "demo:\n"
         "  name: Demo\n"
+        f"  source_root: {tmp_path}\n"
         f"  file_pattern: {tmp_path}/**/*.vhdr\n"
         f"  derivatives_path: {tmp_path}/derivatives\n"
     )
     pipeline_path = config_dir / "pipeline.yml"
-    pipeline_path.write_text("datasets: datasets.yml\nmount_point: null\n")
+    pipeline_path.write_text("naming_version: 1\ndatasets: datasets.yml\nmount_point: null\n")
 
     datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(pipeline_path)
     assert mount_point is None
@@ -397,6 +405,7 @@ def test_get_datasets_relative_to_pipeline_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 _META_PIPELINE = {
+    "naming_version": 1,
     "datasets": "ds.yml",
     "mount_point": None,
     "DerivativeDefinitions": {
@@ -432,6 +441,7 @@ def _write_fif_project(root, relpaths):
     ds = {
         "d": {
             "name": "d",
+            "source_root": str(root),
             "file_pattern": str(root / "in" / "**" / "*_raw.fif"),
             "derivatives_path": str(root / "out" / "derivatives"),
         }
@@ -548,7 +558,10 @@ def test_resolve_reference_base_file_as_common_root(tmp_path):
 
     deriv = tmp_path / "derivatives"
     ds_config = DatasetConfig(
-        name="t", file_pattern=str(tmp_path / "*.fif"), derivatives_path=str(deriv)
+        name="t",
+        source_root=str(tmp_path),
+        file_pattern=str(tmp_path / "*.fif"),
+        derivatives_path=str(deriv),
     )
     src = str(tmp_path / "in" / "x_raw.fif")
     ref_str, _ = _resolve_reference_base(src, ds_config, src, None)
@@ -566,6 +579,7 @@ def test_multi_file_reference_bases_unchanged(tmp_path):
     deriv = tmp_path / "out" / "derivatives"
     ds_config = DatasetConfig(
         name="d",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "in" / "**" / "*_raw.fif"),
         derivatives_path=str(deriv),
     )

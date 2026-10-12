@@ -34,6 +34,7 @@ def _make_pipeline_yaml(
     datasets_cfg = {
         "test_ds": {
             "name": "TestDS",
+            "source_root": str(data_dir),
             "file_pattern": str(data_dir / "**/*.vhdr"),
             "derivatives_path": str(deriv_dir),
         }
@@ -42,7 +43,7 @@ def _make_pipeline_yaml(
     datasets_path.write_text(yaml.dump(datasets_cfg))
 
     new_defs_path = None
-    pipeline_cfg: dict = {"datasets": datasets_name, "mount_point": None}
+    pipeline_cfg: dict = {"naming_version": 1, "datasets": datasets_name, "mount_point": None}
     if new_defs_name:
         new_defs_path = tmp_path / new_defs_name
         new_defs_path.write_text("# custom nodes\n")
@@ -142,6 +143,7 @@ def test_snapshot_new_definitions_list(tmp_path):
     datasets_cfg = {
         "ds": {
             "name": "DS",
+            "source_root": str(tmp_path),
             "file_pattern": str(tmp_path / "**/*.vhdr"),
             "derivatives_path": str(tmp_path / "deriv"),
         }
@@ -151,6 +153,7 @@ def test_snapshot_new_definitions_list(tmp_path):
     datasets_path.write_text(yaml.dump(datasets_cfg))
 
     pipeline_cfg = {
+        "naming_version": 1,
         "datasets": "datasets.yml",
         "mount_point": None,
         "new_definitions": ["nodes_a.py", "nodes_b.py"],
@@ -184,6 +187,7 @@ def test_snapshot_copies_datasets_override(tmp_path):
             {
                 "test_ds": {
                     "name": "TestDS",
+                    "source_root": str(tmp_path),
                     "file_pattern": str(tmp_path / "**/*.vhdr"),
                     "derivatives_path": str(tmp_path / "derivatives"),
                 }
@@ -245,6 +249,7 @@ def test_snapshot_skips_dataset_without_derivatives_path(tmp_path):
 
     no_deriv_config = DatasetConfig(
         name="NoDeriv",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.vhdr"),
         derivatives_path=None,
     )
@@ -267,11 +272,13 @@ def test_snapshot_deduplicates_shared_derivatives_path(tmp_path):
 
     ds1 = DatasetConfig(
         name="DS1",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.vhdr"),
         derivatives_path=str(deriv_dir),
     )
     ds2 = DatasetConfig(
         name="DS2",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.vhdr"),
         derivatives_path=str(deriv_dir),
     )
@@ -302,11 +309,13 @@ def test_snapshot_multiple_datasets_get_own_code_dir(tmp_path):
 
     ds_a = DatasetConfig(
         name="DSA",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.vhdr"),
         derivatives_path=str(deriv_a),
     )
     ds_b = DatasetConfig(
         name="DSB",
+        source_root=str(tmp_path),
         file_pattern=str(tmp_path / "**/*.vhdr"),
         derivatives_path=str(deriv_b),
     )
@@ -381,11 +390,13 @@ def test_run_pipeline_triggers_snapshot(tmp_path, dummy_pipeline):
     datasets_cfg = {
         "snap_ds": {
             "name": "SnapDS",
+            "source_root": str(data_dir),
             "file_pattern": str(data_dir / "**/*.vhdr"),
             "derivatives_path": str(deriv_dir),
         }
     }
     pipeline_cfg = {
+        "naming_version": 1,
         "datasets": "snap_datasets.yml",
         "mount_point": None,
         "DerivativeDefinitions": {},
@@ -442,11 +453,13 @@ def test_run_pipeline_dry_run_does_not_snapshot(tmp_path):
     datasets_cfg = {
         "dry_ds": {
             "name": "DryDS",
+            "source_root": str(data_dir),
             "file_pattern": str(data_dir / "**/*.vhdr"),
             "derivatives_path": str(deriv_dir),
         }
     }
     pipeline_cfg = {
+        "naming_version": 1,
         "datasets": "dry_datasets.yml",
         "mount_point": None,
         "DerivativeDefinitions": {},
