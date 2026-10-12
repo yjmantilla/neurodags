@@ -30,6 +30,7 @@ from neurodags.derivatives import (
 )
 from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
+from neurodags.naming import ColumnCollisionError, find_column_collisions, format_column
 from neurodags.nodes import get_node
 from neurodags.utils import snake_to_camel
 
@@ -768,7 +769,6 @@ def collect_derivative_for_dataframe(
     mount_point: Path | None = None,
     *,
     flatten_xarray_artifacts: bool = True,
-    sort_flattened_dims: bool = True,
     preserve_complex_values: bool = False,
 ) -> dict[str, Any]:
     """
@@ -783,18 +783,25 @@ def collect_derivative_for_dataframe(
     flatten_xarray_artifacts:
         When True, ``xr.DataArray`` artifacts (or paths to ``.nc`` files containing them)
         are flattened into multiple columns using their coordinate metadata.
-    sort_flattened_dims:
-        When flattening a ``DataArray``, sort dimension names alphanumerically when constructing
-        the column suffix.
 
     preserve_complex_values:
         When True, skip flattening and value simplification so artifacts retain their original
         Python objects (after potential on-disk loading).
 
-    Returns a dictionary suitable for composing a DataFrame row, with columns named
-    ``{derivative_name}{artifact_suffix}`` (with optional BIDS-like suffixes per flattened element).
-    Derivatives flagged with ``save=True`` and ``for_dataframe=True`` are skipped when no cached
-    artifacts are found instead of triggering a recomputation.
+    Returns
+    -------
+    dict[str, Any]
+        A dictionary suitable for composing a DataFrame row, with columns named by
+        :func:`neurodags.naming.format_column`: ``{derivative_name}{artifact_suffix}``, plus
+        ``@dim-value_dim-value`` (percent-encoded, dims sorted by encoded name) per flattened
+        element. Derivatives flagged with ``save=True`` and ``for_dataframe=True`` are skipped
+        (empty dictionary) when no cached artifacts are found instead of triggering a
+        recomputation.
+
+    Raises
+    ------
+    neurodags.naming.ColumnCollisionError
+        When two coordinates or artifacts produce the same column.
     """
 
     enforce_precomputed = bool(derivative_def.get("save", True)) and bool(
@@ -823,31 +830,25 @@ def collect_derivative_for_dataframe(
         return {}
 
     row_values: dict[str, Any] = {}
+    # (origin, column) for every generated column, so collisions name both origins (spec 7.1).
+    origins: list[tuple[str, str]] = []
     for suffix, payload in artifact_payloads.items():
-        column_name = f"{derivative_name}{suffix}"
         simplified = _simplify_artifact_payload(
             payload,
             suffix=suffix,
             flatten_xarray=flatten_xarray_artifacts and not preserve_complex_values,
-            sort_dims_alphabetically=sort_flattened_dims,
             preserve_complex_values=preserve_complex_values,
             derivative_name=derivative_name,
         )
         if isinstance(simplified, _FlattenedArtifactColumns):
-            for flatten_suffix, value in simplified.items():
-                target_column = (
-                    column_name if flatten_suffix == "" else f"{column_name}@{flatten_suffix}"
-                )
-                if target_column in row_values:
-                    log.warning(
-                        "Overwriting dataframe column while flattening artifact",
-                        column=target_column,
-                        derivative=derivative_name,
-                        suffix=suffix,
-                    )
+            for target_column, value in simplified.items():
+                origins.append((simplified.origins[target_column], target_column))
                 row_values[target_column] = value
         else:
+            column_name = format_column(derivative_name, suffix)
+            origins.append((f"artifact {derivative_name}{suffix}", column_name))
             row_values[column_name] = simplified
+    _raise_on_column_collisions(origins)
     return row_values
 
 
@@ -917,9 +918,8 @@ def _simplify_artifact_payload(
     *,
     suffix: str,
     flatten_xarray: bool = False,
-    sort_dims_alphabetically: bool = True,
     preserve_complex_values: bool = False,
-    derivative_name: str | None = None,
+    derivative_name: str,
 ) -> Any:
     value = _load_from_path(payload, suffix=suffix) if isinstance(payload, Path) else payload
 
@@ -927,12 +927,7 @@ def _simplify_artifact_payload(
         return value
 
     if flatten_xarray and xr is not None and isinstance(value, xr.DataArray):
-        return _flatten_dataarray_payload(
-            value,
-            sort_dims_alphabetically=sort_dims_alphabetically,
-            derivative_name=derivative_name,
-            suffix=suffix,
-        )
+        return _flatten_dataarray_payload(value, derivative_name=derivative_name, suffix=suffix)
 
     return _simplify_value(value)
 
@@ -966,30 +961,72 @@ def _load_from_path(path: Path, *, suffix: str) -> Any:
 
 
 class _FlattenedArtifactColumns(dict):
-    """Marker mapping used to expand flattened DataArray payloads into multiple columns."""
+    """Marker mapping ``{column: value}`` for a DataArray expanded into several columns.
+
+    ``origins`` maps each column to a description of the coordinates behind it.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.origins: dict[str, str] = {}
+
+
+def _raise_on_column_collisions(origins: Sequence[tuple[str, str]]) -> None:
+    """Raise :class:`ColumnCollisionError` when two origins produce the same column."""
+    collisions = find_column_collisions(origins)
+    if not collisions:
+        return
+    shown = list(collisions.items())[:5]
+    details = "; ".join(f"{column!r} from " + " and ".join(found) for column, found in shown)
+    more = f" (and {len(collisions) - len(shown)} more)" if len(collisions) > len(shown) else ""
+    raise ColumnCollisionError(
+        f"Dataframe column collision: {details}{more}. Each column must come from exactly one "
+        "coordinate of one artifact; make the coordinate index unique and use one type per "
+        "coordinate (e.g. not both 1 and '1')."
+    )
+
+
+def _coord_label(value: Any) -> Any:
+    """Unwrap numpy scalars so the column shows ``1.5``, not ``np.float64(1.5)``."""
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
 
 
 def _flatten_dataarray_payload(
     data_array: "xr.DataArray",
     *,
-    sort_dims_alphabetically: bool,
-    derivative_name: str | None = None,
-    suffix: str | None = None,
+    derivative_name: str,
+    suffix: str,
 ) -> _FlattenedArtifactColumns:
+    """Expand a DataArray into ``{column: value}`` with :func:`naming.format_column` columns.
+
+    Raises
+    ------
+    ColumnCollisionError
+        When two elements map to the same column (non-unique index, or mixed types such
+        as ``1`` and ``"1"``).
+    """
+    artifact = f"{derivative_name}{suffix}"
     if data_array.ndim == 0:
         try:
             scalar = data_array.item()
         except Exception:
             scalar = data_array.values
-        return _FlattenedArtifactColumns({"": _simplify_value(scalar)})
+        column = format_column(derivative_name, suffix)
+        flattened = _FlattenedArtifactColumns({column: _simplify_value(scalar)})
+        flattened.origins[column] = f"artifact {artifact}"
+        return flattened
 
     dims = list(data_array.dims)
     shape = tuple(data_array.sizes[dim] for dim in dims)
     index_iterator = _ndindex(shape)
 
-    flattened: dict[str, Any] = {}
-    # Original (dim, coord_value) pairs behind each generated key, so collisions can be reported.
-    key_sources: dict[str, list[tuple[Any, Any]]] = {}
+    flattened = _FlattenedArtifactColumns()
+    origins: list[tuple[str, str]] = []
     for index_tuple in index_iterator:
         dims_with_values = []
         for dim, idx in zip(dims, index_tuple, strict=False):
@@ -1007,38 +1044,25 @@ def _flatten_dataarray_payload(
                     coord_value = coord[idx]
             else:
                 coord_value = idx
-            dims_with_values.append((dim, coord_value))
+            dims_with_values.append((dim, _coord_label(coord_value)))
 
-        if sort_dims_alphabetically:
-            dims_with_values.sort(key=lambda item: item[0])
-
-        # Build a BIDS-like segment: dim-dimvalue pairs joined by underscores.
-        key = "_".join(
-            f"{dim}-{_format_coord_value(coord_value)}" for dim, coord_value in dims_with_values
-        )
+        # Dims are percent-encoded and sorted by encoded name inside format_column.
+        column = format_column(derivative_name, suffix, dims_with_values)
 
         try:
             raw_value = data_array.data[index_tuple]
         except Exception:
             raw_value = data_array.values[index_tuple]
 
-        # _format_coord_value is not injective (e.g. "a-b" and "a~b" both become "a~b"), so two
-        # distinct coordinates can produce the same key. The later value overwrites the earlier
-        # one; warn so the silent data loss is visible.
-        if key in flattened:
-            log.warning(
-                "Dataframe column collision while flattening artifact: distinct coordinate "
-                "values map to the same column name; the earlier value is overwritten",
-                derivative=derivative_name,
-                suffix=suffix,
-                column_suffix=key,
-                kept_coords=dims_with_values,
-                overwritten_coords=key_sources[key],
-            )
-        key_sources[key] = list(dims_with_values)
-        flattened[key] = _simplify_value(raw_value)
+        origin = f"artifact {artifact} at " + ", ".join(
+            f"{dim}={value!r}" for dim, value in dims_with_values
+        )
+        origins.append((origin, column))
+        flattened.origins[column] = origin
+        flattened[column] = _simplify_value(raw_value)
 
-    return _FlattenedArtifactColumns(flattened)
+    _raise_on_column_collisions(origins)
+    return flattened
 
 
 def _ndindex(shape: Sequence[int]):
@@ -1061,29 +1085,6 @@ def _ndindex_fallback(shape: Sequence[int]):
             indices[axis] = 0
             if axis == 0:
                 return
-
-
-def _format_coord_value(value: Any) -> str:
-    if hasattr(value, "item"):
-        try:
-            value = value.item()
-        except Exception:
-            pass
-    # NOTE: the line below is a no-op (its result is discarded), so ``None`` currently becomes
-    # "None", not "NA". Left as is because generated column names are a compatibility surface.
-    "NA" if value is None else str(value)
-    # sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
-    # sanitized = sanitized.strip("-")
-    value = str(value)
-
-    if isinstance(value, str):
-        value = value.replace("-", "~")
-        value = value.replace("_", "|")
-        value = value.replace("@", "$")
-        value = value.replace(",", ".")
-    sanitized = value
-
-    return sanitized or "NA"
 
 
 def _simplify_value(value: Any) -> Any:

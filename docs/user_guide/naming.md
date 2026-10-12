@@ -27,7 +27,7 @@ until then they are kept stable so existing caches stay valid.
 | Glob outputs by on-disk name: `**/*@BandPower*`. | Glob by YAML name (`*@band_power*`) — matches nothing. |
 | Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO.fif`). | Use artifact keys without a leading `.` (`-epo.fif`) — the cache lookup (`@Name.*`) never finds them, so they recompute every run. |
 | Keep raw source file names free of `@`, `&` and glob characters (`*`, `?`, `[`, `]`). | Have a source named with `[`/`]` (never seen as cached), or both `a@b.vhdr` and `a&b.vhdr` in one folder (same outputs). |
-| Use xarray dimension names without `_`, `-` or `@` (`freqbands`, `spaces`). | Use dimension names like `freq_band` — the flattened dataframe column cannot be split back unambiguously. |
+| Split dataframe column names with `neurodags.naming.parse_column` (see [Dataframe column names](#naming-dataframe-columns)). | Split columns by hand on `_` or `-` — dimension names and values are percent-encoded (`freq_band` → `freq%5Fband`), and values may contain `-` (`8-12`). |
 | Treat `<derivatives_path>/code/` as reserved for the config snapshot. | Store your own files in `<derivatives_path>/code/` — each `neurodags run` rewrites its snapshot files there. |
 
 (naming-output-files)=
@@ -184,37 +184,51 @@ a valid `id.N.field` raise an error instead of being passed through.
 
 ## Dataframe column names
 
-`build_derivative_dataframe` / `neurodags dataframe` name columns after the **YAML name**:
+`build_derivative_dataframe` / `neurodags dataframe` name columns after the **YAML name**, with
+{func}`neurodags.naming.format_column`:
 
 ```text
-<yaml name><artifact suffix>                    # one column per artifact
-<yaml name><artifact suffix>@<flatten suffix>   # one column per element of a flattened DataArray
+<yaml name><artifact suffix>                                  # one column per artifact
+<yaml name><artifact suffix>@<dim>-<value>_<dim>-<value>...   # one column per DataArray element
+<yaml name>.error                                             # the derivative failed for this file
 ```
 
 A `.nc` artifact holding an N-dimensional `xarray.DataArray` is flattened into one column per
-element. The flatten suffix is `dim-value` pairs joined by `_`, with dimensions sorted
-alphabetically (0-d arrays get no `@` part). Coordinate values are escaped so the column can be
-split back:
+element: one `dim-value` pair per dimension, joined by `_`, **sorted by encoded dimension name**
+(0-d arrays get no `@` part). Dimension names keep only `A-Z`, `a-z`, `0-9` literal; values also
+keep `.`, `+`, `~`, `-`. Every other character is percent-encoded as UTF-8 with uppercase hex:
 
-| In the coordinate value | Written as |
-|------------------------|-----------|
-| `-` | `~` |
-| `_` | `\|` |
-| `@` | `$` |
-| `,` | `.` |
+| Coordinate | Column |
+|------------|--------|
+| `band="alpha"`, `channel="Fp1"` | `BandPower.nc@band-alpha_channel-Fp1` |
+| `band="8-12"` | `BandPower.nc@band-8-12` |
+| `freq=-1.5` | `Psd.nc@freq--1.5` |
+| `channel="EEG 001"` | `Psd.nc@channel-EEG%20001` |
+| `cond="a_b"` | `Erp.nc@cond-a%5Fb` |
+| dimension `freq_band` | `Psd.nc@freq%5Fband-alpha` |
 
-Dimension names are **not** escaped, which is why they should not contain `_`, `-` or `@`. The
-`,` → `.` replacement is one-way: a `.` in a column may have been either.
+The encoding is reversible, so any dimension name and coordinate value is safe. Metadata columns
+(`index`, `dataset`, `file_path`) never contain `.`, while generated columns always do. Two
+coordinates, artifacts or derivatives that would produce the same column (a non-unique
+coordinate index, or mixed types such as `1` and `"1"`) stop the build with
+`neurodags.naming.ColumnCollisionError`, whatever `raise_on_error` is.
 
-**Reading a column back.** For `band_power.nc@freqbands-alpha|low_spaces-Fp1~F3`:
+**Reading a column back.** {func}`neurodags.naming.parse_column` returns
+`(name, suffix, coords, is_error)`, or `None` for a metadata column. By hand, for
+`band_power.nc@freq%5Fband-alpha%5Flow_spaces-Fp1-F3`:
 
-1. Split at the first `@`: `band_power.nc` (YAML name + artifact suffix) and
-   `freqbands-alpha|low_spaces-Fp1~F3`.
-2. Split the flatten suffix on `_`: `freqbands-alpha|low`, `spaces-Fp1~F3`.
-3. Split each pair at the first `-` and unescape the value (`~`→`-`, `|`→`_`, `$`→`@`):
-   `freqbands = alpha_low`, `spaces = Fp1-F3`.
+1. Split at the first `@`: `band_power.nc` and `freq%5Fband-alpha%5Flow_spaces-Fp1-F3`.
+2. Split the head at its first `.`: name `band_power`, suffix `.nc` (suffix `.error` marks the
+   error column).
+3. Split the coordinates on `_` (never literal inside a dimension or value):
+   `freq%5Fband-alpha%5Flow`, `spaces-Fp1-F3`.
+4. Split each pair at its first `-` (never literal inside a dimension) and percent-decode:
+   `freq_band = alpha_low`, `spaces = Fp1-F3`.
 
-In long format (`output_format="long"`), the same string is in the `derivative` column.
+In long format (`output_format="long"`), the same string is in the `derivative` column. The
+dataframe is *easy to split, not pre-split*: see
+{ref}`Splitting column names <dataframe-splitting-columns>` for a pandas recipe that expands
+coordinates and name parameters into columns.
 
 ## Worked example
 
@@ -253,8 +267,8 @@ derivatives2/
 Dataframe columns from the first pipeline (wide format, `band_power` with `for_dataframe: true`):
 
 ```text
-index  dataset  file_path                                 band_power.nc@freqbands-alpha_spaces-Fp1~F3  band_power.nc@freqbands-alpha_spaces-O1  ...
-0      demo     rawdata/sub-01/eeg/sub-01_task-rest_eeg.vhdr  0.32                                     0.29                                     ...
+index  dataset  file_path                                 band_power.nc@freqbands-alpha_spaces-Fp1-F3  band_power.nc@freqbands-alpha_spaces-O1  ...
+0      demo     rawdata/sub-01/eeg/sub-01_task-rest_eeg.vhdr  0.32                                         0.29                                     ...
 ```
 
 To find all `band_power` outputs on disk: `find derivatives -name '*@BandPower*'`.

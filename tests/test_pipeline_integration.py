@@ -273,7 +273,7 @@ def test_dataframe_parallel_uncached_subderivative_chain(dummy_pipeline):
         cfg, include_derivatives=["BandPowerMean"], n_jobs=2, raise_on_error=True
     )
     assert len(df) > 0
-    assert not [c for c in df.columns if c.endswith("__error")]
+    assert not [c for c in df.columns if c.endswith(".error")]
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +282,7 @@ def test_dataframe_parallel_uncached_subderivative_chain(dummy_pipeline):
 
 
 def test_build_derivative_dataframe_derivative_error_captured(dummy_pipeline):
-    """Derivative-level error is caught and stored as __error column, row still returned."""
+    """Derivative-level error is caught and stored as name.error column, row still returned."""
     cfg = dummy_pipeline["config"]
 
     iterate_derivative_pipeline(cfg, "BasicPrep", raise_on_error=True)
@@ -295,11 +295,12 @@ def test_build_derivative_dataframe_derivative_error_captured(dummy_pipeline):
         df = build_derivative_dataframe(cfg, output_format="wide")
 
     assert len(df) > 0
-    assert any("__error" in col for col in df.columns)
+    assert "BandPowerMean.error" in df.columns
+    assert not [c for c in df.columns if "__error" in c]
 
 
 def test_build_derivative_dataframe_derivative_error_long_captured(dummy_pipeline):
-    """Derivative-level error in long mode adds an __error row."""
+    """Derivative-level error in long mode adds a derivative = "name.error" row."""
     cfg = dummy_pipeline["config"]
 
     iterate_derivative_pipeline(cfg, "BasicPrep", raise_on_error=True)
@@ -312,7 +313,7 @@ def test_build_derivative_dataframe_derivative_error_long_captured(dummy_pipelin
         df = build_derivative_dataframe(cfg, output_format="long")
 
     assert len(df) > 0
-    assert any("__error" in str(v) for v in df["derivative"])
+    assert "BandPowerMean.error" in set(df["derivative"])
 
 
 def test_build_derivative_dataframe_file_error_row_omitted(dummy_pipeline):

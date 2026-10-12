@@ -107,7 +107,7 @@ def test_reused_workers_resolve_relative_paths_after_chdir(monkeypatch, tmp_path
 
     df = build_derivative_dataframe(str(pipe2), raise_on_error=True, n_jobs=2)
     assert len(df) == 2
-    assert not any(c.endswith("__error") for c in df.columns)
+    assert not any(c.endswith(".error") for c in df.columns)
     # The pattern is resolved against the datasets YAML's directory, so the
     # discovered (and reported) file_path is absolute under `second`.
     assert sorted(df["file_path"]) == [
@@ -140,5 +140,5 @@ def test_parallel_dataframe_loads_custom_nodes_for_unsaved_derivative(monkeypatc
 
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 2
-    assert not any(c.endswith("__error") for c in df.columns)
+    assert not any(c.endswith(".error") for c in df.columns)
     assert not (tmp_path / "out").exists() or _outputs(tmp_path) == []

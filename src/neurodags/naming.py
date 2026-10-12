@@ -5,7 +5,8 @@ names, artifact suffixes, references between derivatives, output file basenames 
 dataframe columns. Every function is pure (no I/O, no logging, standard library only), so
 the same rules apply in the CLI, the TUI, the Python API and the migration tool.
 
-The functions are not yet used by the pipeline; later 0.4.0 changes wire them in.
+Dataframe assembly uses the column functions (:func:`format_column`, :func:`error_column`);
+later 0.4.0 changes wire in the rest.
 
 Summary of the grammar
 ----------------------
@@ -42,6 +43,7 @@ __all__ = [
     "NAME_RE",
     "RESERVED_NAME",
     "SUFFIX_RE",
+    "ColumnCollisionError",
     "NamingError",
     "ParsedColumn",
     "ParsedOutput",
@@ -76,6 +78,18 @@ class NamingError(ValueError):
     The message is meant to be shown to users as is: it names the offending value and says
     how to fix it. :func:`check_derivative_names` and :func:`validate_artifact_suffixes`
     collect every problem into a single error, one problem per line.
+    """
+
+
+class ColumnCollisionError(NamingError):
+    """Two origins would produce the same dataframe column (spec section 7.1).
+
+    Raised while assembling a dataframe when two coordinates of one artifact, two artifacts,
+    or two derivatives map to the same column (possible only with non-unique coordinate
+    indexes or mixed types such as ``1`` and ``"1"``). The message names the column and
+    every origin. It is a structural problem of the pipeline's outputs, not a per-file
+    failure, so it is raised even when errors are otherwise recorded in ``name.error``
+    columns.
     """
 
 

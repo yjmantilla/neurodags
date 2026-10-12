@@ -1,21 +1,17 @@
-"""Glob metacharacters in source/derivative paths, and dataframe column collisions."""
+"""Glob metacharacters in source/derivative paths (dataframe collisions: test_dataframe_columns)."""
 
 from __future__ import annotations
 
 import glob
 import json
 import shutil
-from pathlib import Path
-from unittest.mock import patch
 
-import numpy as np
-import xarray as xr
 import yaml
 
 from neurodags.cli import main
-from neurodags.dag import _artifact_candidates_for, collect_derivative_for_dataframe
+from neurodags.dag import _artifact_candidates_for
 from neurodags.mermaid import pipeline_to_mermaid
-from neurodags.orchestrators import _collect_dataframe_file, run_pipeline
+from neurodags.orchestrators import run_pipeline
 
 # ---------------------------------------------------------------------------
 # Cache lookup with glob metacharacters
@@ -94,79 +90,6 @@ def test_pipeline_under_bracketed_dir_is_cached_and_reported_done(dummy_pipeline
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["complete"] is True
-
-
-# ---------------------------------------------------------------------------
-# Dataframe column collisions
-# ---------------------------------------------------------------------------
-
-
-def test_flatten_warns_on_coordinate_encoding_collision():
-    da = xr.DataArray(np.array([1.0, 2.0]), dims=["ch"], coords={"ch": ["a-b", "a~b"]})
-
-    with (
-        patch("neurodags.dag.log") as log,
-        patch("neurodags.dag._resolve_derivative_artifacts", return_value={".nc": da}),
-    ):
-        row = collect_derivative_for_dataframe(
-            {"save": False}, "Power", "input.vhdr", reference_base=Path("unused")
-        )
-
-    # Existing output is unchanged: one column, last value wins.
-    assert row == {"Power.nc@ch-a~b": 2.0}
-    collisions = [c for c in log.warning.call_args_list if "collision" in c.args[0]]
-    assert len(collisions) == 1
-    entry = collisions[0].kwargs
-    assert entry["derivative"] == "Power"
-    assert entry["suffix"] == ".nc"
-    assert entry["column_suffix"] == "ch-a~b"
-    assert [str(v) for _, v in entry["overwritten_coords"]] == ["a-b"]
-    assert [str(v) for _, v in entry["kept_coords"]] == ["a~b"]
-
-
-def test_flatten_without_collision_does_not_warn():
-    da = xr.DataArray(np.array([1.0, 2.0]), dims=["ch"], coords={"ch": ["a", "b"]})
-    with (
-        patch("neurodags.dag.log") as log,
-        patch("neurodags.dag._resolve_derivative_artifacts", return_value={".nc": da}),
-    ):
-        row = collect_derivative_for_dataframe(
-            {"save": False}, "Power", "input.vhdr", reference_base=Path("unused")
-        )
-    assert row == {"Power.nc@ch-a": 1.0, "Power.nc@ch-b": 2.0}
-    assert not log.warning.called
-
-
-def test_row_merge_warns_when_two_derivatives_produce_same_column(tmp_path):
-    values = {"A": {"Shared.nc": 1.0, "A.nc": 1.0}, "B": {"Shared.nc": 2.0}}
-
-    def fake_collect(derivative_def, derivative_name, *args, **kwargs):
-        return values[derivative_name]
-
-    with (
-        patch("neurodags.orchestrators.log") as log,
-        patch("neurodags.orchestrators.collect_derivative_for_dataframe", fake_collect),
-    ):
-        row, _ = _collect_dataframe_file(
-            index=0,
-            dataset_name="ds",
-            file_path=str(tmp_path / "x.vhdr"),
-            dataset_config_dict={"name": "ds", "file_pattern": str(tmp_path / "*.vhdr")},
-            source_path=str(tmp_path / "x.vhdr"),
-            common_root=str(tmp_path),
-            mount_point=None,
-            selected_derivatives=["A", "B"],
-            derivative_definitions={"A": {}, "B": {}},
-            preserve_complex_values=False,
-            collect_long_rows=False,
-            raise_on_error=True,
-            n_files=1,
-        )
-
-    assert row["Shared.nc"] == 2.0  # behaviour unchanged: later derivative wins
-    collisions = [c for c in log.warning.call_args_list if "collision" in c.args[0]]
-    assert len(collisions) == 1
-    assert collisions[0].kwargs == {"columns": ["Shared.nc"], "previous_owners": ["A"]}
 
 
 # ---------------------------------------------------------------------------

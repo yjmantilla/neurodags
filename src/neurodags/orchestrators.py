@@ -1,7 +1,7 @@
 import inspect
 import os
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -18,6 +18,7 @@ from neurodags.derivatives.pipeline import register_derivatives_from_dict
 from neurodags.iterators import get_all_files_from_pipeline_configuration
 from neurodags.loaders import load_pipeline_configuration
 from neurodags.loggers import get_logger
+from neurodags.naming import ColumnCollisionError, error_column, validate_derivative_name
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
 from neurodags.utils import (
@@ -911,6 +912,9 @@ def build_derivative_dataframe(
         instead of being flattened or coerced into simple dataframe columns.
     raise_on_error : bool, optional
         Re-raise exceptions encountered while collecting derivatives; defaults to False.
+        When False, a derivative that fails for a file is recorded in its ``name.error``
+        column (wide) or as a ``derivative = "name.error"`` row (long). Column collisions
+        are never recorded this way (see Raises).
     n_jobs : int, optional
         Number of parallel workers for file-level collection. ``-1`` uses all cores, ``1`` or
         ``None`` runs serially. Parallelism is per-file using separate processes (loky) to avoid
@@ -928,6 +932,17 @@ def build_derivative_dataframe(
     -------
     pandas.DataFrame
         A dataframe with one row per processed file and columns derived from collected derivative artifacts.
+        Generated columns follow :func:`neurodags.naming.format_column`
+        (``name.suffix[@dim-value_...]``) and split back with
+        :func:`neurodags.naming.parse_column`.
+
+    Raises
+    ------
+    neurodags.naming.NamingError
+        If a selected derivative name does not follow the name grammar.
+    neurodags.naming.ColumnCollisionError
+        If two coordinates, artifacts or derivatives would produce the same column. Raised
+        whatever ``raise_on_error`` is: it is a structural problem, not a per-file failure.
     """
 
     log.debug(
@@ -977,6 +992,10 @@ def build_derivative_dataframe(
                 "Some requested derivatives are either undefined or flagged out of dataframe collection.",
                 missing_derivatives=missing_derivatives,
             )
+
+    # Column names embed the derivative name verbatim and must split back (spec 7.1).
+    for derivative_name in selected_derivatives:
+        validate_derivative_name(derivative_name)
 
     if not selected_derivatives:
         log.warning(
@@ -1090,6 +1109,25 @@ def _build_reference_base(
     return reference_base_path
 
 
+def _check_row_collisions(
+    new_columns: Mapping[str, Any], column_owner: dict[str, str], derivative_name: str
+) -> None:
+    """Raise :class:`ColumnCollisionError` if ``new_columns`` are already in the row.
+
+    Generated columns always contain ``.`` and start with their derivative's name, so this
+    cannot happen with valid names; it guards the row merge so no value is ever silently
+    overwritten (spec 7.1).
+    """
+    collisions = sorted(set(new_columns) & set(column_owner))
+    if collisions:
+        details = "; ".join(
+            f"{column!r} from derivative {column_owner[column]!r} and derivative "
+            f"{derivative_name!r}"
+            for column in collisions
+        )
+        raise ColumnCollisionError(f"Dataframe column collision: {details}.")
+
+
 def _collect_dataframe_file(
     index: int,
     dataset_name: str,
@@ -1157,14 +1195,7 @@ def _collect_dataframe_file(
                             flatten_xarray_artifacts=not preserve_complex_values,
                         )
                         if derivative_values:
-                            collisions = sorted(set(derivative_values) & set(column_owner))
-                            if collisions:
-                                log.warning(
-                                    "Dataframe column collision: derivative produces columns "
-                                    "already present in the row; earlier values are overwritten",
-                                    columns=collisions,
-                                    previous_owners=sorted({column_owner[c] for c in collisions}),
-                                )
+                            _check_row_collisions(derivative_values, column_owner, derivative_name)
                             row.update(derivative_values)
                             column_owner.update(dict.fromkeys(derivative_values, derivative_name))
                             if collect_long_rows:
@@ -1178,6 +1209,9 @@ def _collect_dataframe_file(
                                             "value": value,
                                         }
                                     )
+                    except ColumnCollisionError:
+                        # Structural (spec 7.1): never recorded as a per-file error.
+                        raise
                     except Exception as derivative_error:
                         log.error(
                             "Error collecting derivative for dataframe",
@@ -1186,19 +1220,24 @@ def _collect_dataframe_file(
                         )
                         if raise_on_error:
                             raise
-                        row[f"{derivative_name}__error"] = str(derivative_error)
+                        error_col = error_column(derivative_name)
+                        _check_row_collisions({error_col: None}, column_owner, derivative_name)
+                        row[error_col] = str(derivative_error)
+                        column_owner[error_col] = derivative_name
                         if collect_long_rows:
                             long_rows.append(
                                 {
                                     "index": index,
                                     "dataset": dataset_name,
                                     "file_path": file_path,
-                                    "derivative": f"{derivative_name}__error",
+                                    "derivative": error_col,
                                     "value": str(derivative_error),
                                 }
                             )
             log.debug("Collected dataframe row", collected_derivatives=len(selected_derivatives))
             return row, long_rows
+        except ColumnCollisionError:
+            raise
         except Exception as error:
             log.error("Error collecting dataframe row", error=str(error), exc_info=True)
             if raise_on_error:
