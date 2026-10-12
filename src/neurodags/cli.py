@@ -34,6 +34,7 @@ from neurodags.mermaid import (
     pipeline_to_html,
     pipeline_to_mermaid,
 )
+from neurodags.migrate import MigrationError
 from neurodags.naming import NamingError, validate_derivative_name
 from neurodags.orchestrators import (
     _derivative_topo_order,
@@ -432,6 +433,12 @@ def _status_classify(plan: list) -> str:
     return "missing"
 
 
+def _status_origin(plan: list) -> str | None:
+    """``origin`` of a done unit's manifest (``"migrate"`` for ``done (migrated)``)."""
+    final = _status_final(plan)
+    return final.get("origin") if final else None
+
+
 def _status_unlisted(plan: list) -> list[str]:
     final = _status_final(plan)
     return list(final.get("unlisted") or []) if final else []
@@ -471,13 +478,18 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
         dataset = _status_scalar(row.get("dataset"))
         # Listed in a frozen input list (--inputs) but gone from disk (spec §8.6).
         missing_source = _status_scalar(row.get("source_status")) == "missing-source"
+        status = "missing-source" if missing_source else _status_classify(plan)
+        migrated = status == "done" and _status_origin(plan) == "migrate"
         rows.append(
             {
                 "index": None if idx is None else int(idx),
                 "dataset": None if dataset is None else str(dataset),
                 "derivative": row.get("derivative", "unknown"),
                 "file_path": row.get("file_path", ""),
-                "status": "missing-source" if missing_source else _status_classify(plan),
+                "status": status,
+                # "done (migrated)": the .done was written by `neurodags migrate` (spec 6.2).
+                "label": "done (migrated)" if migrated else status,
+                "migrated": migrated,
                 "error_path": _status_error_path(plan),
                 "unlisted": [] if missing_source else _status_unlisted(plan),
             }
@@ -536,6 +548,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         per_deriv[deriv] = {"total": len(sub), **counts}
         for k, v in per_deriv[deriv].items():
             grand[k] += v
+        # Subset of "done": units whose .done was written by `neurodags migrate`.
+        per_deriv[deriv]["migrated"] = sum(1 for r in sub if r["migrated"])
+    n_migrated = sum(1 for r in rows if r["migrated"])
 
     complete = (
         grand["missing"] == 0
@@ -565,7 +580,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "config": args.config,
             "n_files": total_files,
             "derivatives": per_deriv,
-            "grand_total": grand,
+            "grand_total": {**grand, "migrated": n_migrated},
             "complete": complete,
             "missing_indices": _status_indices(rows, ("missing",)),
             "incomplete_indices": _status_indices(rows, ("incomplete",)),
@@ -583,6 +598,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "file_path": r["file_path"],
                     "derivative": r["derivative"],
                     "status": r["status"],
+                    "label": r["label"],
                     "error_path": r["error_path"],
                     "unlisted": r["unlisted"],
                 }
@@ -611,9 +627,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     # --- table output ---
     col_w = max(24, max(len(d) for d in all_derivs) + 2)
+    # "(migrated)": how many of the done units are "done (migrated)" (shown only then).
+    mig_w = 12 if n_migrated else 0
+
+    def _mig(count: int) -> str:
+        return f"  {count:>{mig_w - 2}}" if mig_w else ""
+
     header = (
-        f"{'Derivative':<{col_w}} {'total':>6}  {'done':>6}  {'skipped':>8}"
-        f"  {'incomplete':>10}  {'missing':>8}  {'errored':>8}"
+        f"{'Derivative':<{col_w}} {'total':>6}  {'done':>6}"
+        + (f"  {'(migrated)':>{mig_w - 2}}" if mig_w else "")
+        + f"  {'skipped':>8}  {'incomplete':>10}  {'missing':>8}  {'errored':>8}"
     )
     sep = "─" * len(header)
 
@@ -628,14 +651,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
     for deriv in all_derivs:
         c = per_deriv[deriv]
         print(
-            f"{deriv:<{col_w}} {c['total']:>6}  {c['done']:>6}  {c['skipped']:>8}"
-            f"  {c['incomplete']:>10}  {c['missing']:>8}  {c['errored']:>8}"
+            f"{deriv:<{col_w}} {c['total']:>6}  {c['done']:>6}{_mig(c['migrated'])}"
+            f"  {c['skipped']:>8}  {c['incomplete']:>10}  {c['missing']:>8}  {c['errored']:>8}"
         )
 
     print(sep)
     print(
-        f"{'Total':<{col_w}} {grand['total']:>6}  {grand['done']:>6}  {grand['skipped']:>8}"
-        f"  {grand['incomplete']:>10}  {grand['missing']:>8}  {grand['errored']:>8}"
+        f"{'Total':<{col_w}} {grand['total']:>6}  {grand['done']:>6}{_mig(n_migrated)}"
+        f"  {grand['skipped']:>8}  {grand['incomplete']:>10}  {grand['missing']:>8}"
+        f"  {grand['errored']:>8}"
     )
     print(
         "\nNote: 'total' counts (derivative x source-file) pairs, not output files. "
@@ -646,6 +670,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "'skipped' means a .skip marker exists — the derivative was intentionally not "
         "computed for that source file (e.g. condition absent from the recording)."
     )
+    if n_migrated:
+        print(
+            f"\n{n_migrated} of the done unit(s) are done (migrated): their .done was written "
+            "by 'neurodags migrate' from 0.3.x outputs (column '(migrated)')."
+        )
     if n_unlisted:
         print(
             f"\n{n_unlisted} file(s) match an output prefix but are not listed in its .done "
@@ -691,6 +720,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  [{deriv}]")
             for r in sub:
                 tag = f"[idx {r['index'] if r['index'] is not None else '?'}]"
+                if r["migrated"]:
+                    tag += " (migrated)"
                 print(f"    {tag} {r['file_path']}")
                 if show_error_path and r["error_path"]:
                     print(f"      error file: {r['error_path']}")
@@ -1008,6 +1039,67 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Upgrade a 0.3.x configuration and its outputs to naming_version 1 "
+        "(preview by default).",
+        description=(
+            "Convert a neurodags 0.3.x pipeline: add naming_version and source_root, rewrite "
+            "relative dataset paths, rename and move the existing outputs to the 0.4.0 "
+            "layout and write .done manifests. Prints the plan and changes nothing unless "
+            "--apply is given. Run once per output tree (per mount)."
+        ),
+    )
+    migrate_parser.add_argument("config", help="Path to the 0.3.x pipeline YAML configuration.")
+    migrate_parser.add_argument("-d", "--datasets", default=None, help=DATASETS_HELP)
+    migrate_parser.add_argument(
+        "--mount",
+        default=None,
+        metavar="NAME",
+        help="Mount point whose output tree to migrate (default: the pipeline's mount_point).",
+    )
+    migrate_parser.add_argument(
+        "--apply", action="store_true", help="Execute the plan (default: preview only)."
+    )
+    migrate_parser.add_argument(
+        "--report", default=None, metavar="PLAN.json", help="Write the full plan as JSON."
+    )
+    migrate_parser.add_argument(
+        "--map",
+        action="append",
+        default=None,
+        metavar="OLD=NEW",
+        help="Rename a derivative while migrating (repeatable). Default: keep the YAML name.",
+    )
+    migrate_parser.add_argument(
+        "--legacy-cwd",
+        default=None,
+        metavar="DIR",
+        help="Directory the 0.3.x commands were run from (relative dataset paths were "
+        "resolved against it). Default: the current working directory.",
+    )
+    migrate_parser.add_argument(
+        "--no-synthesize",
+        action="store_true",
+        help="Do not write .done manifests for migrated outputs (they are recomputed).",
+    )
+    migrate_parser.add_argument(
+        "--source-root",
+        action="append",
+        default=None,
+        metavar="DATASET[:MOUNT]=PATH",
+        help="source_root to write for a dataset (repeatable), instead of the suggestion. "
+        "Required when the suggestion would be a filesystem root.",
+    )
+    migrate_parser.add_argument(
+        "--upstream-map",
+        action="append",
+        default=None,
+        metavar="OLDTOKEN=NEWNAME",
+        help="Chained pipelines: an upstream derivative renamed on disk by its own migration "
+        "(e.g. CleanPrep=clean_prep), so outputs named after the old upstream file match.",
+    )
+
     return parser
 
 
@@ -1255,6 +1347,39 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    from neurodags import migrate
+
+    plan = migrate.plan_migration(
+        args.config,
+        args.datasets,
+        mount=args.mount,
+        renames=args.map,
+        legacy_cwd=args.legacy_cwd,
+        synthesize=not args.no_synthesize,
+        source_roots=args.source_root,
+        upstream_renames=args.upstream_map,
+    )
+    print(migrate.format_preview(plan, apply=args.apply))
+    if args.report:
+        print(f"\nplan written to {migrate.write_report(plan, args.report)}")
+    if plan.refusals:
+        print(
+            f"neurodags: error: migration refused ({len(plan.refusals)} problem(s) above); "
+            "nothing was changed.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.apply or not plan.has_work:
+        return 0
+    result = migrate.apply_migration(plan)
+    print()
+    print(migrate.format_apply_summary(result))
+    if args.report:
+        migrate.write_report(plan, args.report, extra=result.to_dict())
+    return 0
+
+
 def _cmd_view(args: argparse.Namespace) -> int:
     subprocess.Popen(
         [sys.executable, "-m", "neurodags.visualization", args.path],
@@ -1287,7 +1412,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(args, "inputs", None) is not None:
             args.inputs = resolve_cli_inputs_path(args.inputs)
         return _dispatch(parser, args)
-    except (ConfigVersionError, DatasetConfigError, InputsError, NamingError) as exc:
+    except (
+        ConfigVersionError,
+        DatasetConfigError,
+        InputsError,
+        NamingError,
+        MigrationError,
+    ) as exc:
         # Configuration errors are user errors: one clean message, no traceback. NamingError
         # includes dataframe column collisions (naming.ColumnCollisionError).
         print(f"neurodags: error: {exc}", file=sys.stderr)
@@ -1317,6 +1448,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         return _cmd_status(args)
     if args.command == "slurm-script":
         return _cmd_slurm_script(args)
+    if args.command == "migrate":
+        return _cmd_migrate(args)
 
     parser.error(f"Unknown command '{args.command}'")
     return 2

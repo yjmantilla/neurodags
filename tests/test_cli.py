@@ -791,6 +791,7 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
             "missing",
             "errored",
             "missing-source",
+            "migrated",
         }
     assert data["derivatives"]["BasicPrep"] == {
         "total": 4,
@@ -800,6 +801,7 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
         "missing": 2,
         "errored": 1,
         "missing-source": 0,
+        "migrated": 0,
     }
     assert data["n_files"] == 4
     assert "files" not in data
@@ -824,6 +826,7 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "file_path",
         "derivative",
         "status",
+        "label",
         "error_path",
         "unlisted",
     }
@@ -834,6 +837,7 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "file_path": "/d/e.vhdr",
         "derivative": "Spectrum",
         "status": "errored",
+        "label": "errored",
         "error_path": "/o/e.e",
         "unlisted": [],
     }
@@ -896,6 +900,7 @@ def test_status_empty_result_json_is_valid(dummy_pipeline, capsys):
         "missing": 0,
         "errored": 0,
         "missing-source": 0,
+        "migrated": 0,
     }
     assert data["complete"] is True
     assert data["missing_indices"] == []

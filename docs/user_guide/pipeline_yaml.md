@@ -32,7 +32,7 @@ without it, or with another value, is refused before anything runs by every entr
 `build_derivative_dataframe`, ...):
 
 ```text
-neurodags: error: pipeline configuration 'pipeline.yml' has no top-level 'naming_version'. neurodags 0.4.0 requires 'naming_version: 1'. To upgrade a neurodags 0.3.x configuration, run `neurodags migrate` (available in 0.4.0).
+neurodags: error: pipeline configuration 'pipeline.yml' has no top-level 'naming_version'. neurodags 0.4.0 requires 'naming_version: 1'. To upgrade a neurodags 0.3.x configuration and its outputs, preview with `neurodags migrate pipeline.yml`, then run it again with --apply (see the 'Migrating to 0.4' guide).
 ```
 
 ## `datasets`

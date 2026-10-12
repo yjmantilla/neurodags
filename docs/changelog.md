@@ -11,7 +11,7 @@
   `iterate_derivative_pipeline`, `build_derivative_dataframe`,
   `get_datasets_and_mount_point_from_pipeline_configuration`, ...; raises
   `neurodags.loaders.ConfigVersionError`). The message points to `neurodags migrate`
-  (available in 0.4.0). New helper `neurodags.loaders.load_pipeline_configuration` loads a
+  (see {doc}`user_guide/migrating_to_0_4`). New helper `neurodags.loaders.load_pipeline_configuration` loads a
   pipeline and checks the version.
 - **`source_root` is required for every dataset** (active or skipped; string or mount map).
   For an active dataset it must resolve for the active mount point and be an existing
@@ -150,6 +150,29 @@
 
 ### Added
 
+- **`neurodags migrate pipeline.yml [-d DATASETS] [--mount NAME] [--apply] [--report plan.json]
+  [--map OLD=NEW] [--legacy-cwd DIR] [--no-synthesize] [--source-root DATASET[:MOUNT]=PATH]
+  [--upstream-map OLDTOKEN=NEWNAME]`** (spec section 10): upgrades a 0.3.x project in one
+  pass, previewing by default. The configuration gets `naming_version: 1`, a `source_root`
+  per dataset and mount (suggested from `file_pattern`; a filesystem root is never
+  suggested) and relative dataset paths rewritten from the 0.3.x working directory to the
+  YAML's directory; files are edited in place (comments kept) and written last, with
+  `.bak-0.3` backups. Existing outputs are found by scanning each `derivatives_path` (0.3.x
+  CamelCase tokens, pilot-era flat trees, the pre-0.3.3 `<derivatives_path>@Deriv.*` form,
+  `&` source names) and moved with `os.replace` to the verbatim 0.4.0 names and folders;
+  `.error`/`.skip` markers move with their unit; orphans are left in place. MNE split
+  recordings are re-saved with MNE under the new name and verified before the old parts are
+  deleted. Units whose artifact set is known get a `.done` with `"origin": "migrate"`.
+  Ambiguous mappings, occupied targets, unwritable folders, cross-filesystem moves and
+  invalid 0.4.0 names (rename with `--map`) are refused before anything changes. `--apply`
+  keeps a journal (`<derivatives_path>/.neurodags/migrate-journal.json`), so an interrupted
+  run resumes, and re-running an applied plan is a no-op. `--report` writes the plan as JSON
+  with a dataframe column map (`name__error` → `name.error`; best-effort coordinate
+  re-encoding, `neurodags.migrate.legacy_column_to_new`). See the new guide
+  {doc}`user_guide/migrating_to_0_4`.
+- **`done (migrated)` in `neurodags status`**: the table gets a `(migrated)` column when some
+  done units were certified by `neurodags migrate`; `--format json` adds `migrated` counts
+  per derivative and in `grand_total`, and per-file `label` (`done (migrated)`).
 - **`neurodags inputs pipeline.yml [-d DATASETS] [-o inputs.tsv]`** (#41): writes the frozen
   input list, `# neurodags-inputs naming_version=1` followed by `index<TAB>dataset<TAB>rel`
   lines (`rel`: path below `source_root`, POSIX separators), so one list works on every mount.
