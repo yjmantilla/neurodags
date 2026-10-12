@@ -828,9 +828,17 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="NeuroDAGs TUI")
     parser.add_argument("config", nargs="?", help="Path to pipeline YAML config")
-    parser.add_argument("-d", "--datasets", help="Optional path to datasets YAML config override")
+    from neurodags.cli import DATASETS_HELP, DatasetsPathError, _resolve_cli_datasets_or_exit
+
+    parser.add_argument("-d", "--datasets", help=DATASETS_HELP)
     args = parser.parse_args()
     if args.datasets:
+        try:
+            args.datasets = _resolve_cli_datasets_or_exit(
+                args.datasets, args.config, "neurodags-tui"
+            )
+        except DatasetsPathError as exc:
+            parser.exit(2, f"neurodags-tui: error: {exc}\n")
         NeuroDagsApp(config_path=args.config, datasets_path=args.datasets).run()
     else:
         NeuroDagsApp(config_path=args.config).run()

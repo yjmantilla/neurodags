@@ -311,7 +311,12 @@ def iterate_derivative_pipeline(
         DerivativeEntry, or a callable node.
     datasets_configuration : dict | str, optional
         Optional datasets configuration. If provided, it overrides the 'datasets' section
-        of the pipeline configuration.
+        of the pipeline configuration. A relative path string is resolved relative to the
+        pipeline YAML's directory when ``pipeline_configuration`` is a path (relative to the
+        current working directory otherwise), after expanding ``~`` and ``$VARS`` -- the same
+        rule as the ``datasets:`` key. The ``neurodags`` CLI resolves ``-d/--datasets``
+        against the working directory itself and passes an absolute path; pass an absolute
+        path here to avoid ambiguity.
     max_files_per_dataset : int, optional
         Maximum number of files to process per dataset. If None, processes all files.
     dry_run : bool, optional
@@ -731,7 +736,12 @@ def run_pipeline(
         The pipeline configuration containing dataset information.
     datasets_configuration : dict | str, optional
         Optional datasets configuration. If provided, it overrides the 'datasets' section
-        of the pipeline configuration.
+        of the pipeline configuration. A relative path string is resolved relative to the
+        pipeline YAML's directory when ``pipeline_configuration`` is a path (relative to the
+        current working directory otherwise), after expanding ``~`` and ``$VARS`` -- the same
+        rule as the ``datasets:`` key. The ``neurodags`` CLI resolves ``-d/--datasets``
+        against the working directory itself and passes an absolute path; pass an absolute
+        path here to avoid ambiguity.
     derivatives : list[str], optional
         List of derivatives to execute. If None, uses 'DerivativeList' from the configuration.
         Derivatives are automatically sorted in topological order based on inter-derivative
@@ -851,7 +861,12 @@ def build_derivative_dataframe(
         Pipeline configuration or path to it.
     datasets_configuration : dict | str, optional
         Optional datasets configuration. If provided, it overrides the 'datasets' section
-        of the pipeline configuration.
+        of the pipeline configuration. A relative path string is resolved relative to the
+        pipeline YAML's directory when ``pipeline_configuration`` is a path (relative to the
+        current working directory otherwise), after expanding ``~`` and ``$VARS`` -- the same
+        rule as the ``datasets:`` key. The ``neurodags`` CLI resolves ``-d/--datasets``
+        against the working directory itself and passes an absolute path; pass an absolute
+        path here to avoid ambiguity.
     include_derivatives : list[str], optional
         Restrict collection to this explicit subset of derivative names.
     max_files_per_dataset : int, optional

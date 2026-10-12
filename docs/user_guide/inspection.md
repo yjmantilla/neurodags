@@ -230,15 +230,17 @@ neurodags status pipeline.yml --derivative Alpha --format indices
 
 The exit code keeps its meaning in every format: `1` whenever something is missing or
 errored, i.e. exactly when the list is non-empty. Under `set -e`, capturing it with `$(...)`
-aborts the script precisely when there is something to resubmit, so guard it:
+would abort the script precisely when there is something to resubmit, so add `--exit-zero`:
 
 ```bash
-IDX=$(neurodags status pipeline.yml --format indices 2>/dev/null || true)
+IDX=$(neurodags status pipeline.yml --format indices --exit-zero)
 [ -n "$IDX" ] && neurodags run pipeline.yml --only-index $IDX
 ```
 
-(`|| true` also hides real failures such as a broken config — those print nothing on stdout,
-so `IDX` is empty; check stderr if a resubmission list is unexpectedly empty.)
+With `--exit-zero`, `status` exits `0` whenever the report was produced, but real failures
+(missing or invalid config, unset environment variable, unreadable `-d` file) still exit
+non-zero, so `set -e` still stops on a broken config. Avoid the older `|| true` guard: it
+also swallows those real failures, leaving `IDX` silently empty.
 See {doc}`hpc` for resubmitting through SLURM.
 
 ## DAG Visualization (Mermaid)

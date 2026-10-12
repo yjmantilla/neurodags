@@ -31,6 +31,9 @@ Module entry point:
 python -m neurodags.tui [pipeline.yml] [-d datasets.yml]
 ```
 
+The `-d` path is relative to the directory you launch from (with a deprecated fallback to the
+pipeline YAML's directory); see {doc}`usage` for the exact resolution rule.
+
 ## Interface Overview
 
 The TUI is organized into several tabs, each focused on a specific part of the NeuroDAGs workflow.
