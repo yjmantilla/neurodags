@@ -45,10 +45,18 @@ class DatasetConfig(BaseModel):
 
 
 class Artifact(NamedTuple):
-    """An artifact produced by a node, with its associated writer."""
+    """An artifact produced by a node, with its associated writer.
+
+    ``writer(path)`` saves ``item`` to ``path`` (``<output prefix><suffix>``) and returns
+    the list of every file it wrote, or ``None`` meaning it wrote exactly ``path``. A
+    writer that produces extra files (for example MNE split parts ``X-1.fif``; see
+    :func:`neurodags.writers.save_mne`) must return them all: the ``.done`` manifest is
+    built from these reports, never from a directory listing, and a unit is done only
+    while every reported file exists.
+    """
 
     item: Any
-    writer: Callable[[str], None]  # how to save it
+    writer: Callable[[str], list[str] | None]  # how to save it; returns the files written
 
 
 class NodeResult(NamedTuple):

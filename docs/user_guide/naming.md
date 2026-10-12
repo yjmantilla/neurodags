@@ -1,136 +1,193 @@
-# File Naming Conventions
+# File Naming and Output Layout
 
-NeuroDAGs has no database: an output's **file name is its identity**. Caching is
-existence-based (a derivative is "done" for a file when a matching output file exists), chained
-derivatives are found by name, and dataframe columns are built from names. This page lists every
-naming rule and restriction in one place. Most of them are enforced: `neurodags validate`
-reports problems in your derivative names before anything runs.
+NeuroDAGs has no database: an output's **location and name are its identity**, and a small
+`.done` manifest next to the outputs records that a unit finished. This page lists every naming
+rule, where outputs go, and when a unit counts as done. The rules are those of
+`naming_version: 1` (neurodags 0.4.0); `neurodags validate` reports problems before anything
+runs.
 
 NeuroDAGs is **agnostic to your file-naming convention**: it keeps your source file names (BIDS or
 not) and only appends its own markers — `@` (source/derivative separator), the derivative name
-and the artifact suffix — plus `&`, which replaces `@` when a derivative is itself used as a
-source. Whether outputs look BIDS-like depends on how your inputs are named.
+and the artifact suffix — plus `&`, which replaces `@` when a source file name already contains
+one.
 
-```{note}
-The naming rules on this page describe the current behaviour. A redesign is planned for 0.4.0
-([#49](https://github.com/yjmantilla/neurodags/issues/49));
-until then they are kept stable so existing caches stay valid.
+```{important}
+**Changed in 0.4.0.** Derivative names are used **verbatim** on disk (no CamelCase conversion),
+output folders are computed from each dataset's `source_root` (never from the set of discovered
+files), and a unit is done only when its `.done` manifest is valid. Outputs written by 0.3.x have
+no manifest: `neurodags status` reports them as `incomplete` and the next run recomputes them,
+unless you convert the tree with `neurodags migrate` (next 0.4.0 step).
 ```
 
 ## Rules at a glance
 
 | Do | Don't |
 |----|-------|
-| Name derivatives in CamelCase (`BandPower`) or with `-` (`psd-welch`); both are used on disk unchanged. | Use `.`, `@`, `/`, `\`, `*`, `?`, `[`, `]` in derivative names, or name one `SourceFile` — rejected (see [Derivative names](#naming-derivative-names)). |
-| If you use `_` (`band_power`), look for files under the CamelCase name (`@BandPower`). | Define two derivatives whose on-disk names match, even only up to case (`band_power` / `BandPower` / `Bandpower`) — rejected. |
-| Reference derivatives by their YAML name: `derivative: band_power.nc`, `DerivativeList`, `--derivative`. | Reference the on-disk name (`derivative: BandPower.nc` for a YAML name `band_power`) — it is not an alias. |
-| Glob outputs by on-disk name: `**/*@BandPower*`. | Glob by YAML name (`*@band_power*`) — matches nothing. |
-| Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO.fif`). | Use artifact keys without a leading `.` (`-epo.fif`) — the cache lookup (`@Name.*`) never finds them, so they recompute every run. |
-| Keep raw source file names free of `@`, `&` and glob characters (`*`, `?`, `[`, `]`). | Have a source named with `[`/`]` (never seen as cached), or both `a@b.vhdr` and `a&b.vhdr` in one folder (same outputs). |
-| Split dataframe column names with `neurodags.naming.parse_column` (see [Dataframe column names](#naming-dataframe-columns)). | Split columns by hand on `_` or `-` — dimension names and values are percent-encoded (`freq_band` → `freq%5Fband`), and values may contain `-` (`8-12`). |
-| Treat `<derivatives_path>/code/` as reserved for the config snapshot. | Store your own files in `<derivatives_path>/code/` — each `neurodags run` rewrites its snapshot files there. |
+| Use names matching `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`: `BandPower`, `band_power`, `psd-welch`, `Fit_alpha-0p5_w-6`. | Use `.`, `@`, `&`, `/`, `\`, glob characters, spaces, `,`, `:`, non-ASCII, a leading digit or `-`, or the name `SourceFile` — rejected (see [Derivative names](#naming-derivative-names)). |
+| Quote YAML keys that YAML would read as something else: `"Yes":`, `"1_000":`. | Write `Yes:`, `On:`, `1_000:`, `0x1F:`, `~:` as derivative names — YAML loads them as booleans, numbers or null; rejected with "quote the key". |
+| Use the YAML name everywhere: files, `derivative: band_power.nc`, `DerivativeList`, `--derivative`, dataframe columns, `find -name '*@band_power*'`. | Define names that differ only in case (`Clean` / `clean`) or a name plus a split-like tail (`Clean` / `Clean-1`) — rejected. |
+| Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO_baseline.fif`). | Use keys without a leading `.`, with spaces, ending in `.done`/`.error`/`.skip`, or two keys differing only in case — the unit fails with `.error` and nothing is written. |
+| Make custom artifact writers return every file they write (see [Writer contract](#naming-writer-contract)). | Write extra files from a writer without reporting them — they are not part of the unit and the manifest ignores them. |
+| Set `source_root` to the root folder of the dataset's sources; outputs mirror the tree below it. | Rely on the set of matched files to decide output folders — it never does since 0.4.0. |
+| Split dataframe column names with `neurodags.naming.parse_column` (see [Dataframe column names](#naming-dataframe-columns)). | Split columns by hand on `_` or `-` — dimension names and values are percent-encoded. |
+| Treat `<derivatives_path>/code/` and `<derivatives_path>/.neurodags/` as reserved. | Store your own files there — `neurodags run` rewrites its snapshot in `code/`, and discovery never returns files from either folder. |
 
 (naming-output-files)=
 
 ## Output file names
 
-Every saved artifact is written to
+Every saved artifact of a *unit* (one source file × one derivative) is written to
 
 ```text
-<reference_base>@<OnDiskName><artifact suffix>
+<reference_base>@<name><artifact suffix>
 ```
 
 - **`<reference_base>`** identifies the source file (see [Output layout](#naming-output-layout)).
   It keeps the source's own extension: `sub-01_task-rest_eeg.vhdr@...`.
 - **`@`** separates the source from the derivative. There is exactly one `@` per output file
-  name, so `name.split("@", 1)` (or `rsplit`) always gives `(source, derivative part)`.
-- **`<OnDiskName>`** is the derivative name converted for disk (see below).
+  name (an `@` in the source name is written as `&`), so `basename.rsplit("@", 1)` gives
+  `(source part, name + suffix)`, and `name, _, s = rest.partition(".")` gives the name and
+  suffix `"." + s` ({func}`neurodags.naming.parse_output_basename`).
+- **`<name>`** is the derivative name exactly as written in `DerivativeDefinitions`.
 - **`<artifact suffix>`** is the key of each artifact the last node returns, appended verbatim:
-  `.fif`, `.nc`, `.json`, `.report.html`, `.EO_baseline.fif` (multi-dot suffixes are fine).
-  It must start with `.`: a derivative counts as cached when any file matches
-  `<reference_base>@<OnDiskName>.*`.
+  `.fif`, `.nc`, `.json`, `.report.html`, `.EO_baseline.fif`, `.fif.gz`. It must match
+  `^(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$`, its last segment must not be `done`, `error` or `skip`
+  (any case), and two suffixes of one result must not differ only in case. Suffixes are checked
+  **before the first writer runs**: an invalid key fails the unit with an `.error` marker and
+  writes nothing.
 
-A derivative with several artifacts writes several files sharing the same prefix; the presence of
-**any** of them counts as cached (so a run interrupted mid-write is not redone; use
-`overwrite: true` or delete the files).
+(naming-done-manifest)=
 
-### Marker files
+### Completion manifest (`.done`) and markers
 
-Two marker files share the output prefix and are never counted as cached outputs:
+Three marker files share the unit's prefix; a unit has at most one of them:
 
 | File | Written when | Effect |
 |------|--------------|--------|
-| `<reference_base>@<OnDiskName>.error` | a node of the derivative raised | Contains the error. The derivative is retried on the next run unless `--skip-errors` / `skip_errors=True`; removed after a later successful save. `neurodags status` reports the file as *errored*. |
-| `<reference_base>@<OnDiskName>.skip` | a node raised `SkipDerivative` (not applicable to this file) | The derivative (and derivatives depending on it) is skipped for this file until the marker is deleted or `overwrite: true`. |
+| `<reference_base>@<name>.done` | every artifact was written | JSON manifest listing the unit's files. The unit is **done** (cached) while it is valid. |
+| `<reference_base>@<name>.error` | a node of the derivative raised, or an artifact could not be written | Contains the error. The unit is retried on the next run unless `--skip-errors` / `skip_errors=True`. |
+| `<reference_base>@<name>.skip` | a node raised `SkipDerivative` (not applicable to this file) | The unit (and units depending on it) is skipped until the marker is deleted or `overwrite: true`. |
 
-`save: false` derivatives write neither outputs nor markers.
+The manifest:
+
+```json
+{
+  "manifest_version": 1,
+  "naming_version": 1,
+  "derivative": "Fit_alpha-0p5_w-6",
+  "source": {"dataset": "study", "rel": "sub-01/eeg/sub-01_task-rest_eeg.vhdr"},
+  "artifacts": {".nc": ["sub-01_task-rest_eeg.vhdr@Fit_alpha-0p5_w-6.nc"]},
+  "companions": [],
+  "written": "2026-10-12T10:00:00Z",
+  "origin": "run"
+}
+```
+
+- `artifacts` maps each suffix to the files it consists of: usually one, every part for an MNE
+  split recording (`X.fif`, `X-1.fif`, ...). File names are relative to the manifest's folder, so
+  a tree moved or copied to another mount (local ↔ HPC) still verifies.
+- `source.rel` is the source path relative to `source_root` with its original spelling
+  (including any `@`).
+
+**A unit is done** (a cache hit) when its `.done` parses, its `naming_version` and `derivative`
+match, and every file it lists exists. Files that match the prefix but are not listed are
+ignored (and reported by `neurodags status`). There is no other cache check: a file named like
+an output but without a valid manifest is not trusted.
+
+**Write order.** On (re)compute NeuroDAGs validates the suffixes, deletes the old `.done`, runs
+every writer, then publishes the new `.done` atomically (a temporary file in the same folder
+renamed with `os.replace`) and removes any `.error`/`.skip`. Writing an `.error` or `.skip`
+removes the other markers, including `.done`. A crash or a failing writer therefore never leaves a
+`.done` for a half-written unit; the next run recomputes it.
+
+`save: false` derivatives write neither outputs nor markers and are never a cache hit.
+
+(naming-unit-states)=
+
+### Unit states
+
+`neurodags status`, the dry-run plan (`state` field of the `derivative_output` step) and the TUI
+report each unit as:
+
+| State | Meaning |
+|-------|---------|
+| `done` | valid `.done` manifest (see above) |
+| `skipped` | `.skip` marker |
+| `errored` | `.error` marker (state `error` in the dry-run plan) |
+| `incomplete` | output files (or an invalid `.done`) without a valid manifest: an interrupted write, a deleted part, or 0.3.x outputs not yet migrated; recomputed by the next run |
+| `missing` | nothing on disk for the unit |
+
+(naming-writer-contract)=
+
+### Writer contract
+
+`Artifact.writer(path)` receives the artifact path (`<prefix><suffix>`) and returns the list of
+files it wrote, or `None` meaning exactly `path`. Every reported file must exist afterwards
+(otherwise the unit fails with `.error`), and must be in the same folder as `path` or below it.
+The manifest is built from these reports, never from a directory listing.
+
+MNE splits recordings larger than `split_size` (2 GB by default) into `X.fif`, `X-1.fif`,
+`X-2.fif`, ...; the first part names the next, so the parts belong together. The built-in
+preprocessing nodes save MNE objects with {func}`neurodags.writers.save_mne`, which returns the
+list of parts MNE reports having written. Use it in your own nodes:
+
+```python
+from neurodags.definitions import Artifact
+from neurodags.writers import save_mne
+
+Artifact(item=epochs, writer=lambda path: save_mne(epochs, path))
+```
 
 (naming-derivative-names)=
 
 ## Derivative names
 
-The on-disk name is derived from the name in `DerivativeDefinitions`
-(`neurodags.utils.snake_to_camel`):
-
-- A name **without `_`** is used as is: `BandPower` → `@BandPower`, `psd-welch` → `@psd-welch`
-  (`-` is left unchanged).
-- A name **with `_`** is split on `_`, each part is title-cased (Python `str.title()`) and the
-  parts are joined: `fit_w_l06` → `@FitWL06`, `band_power` → `@BandPower`, `Fit_A` → `@FitA`,
-  `EO_Features` → `@EoFeatures` (note the lower-cased `o`).
-- `str.title()` **lowercases the rest of each `_`-separated part**, so capitals inside a part are
-  lost: `Ep_DetrendedFluctuation` → `@EpDetrendedfluctuation`, `ICA_cleaned` → `@IcaCleaned`.
-  Check `neurodags validate` (or `snake_to_camel(name)`) for the exact name to search for.
-
-The conversion keeps the derivative name a single token without `_`, which many file-naming
-conventions (including BIDS) use as a separator. Names with `_` are accepted; just look for their
-files under the converted name. The conversion is applied consistently for writing and reading,
-so existing caches keep working.
-
-**Everything except the file names uses the YAML name**: `DerivativeList`, `--derivative`,
-reuse steps (`derivative: fit_w_l06.nc`), dataframe columns and log messages. The on-disk name is
-not an alias: `derivative: FitWL06.nc` is an unknown derivative (it only matches by accident when
-the files already exist).
-
-`neurodags validate` lists every derivative whose on-disk name differs from its YAML name:
+Grammar (`naming_version: 1`):
 
 ```text
-on-disk names differing from YAML names (1):
-  fit_w_l06 -> files named @FitWL06
+name = LETTER ( [A-Za-z0-9_-]* [A-Za-z0-9] )?      ^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$
 ```
 
-### Rejected names
+Names are opaque identifiers used verbatim everywhere: file names, references, `DerivativeList`,
+`--derivative`, dataframe columns, `status` and logs. No case style is required.
 
-`neurodags validate`, `run`, `dry-run`, `status`, `count-inputs`, `dataframe` and the Python
-entry points (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`) check
-**every** name in `DerivativeDefinitions` (not only those selected to run) and fail with a
-`ValueError` before anything is written when:
+Every entry point (`neurodags validate`, `run`, `dry-run`, `status`, `count-inputs`,
+`dataframe`, `slurm-script`, the TUI and the Python API) checks, when the pipeline is loaded and
+before anything is written, every `DerivativeDefinitions` key (not only those selected to run),
+every `DerivativeList` entry, every reference (`derivative:` value) and every `--derivative`
+value. All problems are reported together (exit code `2` on the command line):
 
 | Problem | Why |
 |---------|-----|
-| Two names map to the same on-disk name, e.g. `band_power` and `BandPower` (both `@BandPower`) | They would read and overwrite each other's cached files, silently returning the wrong data. |
-| Two on-disk names differ only in case, e.g. `Bandpower` and `band_power` | Same file on case-insensitive filesystems (macOS, Windows). |
-| The name contains `.` | `.` starts the artifact suffix: `derivative: Fit.v2.nc` would be read as derivative `Fit`, and `Fit`'s cache lookup (`@Fit.*`) would match `Fit.v2`'s files, so `Fit` would never be computed. |
-| The name contains `@` | Breaks the one-`@`-per-file-name rule. |
-| The name contains `/` or `\` | Path separator: outputs would go to a non-existent subdirectory. |
-| The name contains `*`, `?`, `[` or `]` | Glob characters in the cache lookup: `F*` would treat `@Fit…` files as its own. |
-| The name is `SourceFile` or empty | `derivative: SourceFile` always means the raw input file, so such a derivative could never be referenced. |
+| Not a YAML string (`Yes`, `On`, `No`, `1_000`, `0x1F`, `~` unquoted) | YAML loads them as booleans, numbers or null; quote the key. |
+| Does not match the grammar | `.` starts the artifact suffix, `@`/`&` delimit the source, path and glob characters break paths, `,`/`:`/spaces break YAML lists, CSV and the TUI filter. |
+| `SourceFile` (any case) | `derivative: SourceFile` always means the input file. |
+| Two names differ only in case (`Clean` / `clean`) | Same files on case-insensitive filesystems (macOS, Windows). |
+| `X` and `X-<digits>` both defined (`Clean` / `Clean-1`) | MNE writes split recordings as `X-1.fif`, so `X-1`'s files would look like parts of `X`. |
+
+`validate` also prints warnings (not errors) for names longer than 64 characters and for names
+that follow the key-value convention below but repeat a key (`Fit_w-6_w-7`).
 
 ```{important}
-The collision check is **per pipeline configuration**. Two *different* pipeline files writing to
-the same `derivatives_path` are not checked against each other: if one defines `band_power` and the
-other `BandPower`, both use `@BandPower` files and silently share cached outputs. Use distinct
-names (or distinct `derivatives_path`s) across pipelines that share an output directory.
+These checks are **per pipeline configuration**. Two different pipeline files writing to the
+same `derivatives_path` are not checked against each other; give them distinct names or
+distinct `derivatives_path`/`derivatives_subdir` values.
 ```
 
-Other names (with `_`, `-`, spaces, non-ASCII, ...) are accepted. `&` is accepted too but best
-avoided: it is the replacement for `@` in chained source names, so it makes those file names
-harder to read back.
+### Optional key-value convention
+
+A name may encode parameters as `_`-separated `key-value` pairs plus at most one bare word:
+`Fit_alpha-0p5_w-6`, `alpha-0p5_w-6_Fit`. Numbers use `p` for the decimal point and `m` for
+minus (`0p5`, `m1`). Any valid name is accepted whether or not it follows the convention, and
+NeuroDAGs never parses names itself; {func}`neurodags.naming.parse_entities` and
+{func}`neurodags.naming.decode_number` split them for your own analysis.
 
 (naming-references)=
 
 ## Derivative references (`derivative: Name.ext`)
 
-A reuse step value is split at its **first** `.`:
+A reuse step value is `SourceFile`, a derivative name, or a name followed by an artifact suffix,
+split at the **first** `.`:
 
 | Reference | Derivative | Artifact selected |
 |-----------|-----------|-------------------|
@@ -139,11 +196,13 @@ A reuse step value is split at its **first** `.`:
 | `CleanPrep.fif` | `CleanPrep` | the `.fif` artifact |
 | `Splitter.EO_baseline.fif` | `Splitter` | the `.EO_baseline.fif` artifact |
 
-The part before the first `.` is the YAML name; the rest selects the artifact. When the derivative
-is read from disk, the rest is matched against the **end** of the file names, so `CleanPrep.fif`
-would also match a `.EO_baseline.fif` artifact; the first match in sorted order is used (with a
-warning if several match). When it was just computed in memory, the artifact key must equal
-`.<rest>` exactly. Use the full artifact suffix to get the same artifact either way.
+When the referenced unit is done, its files come from its `.done` manifest (the first file of
+each artifact, e.g. the first part of a split recording). The requested suffix is matched against
+the **end** of those file names, so `CleanPrep.fif` would also match a `.EO_baseline.fif`
+artifact; the first match in sorted order is used (with a warning if several match). When it was
+just computed in memory, the artifact key must equal `.<rest>` exactly. Use the full artifact
+suffix to get the same artifact either way. (Exact selection everywhere is the next 0.4.0
+change.)
 
 ### Other reserved strings in node `args`
 
@@ -161,36 +220,56 @@ a valid `id.N.field` raise an error instead of being passed through.
 
 ## Output layout
 
-- **With `derivatives_path`**: NeuroDAGs takes the **common root** of all files matched by the
-  dataset (the deepest directory containing all of them) and mirrors each file's path relative to
-  it under `derivatives_path`:
-  `<derivatives_path>/<path relative to common root>@<OnDiskName><suffix>`. For a dataset matching
-  a single file, the common root is that file's directory, so outputs land at
-  `<derivatives_path>/<file name>@...`. The common root depends on which files match: changing
-  `file_pattern` (or `exclude_pattern`) so the matched set has a different common root moves where
-  outputs are expected (making this layout stable is tracked in
-  [#50](https://github.com/yjmantilla/neurodags/issues/50)).
-- **Without `derivatives_path`**: outputs are written next to the source file
-  (`<source path>@<OnDiskName><suffix>`).
+For a source file `f` discovered in dataset `D` on the active mount:
+
+```text
+rel    = f relative to D's source_root            (lexical, POSIX separators, no "..")
+base   = basename(rel) with every "@" replaced by "&"
+outdir = derivatives_path / [derivatives_subdir] / dirname(rel)    with derivatives_path
+outdir = dirname(f)                                                 without (next to the source)
+prefix = outdir / (base + "@" + name)
+```
+
+- **The location depends only on the configuration and the file's own path**: adding or
+  removing files, narrowing `file_pattern`, `exclude_pattern`, `max_files_per_dataset`,
+  `--only-index`, a frozen `--inputs` list or a previous run never moves outputs. A dataset with a
+  single file keeps its folders below `source_root`.
+- **Mount points**: the paths below `source_root` must be the same on every mount; outputs
+  computed on one mount are then found (and verified by their manifests) on another after copying
+  the tree.
+- **`derivatives_subdir`**: datasets sharing a `derivatives_path` must use different
+  `derivatives_subdir` values (see [datasets.yml](datasets_yaml.md)), so adding a dataset never
+  moves another one's outputs.
 - **`@` in the source basename becomes `&`**: when the source file name already contains `@`
   (typically a NeuroDAGs output used as the input of another pipeline), every `@` in the
-  **basename** (not in directory names) is replaced by `&`, keeping a single `@` per output name.
-  This is not reversible: `a@b.vhdr` and `a&b.vhdr` in the same folder would share outputs.
+  basename (not in folder names) is replaced by `&`, keeping a single `@` per output name. The
+  manifest keeps the original name in `source.rel`.
+- **Collisions are refused before running**: two sources mapping to the same prefix (for example
+  `a@b.vhdr` and `a&b.vhdr` in one folder) stop `run`, `dry-run`, `status` and `dataframe` with
+  an error naming both.
+- **Chained pipelines**: a dataset whose `source_root` is an upstream `derivatives_path` mirrors
+  the upstream tree. Discovery never returns the dataset's own output tree
+  (`derivatives_path[/derivatives_subdir]` below its `source_root`), nor files in `code/` or
+  `.neurodags/` under any `derivatives_path` of the configuration. `validate` warns when a
+  dataset's `source_root` contains its own outputs without an `exclude_pattern` covering them.
 - **`code/`**: `neurodags run` copies the pipeline YAML, `new_definitions` files and datasets YAML,
-  plus `neurodags_env.json`, into `<derivatives_path>/code/` (see
-  [Usage](usage.md)).
+  plus `neurodags_env.json`, into `<derivatives_path>/code/` (not under `derivatives_subdir`; see
+  [Usage](usage.md)). Without `derivatives_path` there is no snapshot.
+
+The layout is computed by one function, {func}`neurodags.outputs.output_reference_base`, used by
+every reader and writer (run, dry-run, `status`, dataframe, TUI).
 
 (naming-dataframe-columns)=
 
 ## Dataframe column names
 
-`build_derivative_dataframe` / `neurodags dataframe` name columns after the **YAML name**, with
+`build_derivative_dataframe` / `neurodags dataframe` name columns after the derivative name, with
 {func}`neurodags.naming.format_column`:
 
 ```text
-<yaml name><artifact suffix>                                  # one column per artifact
-<yaml name><artifact suffix>@<dim>-<value>_<dim>-<value>...   # one column per DataArray element
-<yaml name>.error                                             # the derivative failed for this file
+<name><artifact suffix>                                  # one column per artifact
+<name><artifact suffix>@<dim>-<value>_<dim>-<value>...   # one column per DataArray element
+<name>.error                                             # the derivative failed for this file
 ```
 
 A `.nc` artifact holding an N-dimensional `xarray.DataArray` is flattened into one column per
@@ -211,7 +290,8 @@ The encoding is reversible, so any dimension name and coordinate value is safe. 
 (`index`, `dataset`, `file_path`) never contain `.`, while generated columns always do. Two
 coordinates, artifacts or derivatives that would produce the same column (a non-unique
 coordinate index, or mixed types such as `1` and `"1"`) stop the build with
-`neurodags.naming.ColumnCollisionError`, whatever `raise_on_error` is.
+`neurodags.naming.ColumnCollisionError`, whatever `raise_on_error` is. Derivatives with
+`for_dataframe: true` are read only from done units (valid `.done`).
 
 **Reading a column back.** {func}`neurodags.naming.parse_column` returns
 `(name, suffix, coords, is_error)`, or `None` for a metadata column. By hand, for
@@ -232,12 +312,12 @@ coordinates and name parameters into columns.
 
 ## Worked example
 
-`pipeline.yml` defines `clean_prep` (on disk `CleanPrep`, a `.fif` plus a `.report.html`) and
-`band_power` (on disk `BandPower`, a `.nc` with dimensions `spaces` × `freqbands`); the dataset
-matches `rawdata/**/*.vhdr` and sets `derivatives_path: derivatives`:
+`pipeline.yml` defines `clean_prep` (a `.fif` plus a `.report.html`) and `band_power` (a `.nc`
+with dimensions `spaces` × `freqbands`); the dataset sets `source_root: rawdata`,
+`file_pattern: rawdata/**/*.vhdr` and `derivatives_path: derivatives`:
 
 ```text
-rawdata/                                         # common root of the matched files
+rawdata/                                         # source_root
 ├── sub-01/eeg/sub-01_task-rest_eeg.vhdr
 └── sub-02/eeg/sub-02_task-rest_eeg.vhdr
 
@@ -247,28 +327,32 @@ derivatives/
 │   ├── datasets.yml
 │   └── neurodags_env.json
 ├── sub-01/eeg/
-│   ├── sub-01_task-rest_eeg.vhdr@CleanPrep.fif
-│   ├── sub-01_task-rest_eeg.vhdr@CleanPrep.report.html
-│   └── sub-01_task-rest_eeg.vhdr@BandPower.nc
+│   ├── sub-01_task-rest_eeg.vhdr@clean_prep.fif
+│   ├── sub-01_task-rest_eeg.vhdr@clean_prep.report.html
+│   ├── sub-01_task-rest_eeg.vhdr@clean_prep.done
+│   ├── sub-01_task-rest_eeg.vhdr@band_power.nc
+│   └── sub-01_task-rest_eeg.vhdr@band_power.done
 └── sub-02/eeg/
-    └── sub-02_task-rest_eeg.vhdr@CleanPrep.error # clean_prep failed; band_power not written
+    └── sub-02_task-rest_eeg.vhdr@clean_prep.error  # clean_prep failed; band_power not written
 ```
 
-A second pipeline uses the cleaned files as its sources (`file_pattern:
-derivatives/**/*@CleanPrep.fif`, `derivatives_path: derivatives2`) with a derivative `Entropy`.
-Only sub-01 matches, so the common root is `derivatives/sub-01/eeg` and the `@` of the source
-becomes `&`:
+A second pipeline uses the cleaned files as its sources (`source_root: derivatives`,
+`file_pattern: derivatives/**/*@clean_prep.fif`, `derivatives_path: derivatives2`) with a
+derivative `Entropy`. The tree below `source_root` is mirrored and the `@` of the source becomes
+`&`:
 
 ```text
 derivatives2/
-└── sub-01_task-rest_eeg.vhdr&CleanPrep.fif@Entropy.json
+└── sub-01/eeg/
+    ├── sub-01_task-rest_eeg.vhdr&clean_prep.fif@Entropy.json
+    └── sub-01_task-rest_eeg.vhdr&clean_prep.fif@Entropy.done
 ```
 
 Dataframe columns from the first pipeline (wide format, `band_power` with `for_dataframe: true`):
 
 ```text
-index  dataset  file_path                                 band_power.nc@freqbands-alpha_spaces-Fp1-F3  band_power.nc@freqbands-alpha_spaces-O1  ...
+index  dataset  file_path                                     band_power.nc@freqbands-alpha_spaces-Fp1-F3  band_power.nc@freqbands-alpha_spaces-O1  ...
 0      demo     rawdata/sub-01/eeg/sub-01_task-rest_eeg.vhdr  0.32                                         0.29                                     ...
 ```
 
-To find all `band_power` outputs on disk: `find derivatives -name '*@BandPower*'`.
+To find all `band_power` outputs on disk: `find derivatives -name '*@band_power.*'`.

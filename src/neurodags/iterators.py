@@ -10,7 +10,7 @@ from neurodags.definitions import DatasetConfig
 from neurodags.loggers import get_logger
 from neurodags.utils import (
     DatasetConfigError,
-    find_unique_root,
+    effective_derivatives_base,
     relative_to_source_root,
     resolve_dataset_field,
 )
@@ -239,10 +239,10 @@ class InputEnumeration:
 
     #: Inputs in index order (``entries[i].index == i``).
     entries: list[InputEntry]
-    #: Per-dataset common root used for the 0.3.x output layout (computed from every
-    #: discovered file before ``max_files_per_dataset``, or from the listed paths of a
-    #: frozen list). Goes away when the 0.4.0 layout (outputs below ``source_root``) lands.
-    common_roots: dict[str, str] = field(default_factory=dict)
+    #: Per dataset with inputs: the resolved, normalized ``source_root`` on the active
+    #: mount. Output locations are computed from it and each entry's ``rel`` only
+    #: (:func:`neurodags.outputs.output_reference_base`), never from the discovered set.
+    source_roots: dict[str, str] = field(default_factory=dict)
     #: The frozen input list the entries were read from, ``None`` for discovery.
     inputs_file: str | None = None
     #: With a frozen list: per dataset, the ``rel`` of files found on disk that the list
@@ -316,17 +316,110 @@ def _posix_rel(rel: str) -> str:
     return rel.replace(os.sep, "/") if os.sep != "/" else rel
 
 
+def _is_below(path: str, directory: str) -> bool:
+    """Whether normalized *path* lies strictly below normalized *directory* (lexical)."""
+    return path != directory and path.startswith(directory.rstrip(os.sep) + os.sep)
+
+
+def output_tree_exclusions(
+    datasets: dict[str, DatasetConfig], mount_point: str | None = None
+) -> dict[str, list[str]]:
+    """Directories whose files discovery never returns, per dataset (spec 4.5).
+
+    - ``code/`` and ``.neurodags/`` under every active dataset's ``derivatives_path``
+      (configuration snapshots and neurodags bookkeeping);
+    - the dataset's own output tree (``derivatives_path[/derivatives_subdir]``), so a
+      chained stage whose ``source_root`` contains its outputs never takes them as
+      inputs. Not applied when that tree is ``source_root`` itself or one of its parents
+      (the sources would all be dropped); outputs written next to the sources are not
+      excluded either.
+
+    Paths that cannot be resolved are ignored here (the configuration checks report
+    them). Returns ``{dataset: [normalized directories]}``.
+    """
+    reserved: list[str] = []
+    own: dict[str, str] = {}
+    for name, cfg in datasets.items():
+        if cfg.skip:
+            continue
+        try:
+            derivatives_path = resolve_dataset_field(cfg, "derivatives_path", mount_point)
+        except (ValueError, KeyError):
+            continue
+        if not derivatives_path:
+            continue
+        derivatives_path = os.path.normpath(derivatives_path)
+        reserved += [
+            os.path.join(derivatives_path, "code"),
+            os.path.join(derivatives_path, ".neurodags"),
+        ]
+        try:
+            base = effective_derivatives_base(derivatives_path, cfg.derivatives_subdir)
+        except ValueError:
+            base = derivatives_path
+        own[name] = os.path.normpath(base)
+    result: dict[str, list[str]] = {}
+    for name, cfg in datasets.items():
+        dirs = list(dict.fromkeys(reserved))
+        if name in own:
+            try:
+                root = resolve_dataset_field(cfg, "source_root", mount_point)
+            except (ValueError, KeyError):
+                root = None
+            root = os.path.normpath(root) if root else None
+            if root is None or not (own[name] == root or _is_below(root, own[name])):
+                dirs.append(own[name])
+        result[name] = dirs
+    return result
+
+
+def output_tree_warnings(
+    datasets: dict[str, DatasetConfig], mount_point: str | None = None
+) -> list[str]:
+    """``validate`` warnings for datasets whose ``source_root`` contains their outputs (spec 4.5).
+
+    Discovery excludes a dataset's own output tree automatically; the warning asks for an
+    explicit ``exclude_pattern`` so the configuration says so too.
+    """
+    warnings: list[str] = []
+    for name, cfg in datasets.items():
+        if cfg.skip:
+            continue
+        try:
+            root = resolve_dataset_field(cfg, "source_root", mount_point)
+            derivatives_path = resolve_dataset_field(cfg, "derivatives_path", mount_point)
+            exclude = resolve_dataset_field(cfg, "exclude_pattern", mount_point)
+            base = effective_derivatives_base(derivatives_path, cfg.derivatives_subdir)
+        except (ValueError, KeyError):
+            continue
+        if not root or not base:
+            continue
+        root, base = os.path.normpath(root), os.path.normpath(base)
+        if not _is_below(base, root):
+            continue
+        if exclude and os.path.normpath(exclude).startswith(base.rstrip(os.sep) + os.sep):
+            continue
+        warnings.append(
+            f"datasets.{name}: source_root {root!r} contains this dataset's own outputs "
+            f"({base!r}); discovery excludes them automatically, but add "
+            f"exclude_pattern: {os.path.join(base, '**', '*')!r} to make this explicit."
+        )
+    return warnings
+
+
 def _discover_dataset(
     dataset_name: str,
     dataset_config: DatasetConfig,
     mount_point: str | None,
     drop_split_continuations: bool,
     problems: list[str],
+    excluded_dirs: Iterable[str] = (),
 ) -> list[tuple[str, str]] | None:
     """Discover one dataset: ``[(rel, path), ...]`` sorted by ``rel``.
 
     Returns ``None`` when the dataset is skipped or has no pattern. Files outside
-    ``source_root`` are appended to *problems* (one message per dataset).
+    ``source_root`` are appended to *problems* (one message per dataset). Files below
+    *excluded_dirs* (:func:`output_tree_exclusions`) are dropped.
     """
     if dataset_config.skip:
         log.info("Skipping dataset (skip=True)", dataset=dataset_name)
@@ -380,8 +473,13 @@ def _discover_dataset(
     # Deduplicate identical paths, check each one lies below source_root, sort by rel.
     by_rel: dict[str, str] = {}
     outside: list[str] = []
+    excluded_dirs = list(excluded_dirs)
+    n_excluded = 0
     for f in files:
         path = os.path.normpath(f)
+        if any(_is_below(path, d) for d in excluded_dirs):
+            n_excluded += 1
+            continue
         try:
             rel = _posix_rel(relative_to_source_root(path, source_root))
         except ValueError:
@@ -396,6 +494,12 @@ def _discover_dataset(
             f"datasets.{dataset_name}: {len(outside)} discovered file(s) are not inside "
             f"source_root {os.path.normpath(source_root)!r}: {shown}{more}. Every discovered "
             "file must lie below its dataset's source_root; fix file_pattern or source_root."
+        )
+    if n_excluded:
+        log.info(
+            "Excluded files below output trees from discovery",
+            dataset=dataset_name,
+            excluded=n_excluded,
         )
     # Code-point order of the POSIX rel: no locale, no natural sort (spec §8).
     return sorted(by_rel.items())
@@ -412,7 +516,8 @@ def discover_inputs(
     Per dataset: glob ``file_pattern``, apply ``exclude_pattern``, drop split
     continuations, deduplicate, check every file lies below ``source_root`` (a file
     outside it is a configuration error naming the file), sort by ``rel`` (POSIX
-    separators, code-point order), then keep the first *max_files_per_dataset*. Datasets
+    separators, code-point order), then keep the first *max_files_per_dataset*. Files below
+    an output tree (:func:`output_tree_exclusions`) are never discovered. Datasets
     are concatenated in configuration (YAML) order, skipping ``skip: true``; the index is
     the 0-based position.
 
@@ -445,11 +550,17 @@ def discover_inputs(
         raise ValueError(f"max_files_per_dataset must be >= 0, got {max_files_per_dataset}.")
     problems: list[str] = []
     per_dataset: dict[str, list[tuple[str, str]]] = {}
-    common_roots: dict[str, str] = {}
+    source_roots: dict[str, str] = {}
+    exclusions = output_tree_exclusions(datasets, mount_point)
     for dataset_name, dataset_config in datasets.items():
         log.debug("get_all_files_across_datasets: processing dataset", dataset=dataset_name)
         found = _discover_dataset(
-            dataset_name, dataset_config, mount_point, drop_split_continuations, problems
+            dataset_name,
+            dataset_config,
+            mount_point,
+            drop_split_continuations,
+            problems,
+            exclusions.get(dataset_name, ()),
         )
         if not found:
             if found is not None:
@@ -458,10 +569,9 @@ def discover_inputs(
                     dataset=dataset_name,
                 )
             continue
-        # 0.3.x layout root, computed from every discovered file (before the limit) so
-        # that a limited run writes where the full run does. Replaced by source_root
-        # with the 0.4.0 output layout.
-        common_roots[dataset_name] = find_unique_root([p for _, p in found], mode="maximal")
+        source_roots[dataset_name] = os.path.normpath(
+            resolve_dataset_field(dataset_config, "source_root", mount_point)
+        )
         if max_files_per_dataset is not None:
             found = found[:max_files_per_dataset]
             log.debug(
@@ -485,7 +595,7 @@ def discover_inputs(
         total_datasets=len(per_dataset),
         total_files=len(entries),
     )
-    return InputEnumeration(entries=entries, common_roots=common_roots)
+    return InputEnumeration(entries=entries, source_roots=source_roots)
 
 
 def format_inputs(entries: Iterable[InputEntry]) -> str:
@@ -653,17 +763,9 @@ def load_inputs(
         if (entry.dataset, entry.rel) not in listed:
             not_in_list.setdefault(entry.dataset, []).append(entry.rel)
 
-    # 0.3.x layout root from the listed paths, so every invocation using the same list
-    # writes to the same place regardless of later changes on disk. Replaced by
-    # source_root with the 0.4.0 output layout.
-    common_roots: dict[str, str] = {}
-    for dataset in dict.fromkeys(e.dataset for e in entries):
-        paths = [e.path for e in entries if e.dataset == dataset]
-        common_roots[dataset] = find_unique_root(paths, mode="maximal")
-
     enumeration = InputEnumeration(
         entries=entries,
-        common_roots=common_roots,
+        source_roots=roots,
         inputs_file=inputs_file,
         not_in_list=not_in_list,
     )
@@ -781,7 +883,8 @@ def get_all_files_across_datasets(
     list of tuple
         A list of tuples (index, dataset_name, file_path) for all files across datasets
     dict of str to str
-        Per-dataset common roots (computed before the limit).
+        Per-dataset resolved ``source_root`` (the root output locations are computed
+        from; this was the discovered set's common root before 0.4.0).
     """
     enumeration = discover_inputs(
         datasets,
@@ -789,7 +892,7 @@ def get_all_files_across_datasets(
         max_files_per_dataset=max_files_per_dataset,
         drop_split_continuations=drop_split_continuations,
     )
-    return enumeration.files_per_dataset, enumeration.all_files, enumeration.common_roots
+    return enumeration.files_per_dataset, enumeration.all_files, enumeration.source_roots
 
 
 def get_all_files_from_pipeline_configuration(
@@ -827,7 +930,8 @@ def get_all_files_from_pipeline_configuration(
     list of tuple
         A list of tuples (index, dataset_name, file_path) for all files across datasets
     dict of str to str
-        A dictionary mapping dataset names to their common roots.
+        A dictionary mapping dataset names to their resolved ``source_root`` (the
+        discovered set's common root before 0.4.0).
     """
     log.debug("get_all_files_from_pipeline_configuration: called", pipeline_input=pipeline_input)
     enumeration = enumerate_pipeline_inputs(
@@ -837,4 +941,4 @@ def get_all_files_from_pipeline_configuration(
         drop_split_continuations=drop_split_continuations,
         base_dir=base_dir,
     )
-    return enumeration.files_per_dataset, enumeration.all_files, enumeration.common_roots
+    return enumeration.files_per_dataset, enumeration.all_files, enumeration.source_roots

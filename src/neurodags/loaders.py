@@ -11,6 +11,12 @@ import yaml
 
 from neurodags.definitions import PathLike, RulesLike
 from neurodags.loggers import get_logger
+from neurodags.naming import (
+    NamingError,
+    check_derivative_names,
+    parse_reference,
+    validate_derivative_name,
+)
 
 log = get_logger(__name__)
 
@@ -242,8 +248,72 @@ def check_naming_version(config: Mapping[str, Any], *, source: str | None = None
         )
 
 
+def check_pipeline_names(config: Mapping[str, Any]) -> list[str]:
+    """Validate every derivative name of a pipeline configuration (spec §2.2).
+
+    Checked together, before anything runs or is written:
+
+    - every ``DerivativeDefinitions`` key, with
+      :func:`neurodags.naming.check_derivative_names` (grammar, YAML non-string keys such
+      as ``Yes``/``1_000``, the reserved ``SourceFile``, names differing only in case and
+      the ``X``/``X-<digits>`` split-file rule);
+    - every ``DerivativeList`` entry (grammar);
+    - every reference (``derivative:`` value of a node step), with
+      :func:`neurodags.naming.parse_reference`.
+
+    Names are used verbatim on disk since 0.4.0, so names unique ignoring case cannot
+    share output files.
+
+    Parameters
+    ----------
+    config : mapping
+        The loaded pipeline configuration.
+
+    Returns
+    -------
+    list of str
+        Warnings (names longer than 64 characters, repeated key-value keys). ``neurodags
+        validate`` prints them.
+
+    Raises
+    ------
+    NamingError
+        Listing every problem found.
+    """
+    problems: list[str] = []
+    warnings: list[str] = []
+    defs = config.get("DerivativeDefinitions") or {}
+    if isinstance(defs, Mapping):
+        try:
+            warnings = check_derivative_names(list(defs))
+        except NamingError as exc:
+            problems.extend(f"DerivativeDefinitions: {line}" for line in str(exc).splitlines())
+        for name, definition in defs.items():
+            steps = definition.get("nodes") if isinstance(definition, Mapping) else None
+            for step in steps or []:
+                if not isinstance(step, Mapping) or "derivative" not in step:
+                    continue
+                try:
+                    parse_reference(step["derivative"])
+                except NamingError as exc:
+                    problems.append(f"DerivativeDefinitions.{name} step id={step.get('id')}: {exc}")
+    derivative_list = config.get("DerivativeList") or []
+    if isinstance(derivative_list, list | tuple):
+        for entry in derivative_list:
+            try:
+                validate_derivative_name(entry)
+            except NamingError as exc:
+                problems.append(f"DerivativeList: {exc}")
+    if problems:
+        raise NamingError(
+            "Invalid derivative names in the pipeline configuration:\n"
+            + "\n".join(f"  - {problem}" for problem in problems)
+        )
+    return warnings
+
+
 def load_pipeline_configuration(rules: RulesLike) -> dict[str, Any]:
-    """Load a **pipeline** configuration and check its ``naming_version``.
+    """Load a **pipeline** configuration and check its ``naming_version`` and names.
 
     Same inputs as :func:`load_configuration` (mapping, path or file-like). Use this,
     not :func:`load_configuration`, wherever a pipeline configuration (as opposed to a
@@ -254,8 +324,12 @@ def load_pipeline_configuration(rules: RulesLike) -> dict[str, Any]:
     ------
     ConfigVersionError
         If the configuration lacks ``naming_version: 1`` (see :func:`check_naming_version`).
+    NamingError
+        If a derivative name or reference is invalid (see :func:`check_pipeline_names`).
     """
     config = load_configuration(rules)
     source = os.fspath(rules) if isinstance(rules, str | os.PathLike) else None
     check_naming_version(config, source=source)
+    for warning in check_pipeline_names(config):
+        log.debug("Derivative name warning", warning=warning)
     return config

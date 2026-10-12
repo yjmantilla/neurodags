@@ -75,10 +75,64 @@
   and `"1"`), two artifacts or two derivatives producing the same column raise
   `neurodags.naming.ColumnCollisionError` naming the column and both origins, even with
   `raise_on_error=False` (never recorded as a per-file `.error`). `neurodags dataframe` prints
-  one `neurodags: error: ...` line and exits `2`. `build_derivative_dataframe` also rejects
-  selected derivative names that break the 0.4.0 name grammar (`NamingError`).
+  one `neurodags: error: ...` line and exits `2`.
 - **`sort_flattened_dims` is removed** from `neurodags.dag.collect_derivative_for_dataframe`
   (dims are always sorted by encoded name: one identity per column).
+
+- **Derivative names are used verbatim on disk** (#49): outputs are
+  `<source>@<name><suffix>` with the name exactly as written in `DerivativeDefinitions`; the
+  0.3.x CamelCase conversion is gone (`band_power` writes `@band_power`, was `@BandPower`).
+  Names follow a stricter grammar, `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`, must be YAML
+  strings (quote `Yes`, `On`, `1_000`, ... keys), unique ignoring case, not `SourceFile`, and
+  `X` and `X-<digits>` cannot both be defined. Every `DerivativeDefinitions` key,
+  `DerivativeList` entry, reference and `--derivative` value is checked when the pipeline is
+  loaded (`neurodags.loaders.load_pipeline_configuration`, so every CLI command, the TUI and
+  the Python API), all problems together, before anything is written
+  (`neurodags.naming.NamingError`; exit code `2` on the CLI, including `validate`). This
+  replaces the 0.3.5 on-disk collision check and its `validate` "files named @X" listing;
+  `validate` prints name warnings (long names, repeated key-value keys) instead.
+- **Output folders are computed from `source_root`** (#50):
+  `<derivatives_path>[/<derivatives_subdir>]/<dirname(rel)>/<basename with @ -> &>@<name><suffix>`
+  where `rel` is the source path below `source_root` (next to the source without
+  `derivatives_path`). Locations no longer depend on the common root of the discovered files,
+  so adding files, narrowing `file_pattern`, limits, indices or input lists never move outputs;
+  a single-file dataset keeps its folders below `source_root`. Trees written by 0.3.x may sit
+  at other folders (pilot-era roots). Two sources mapping to the same outputs (`a@b.vhdr` and
+  `a&b.vhdr` in one folder) are refused before running (`DatasetConfigError`).
+  `InputEnumeration.common_roots` is replaced by `source_roots`, and the third value returned
+  by `get_all_files_across_datasets` / `get_all_files_from_pipeline_configuration` is now the
+  resolved `source_root` per dataset. `neurodags.utils.find_unique_root` remains as a utility
+  but no longer decides the layout.
+- **`.done` manifests define "done"** (#27): a unit (source file × derivative) is cached only
+  when `<prefix>.done` (JSON: `manifest_version`, `naming_version`, `derivative`, `source`,
+  `artifacts`, `companions`, `written`, `origin`) parses, matches the derivative and naming
+  version, and every file it lists exists. This replaces the `prefix.*` existence glob in
+  execution, dry runs, `status`, dataframe collection and reuse steps; files matching the
+  prefix but not listed are ignored. **0.3.x outputs have no manifest: they are `incomplete`
+  and recomputed** unless converted with `neurodags migrate` (next 0.4.0 step). On
+  (re)compute the old `.done` is deleted before any artifact is written and the new one is
+  published last, atomically (temp file + `os.replace`); `.done`, `.error` and `.skip` are
+  mutually exclusive. The dry-run plan's `derivative_output` step gains `state`, `artifacts`,
+  `origin`, `manifest_problem` and `unlisted`.
+- **Artifact suffixes are validated before the first writer runs** (`.nc`, `.report.html`,
+  `.EO_baseline.fif`; no `.done`/`.error`/`.skip` endings, no keys differing only in case): an
+  invalid key fails the unit with an `.error` marker and nothing is written.
+- **Discovery excludes output trees**: a dataset never discovers files below its own
+  `derivatives_path[/derivatives_subdir]` (when that lies inside its `source_root`), nor in
+  `code/` or `.neurodags/` under any `derivatives_path` of the configuration, so chained
+  stages do not take their own outputs as inputs.
+- **Removed APIs**: `neurodags.utils.snake_to_camel` (kept privately for `neurodags migrate`),
+  `utils.derivative_file_names`, `utils.check_derivative_names` (use
+  `neurodags.naming.check_derivative_names`), `utils.analyze_bids_filename`,
+  `dag._is_step_cached`, `dag._artifact_candidates_for` and the orchestrator helpers
+  `_sanitize_reference_base` / `_resolve_reference_base` (use `neurodags.outputs`).
+  **Deprecated**: `utils.replace_bids_suffix` warns (`DeprecationWarning`) and is removed in
+  0.5.
+- **`neurodags status` reports `incomplete` units** (outputs without a valid `.done`): a new
+  table column, an `incomplete` count per derivative and in `grand_total`,
+  `incomplete_indices` and `unlisted_files` in `--format json`, `unlisted` per file with
+  `--include-files`; incomplete units make `status` exit `1` and are included in
+  `--format indices` (and in `--list-missing`). The TUI status table gains the same column.
 
 ### Added
 
@@ -101,12 +155,11 @@
   `index`, `dataset`, `rel`, `path` and `missing`). `run_pipeline` and
   `iterate_derivative_pipeline` accept a precomputed `enumeration=`.
   `get_all_files_across_datasets` / `get_all_files_from_pipeline_configuration` keep their
-  return shapes on top of it.
+  return shapes on top of it (see Breaking for their third value).
 
 - **`derivatives_subdir`** dataset field (optional): a relative subfolder of
   `derivatives_path` for the dataset (validated: no `..`, not absolute, not `code/` or
-  `.neurodags/`). Validated and reported in this release step; the output layout that writes
-  under it lands with the rest of the 0.4.0 layout change. The `code/` snapshot stays at
+  `.neurodags/`). Outputs of the dataset are written below it. The `code/` snapshot stays at
   `<derivatives_path>/code/`.
 - **`base_dir=`** argument on `run_pipeline`, `iterate_derivative_pipeline`,
   `build_derivative_dataframe`, `get_all_files_from_pipeline_configuration` and
@@ -130,6 +183,22 @@
   reversible percent-encoded dataframe columns (`Name.nc@ch-C3_freq-8-12`, `Name.error`).
   Dataframe assembly uses the column functions (see Breaking); new
   `neurodags.naming.ColumnCollisionError`.
+
+- **Writer contract**: `Artifact.writer(path)` may return the list of files it wrote (or
+  `None` = exactly `path`); the `.done` manifest is built from these reports and every
+  reported file must exist. New `neurodags.writers.save_mne(obj, path, **kwargs)` returns
+  every part of an MNE split recording (`X.fif`, `X-1.fif`, ...), used by the built-in
+  preprocessing nodes.
+- **`neurodags.outputs`**: the single layout and completion module —
+  `output_reference_base`, `entry_reference_base`, `output_prefix`,
+  `check_output_collisions`, `writer_paths`, `build_manifest`, `write_manifest`,
+  `read_manifest`, `manifest_artifacts`, `unit_state` (`done`, `error`, `skipped`,
+  `incomplete`, `missing`), `publish_marker`, `remove_markers`.
+- **`incomplete` status** in `neurodags status`, the dry-run plan and the TUI (see Breaking).
+- `neurodags.loaders.check_pipeline_names(config)` validates every name of a pipeline and
+  returns the warnings; `neurodags validate` warns when a dataset's `source_root` contains its
+  own outputs without an `exclude_pattern` covering them
+  (`neurodags.iterators.output_tree_warnings`).
 
 ### Changed
 

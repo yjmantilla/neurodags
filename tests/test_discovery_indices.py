@@ -117,9 +117,9 @@ def test_limit_after_sort_is_a_prefix_per_dataset(tmp_path: Path):
         for d in datasets:
             assert [e.rel for e in limited.entries if e.dataset == d] == per_full[d][:n]
         assert [e.index for e in limited.entries] == list(range(len(limited.entries)))
-        # the 0.3.x layout root does not depend on the limit
+        # the layout root (source_root) does not depend on the limit
         if n:
-            assert limited.common_roots == full.common_roots
+            assert limited.source_roots == full.source_roots == {"one": str(r1), "two": str(r2)}
 
 
 def test_datasets_concatenated_in_yaml_order_skipping_skipped(tmp_path: Path):

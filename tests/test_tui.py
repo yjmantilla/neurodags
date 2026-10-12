@@ -780,7 +780,7 @@ class TestStatusSync:
         with patch("neurodags.orchestrators.run_pipeline", return_value=pd.DataFrame()):
             rows, grand, errored = _status_sync("p.yml", None, None)
         assert rows == []
-        assert grand == {"total": 0, "done": 0, "missing": 0, "errored": 0}
+        assert grand == {"total": 0, "done": 0, "incomplete": 0, "missing": 0, "errored": 0}
         assert errored == []
 
     def test_classifies_done_missing_errored(self):
@@ -805,7 +805,7 @@ class TestStatusSync:
         )
         with patch("neurodags.orchestrators.run_pipeline", return_value=fake_df):
             _rows, grand, errored = _status_sync("p.yml", None, None)
-        assert grand == {"total": 3, "done": 1, "missing": 1, "errored": 1}
+        assert grand == {"total": 3, "done": 1, "incomplete": 0, "missing": 1, "errored": 1}
         assert len(errored) == 1
         assert errored[0] == ("StepA", "c.vhdr", "c.error")
 

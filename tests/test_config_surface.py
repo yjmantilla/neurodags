@@ -70,7 +70,10 @@ def _pipeline(datasets, **extra) -> dict:
 
 
 def _outputs(root: Path) -> list[str]:
-    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*@Fit*"))
+    # Artifact files only (each unit also has a .done manifest).
+    return sorted(
+        p.relative_to(root).as_posix() for p in root.rglob("*@Fit*") if p.suffix != ".done"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +492,8 @@ def test_datasets_yaml_paths_resolve_against_that_yaml(tmp_path, monkeypatch):
     assert resolved["derivatives_path"] == str(tmp_path / "cfg" / "out")
 
     run_pipeline(str(pipe), raise_on_error=True)
-    assert _outputs(tmp_path) == ["cfg/out/x0.txt@Fit.message.txt"]
+    # Layout from source_root: the folder below it is kept even for one file (spec 4.1).
+    assert _outputs(tmp_path) == ["cfg/out/sub-01/x0.txt@Fit.message.txt"]
     assert not any(elsewhere.iterdir())
 
 

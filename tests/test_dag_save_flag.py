@@ -33,7 +33,7 @@ def _run_dummy_derivative(tmp_path: Path, derivative_def: dict) -> tuple[NodeRes
         file_path="input-file.vhdr",
         reference_base=reference_base,
     )
-    output_path = Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt")
+    output_path = Path(f"{reference_base.as_posix()}@dummy_derivative.message.txt")
     return result, output_path
 
 
@@ -70,7 +70,7 @@ def test_save_false_does_not_trigger_cached_shortcut(tmp_path):
 
 def _error_path(tmp_path: Path) -> Path:
     reference_base = tmp_path / "subject" / "sample"
-    return Path(f"{reference_base.as_posix()}@DummyDerivative.error")
+    return Path(f"{reference_base.as_posix()}@dummy_derivative.error")
 
 
 def test_skip_errors_skips_file_with_error_marker(tmp_path):
@@ -90,7 +90,7 @@ def test_skip_errors_skips_file_with_error_marker(tmp_path):
 
     assert result == {"skipped_error": str(error_file)}
     # output not produced
-    assert not Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt").exists()
+    assert not Path(f"{reference_base.as_posix()}@dummy_derivative.message.txt").exists()
     # error marker untouched
     assert error_file.exists()
 
@@ -111,7 +111,7 @@ def test_skip_errors_false_retries_file_with_error_marker(tmp_path):
     )
 
     assert isinstance(result, NodeResult)
-    output = Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt")
+    output = Path(f"{reference_base.as_posix()}@dummy_derivative.message.txt")
     assert output.exists()
 
 
@@ -131,7 +131,7 @@ def test_successful_run_removes_stale_error_marker(tmp_path):
     )
 
     assert not error_file.exists()
-    output = Path(f"{reference_base.as_posix()}@DummyDerivative.message.txt")
+    output = Path(f"{reference_base.as_posix()}@dummy_derivative.message.txt")
     assert output.exists()
 
 

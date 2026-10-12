@@ -1,22 +1,28 @@
-"""Derivative names vs on-disk names: snake_to_camel mapping and collisions (#42)."""
+"""Derivative names are used verbatim on disk and validated when a config is loaded (0.4.0).
+
+Spec sections 2.1-2.2: names follow the grammar, are unique ignoring case, and every
+entry point (run, dry-run, status, dataframe, validate, Python API) refuses invalid
+names before anything is written.
+"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 import yaml
 
+import neurodags.dag as dag
+import neurodags.utils as utils
+from neurodags._legacy import snake_to_camel
 from neurodags.cli import main
+from neurodags.loaders import check_pipeline_names, load_pipeline_configuration
+from neurodags.naming import NamingError
 from neurodags.orchestrators import (
     build_derivative_dataframe,
     iterate_derivative_pipeline,
     run_pipeline,
-)
-from neurodags.utils import (
-    check_derivative_names,
-    derivative_file_names,
-    snake_to_camel,
 )
 
 
@@ -31,7 +37,7 @@ def _chain(*first_ref: str) -> dict:
     }
 
 
-def _write_project(root: Path, definitions: dict, derivative_list: list[str]) -> Path:
+def _write_datasets(root: Path) -> None:
     (root / "in").mkdir()
     (root / "in" / "x0.txt").write_text("x0")
     (root / "ds.yml").write_text(
@@ -46,6 +52,10 @@ def _write_project(root: Path, definitions: dict, derivative_list: list[str]) ->
             }
         )
     )
+
+
+def _write_project(root: Path, definitions: dict, derivative_list: list) -> Path:
+    _write_datasets(root)
     pipe = root / "pl.yml"
     pipe.write_text(
         yaml.safe_dump(
@@ -65,7 +75,7 @@ def _tree(root: Path) -> list[Path]:
     return sorted(p.relative_to(root) for p in root.rglob("*"))
 
 
-COLLIDING = {"band_power": _chain(), "BandPower": _chain()}
+CASE_ALIASES = {"BandPower": _chain(), "bandpower": _chain()}
 
 
 @pytest.mark.parametrize(
@@ -74,110 +84,34 @@ COLLIDING = {"band_power": _chain(), "BandPower": _chain()}
         ("fit_w_l06", "FitWL06"),
         ("band_power", "BandPower"),
         ("BandPower", "BandPower"),
-        ("Fit_A", "FitA"),
         ("EO_Features", "EoFeatures"),
-        ("Ep_DetrendedFluctuation", "EpDetrendedfluctuation"),
-        ("ICA_cleaned", "IcaCleaned"),
         ("psd-welch", "psd-welch"),
     ],
 )
-def test_snake_to_camel_mapping_is_stable(name, expected):
-    # On-disk names of existing caches must never change.
+def test_legacy_snake_to_camel_kept_for_migration(name, expected):
+    # The 0.3.x on-disk rule survives privately for `neurodags migrate`.
     assert snake_to_camel(name) == expected
 
 
-def test_derivative_file_names_and_no_collision():
-    names = ["fit_w_l06", "BandPower", "psd-welch"]
-    assert derivative_file_names(names) == {
-        "fit_w_l06": "FitWL06",
-        "BandPower": "BandPower",
-        "psd-welch": "psd-welch",
-    }
-    assert check_derivative_names(names) == derivative_file_names(names)
+def test_removed_runtime_naming_apis():
+    for attr in (
+        "snake_to_camel",
+        "derivative_file_names",
+        "check_derivative_names",
+        "analyze_bids_filename",
+    ):
+        assert not hasattr(utils, attr), attr
+    assert not hasattr(dag, "_is_step_cached")
+    assert not hasattr(dag, "_artifact_candidates_for")
 
 
-def test_collision_message_names_both_yaml_names_and_on_disk_name():
-    with pytest.raises(ValueError, match="collide on disk") as excinfo:
-        check_derivative_names(["band_power", "Other", "BandPower"])
-    msg = str(excinfo.value)
-    assert "'band_power'" in msg
-    assert "'BandPower'" in msg
-    assert "@BandPower" in msg
-    assert "Other" not in msg
+def test_replace_bids_suffix_is_deprecated():
+    with pytest.warns(DeprecationWarning, match="0.5"):
+        result = utils.replace_bids_suffix("sub-01_eeg.vhdr", "desc-x", ".fif")
+    assert result.name == "sub-01_desc-x.fif"
 
 
-@pytest.mark.parametrize("dry_run", [False, True])
-def test_run_with_colliding_names_fails_before_any_write(tmp_path, dry_run):
-    # Only one of the pair is in the run set: all definitions are checked.
-    pipe = _write_project(tmp_path, COLLIDING, ["band_power"])
-    before = _tree(tmp_path)
-
-    # Default flags: must not be swallowed into a per-file error record.
-    with pytest.raises(ValueError, match="band_power"):
-        run_pipeline(str(pipe), dry_run=dry_run)
-
-    assert _tree(tmp_path) == before
-
-
-def test_iterate_and_dataframe_with_colliding_names_fail(tmp_path):
-    pipe = _write_project(tmp_path, COLLIDING, ["band_power", "BandPower"])
-    before = _tree(tmp_path)
-
-    with pytest.raises(ValueError, match="@BandPower"):
-        iterate_derivative_pipeline(str(pipe), "band_power")
-    with pytest.raises(ValueError, match="@BandPower"):
-        build_derivative_dataframe(str(pipe))
-
-    assert _tree(tmp_path) == before
-
-
-@pytest.mark.parametrize("command", ["run", "dry-run", "status"])
-def test_cli_with_colliding_names_fails_before_any_write(tmp_path, command):
-    pipe = _write_project(tmp_path, COLLIDING, ["band_power"])
-    before = _tree(tmp_path)
-
-    with pytest.raises(ValueError, match="collide on disk"):
-        main([command, str(pipe)])
-
-    assert _tree(tmp_path) == before
-
-
-def test_validate_rejects_colliding_names(tmp_path, capsys):
-    pipe = _write_project(tmp_path, COLLIDING, ["band_power"])
-
-    assert main(["validate", str(pipe)]) == 1
-    err = capsys.readouterr().err
-    assert "'band_power'" in err
-    assert "'BandPower'" in err
-    assert "@BandPower" in err
-
-
-def test_validate_prints_on_disk_name_mapping(tmp_path, capsys):
-    pipe = _write_project(
-        tmp_path,
-        {"fit_w_l06": _chain(), "BandPower": _chain(), "psd-welch": _chain()},
-        ["fit_w_l06"],
-    )
-
-    assert main(["validate", str(pipe)]) == 0
-    out = capsys.readouterr().out
-    assert "on-disk names differing from YAML names (1):" in out
-    assert "  fit_w_l06 -> files named @FitWL06" in out
-    # Unchanged names are not listed.
-    assert "BandPower ->" not in out
-    assert "psd-welch ->" not in out
-
-
-def test_validate_omits_mapping_when_all_names_unchanged(tmp_path, capsys):
-    pipe = _write_project(tmp_path, {"BandPower": _chain()}, ["BandPower"])
-
-    assert main(["validate", str(pipe)]) == 0
-    assert "on-disk names" not in capsys.readouterr().out
-
-
-def test_snake_names_run_and_are_referenced_by_yaml_name(tmp_path):
-    # Downstream references use the YAML name (fit_w_l06.message.txt); the files
-    # use the CamelCase on-disk name.
+def test_names_are_verbatim_on_disk_and_in_references(tmp_path):
     pipe = _write_project(
         tmp_path,
         {"fit_w_l06": _chain(), "use_fit": _chain("fit_w_l06.message.txt")},
@@ -187,18 +121,23 @@ def test_snake_names_run_and_are_referenced_by_yaml_name(tmp_path):
     run_pipeline(str(pipe), raise_on_error=True)
 
     names = sorted(p.name for p in (tmp_path / "out").glob("x0.txt@*"))
-    assert names == ["x0.txt@FitWL06.message.txt", "x0.txt@UseFit.message.txt"]
+    assert names == [
+        "x0.txt@fit_w_l06.done",
+        "x0.txt@fit_w_l06.message.txt",
+        "x0.txt@use_fit.done",
+        "x0.txt@use_fit.message.txt",
+    ]
+    manifest = json.loads((tmp_path / "out" / "x0.txt@use_fit.done").read_text())
+    assert manifest["derivative"] == "use_fit"
+    assert manifest["artifacts"] == {".message.txt": ["x0.txt@use_fit.message.txt"]}
 
     df = build_derivative_dataframe(str(pipe), include_derivatives=["fit_w_l06", "use_fit"])
     assert len(df) == 1
-    # Dataframe columns use the YAML name, not the on-disk name.
     assert "fit_w_l06.message.txt" in df.columns
     assert "use_fit.message.txt" in df.columns
 
 
-def test_reference_by_on_disk_name_is_not_a_derivative(tmp_path):
-    # The on-disk name is not an alias for the definition: when nothing is
-    # cached, referencing it fails as an unknown derivative.
+def test_reference_by_camelcase_spelling_is_not_an_alias(tmp_path):
     pipe = _write_project(
         tmp_path,
         {"fit_w_l06": _chain(), "use_fit": _chain("FitWL06.message.txt")},
@@ -209,44 +148,92 @@ def test_reference_by_on_disk_name_is_not_a_derivative(tmp_path):
         run_pipeline(str(pipe), raise_on_error=True)
 
 
-@pytest.mark.parametrize(
-    ("name", "reason"),
-    [
-        ("Fit.v2", "contains '.'"),
-        ("A@B", "contains '@'"),
-        ("a/b", "contains '/'"),
-        ("a\\b", "path separator"),
-        ("F*", "glob wildcard"),
-        ("F?", "glob wildcard"),
-        ("F[1]", "glob character"),
-        ("SourceFile", "reserved"),
-        ("", "empty derivative name"),
-    ],
-)
-def test_layout_breaking_names_are_rejected(name, reason):
-    with pytest.raises(ValueError, match="invalid derivative names") as excinfo:
-        check_derivative_names(["Fit", name])
-    assert reason in str(excinfo.value)
-
-
-@pytest.mark.parametrize("name", ["psd-welch", "A&B", "fit_w_l06", "Band Power", "source_file"])
-def test_other_names_are_accepted(name):
-    assert check_derivative_names(["Fit", name])
-
-
-def test_names_differing_only_in_case_collide():
-    # Same file on case-insensitive filesystems (macOS, Windows).
-    with pytest.raises(ValueError, match="case-insensitive") as excinfo:
-        check_derivative_names(["Bandpower", "band_power"])
-    assert "'@BandPower' / '@Bandpower'" in str(excinfo.value)
-
-
-def test_dotted_name_rejected_before_run(tmp_path):
-    # 'Fit.v2' outputs (@Fit.v2.*) would otherwise make 'Fit' look cached.
-    pipe = _write_project(tmp_path, {"Fit": _chain(), "Fit.v2": _chain()}, ["Fit"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_run_with_case_aliases_fails_before_any_write(tmp_path, dry_run):
+    # Only one of the pair is in the run set: all definitions are checked.
+    pipe = _write_project(tmp_path, CASE_ALIASES, ["BandPower"])
     before = _tree(tmp_path)
 
-    with pytest.raises(ValueError, match=r"'Fit\.v2' contains '\.'"):
-        run_pipeline(str(pipe))
-    assert main(["validate", str(pipe)]) == 1
+    with pytest.raises(NamingError, match="differ only in case"):
+        run_pipeline(str(pipe), dry_run=dry_run)
+
     assert _tree(tmp_path) == before
+
+
+def test_iterate_and_dataframe_with_case_aliases_fail(tmp_path):
+    pipe = _write_project(tmp_path, CASE_ALIASES, ["BandPower", "bandpower"])
+    before = _tree(tmp_path)
+
+    with pytest.raises(NamingError, match="differ only in case"):
+        iterate_derivative_pipeline(str(pipe), "BandPower")
+    with pytest.raises(NamingError, match="differ only in case"):
+        build_derivative_dataframe(str(pipe))
+
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("command", ["run", "dry-run", "status", "validate", "dataframe"])
+def test_cli_with_case_aliases_fails_before_any_write(tmp_path, command, capsys):
+    pipe = _write_project(tmp_path, CASE_ALIASES, ["BandPower"])
+    before = _tree(tmp_path)
+
+    assert main([command, str(pipe)]) == 2
+    err = capsys.readouterr().err
+    assert "'BandPower'" in err
+    assert "'bandpower'" in err
+
+    assert _tree(tmp_path) == before
+
+
+def test_non_string_yaml_key_is_rejected(tmp_path):
+    _write_datasets(tmp_path)
+    pipe = tmp_path / "pl.yml"
+    pipe.write_text(
+        "naming_version: 1\n"
+        "datasets: ds.yml\n"
+        "DerivativeDefinitions:\n"
+        "  Yes:\n"
+        "    nodes:\n"
+        "      - {id: 0, derivative: SourceFile}\n"
+        "      - {id: 1, node: dummy, args: {param1: id.0}}\n"
+    )
+    with pytest.raises(NamingError, match="quote"):
+        load_pipeline_configuration(str(pipe))
+
+
+@pytest.mark.parametrize(
+    ("definitions", "derivative_list", "fragment"),
+    [
+        ({"Fit.v2": _chain()}, [], "Fit.v2"),
+        ({"SourceFile": _chain()}, [], "reserved"),
+        ({"Clean": _chain(), "Clean-1": _chain()}, [], "split"),
+        ({"A": _chain("B.c.d@x")}, [], "step id=0"),
+        ({"A": _chain()}, ["not ok"], "DerivativeList"),
+    ],
+)
+def test_invalid_names_rejected_at_load(tmp_path, definitions, derivative_list, fragment):
+    pipe = _write_project(tmp_path, definitions, derivative_list)
+    with pytest.raises(NamingError) as excinfo:
+        load_pipeline_configuration(str(pipe))
+    assert fragment in str(excinfo.value)
+
+
+def test_invalid_derivative_flag_is_rejected(tmp_path, capsys):
+    pipe = _write_project(tmp_path, {"A": _chain()}, ["A"])
+    before = _tree(tmp_path)
+
+    assert main(["run", str(pipe), "--derivative", "A.nc"]) == 2
+    assert "A.nc" in capsys.readouterr().err
+    assert _tree(tmp_path) == before
+
+
+def test_validate_prints_name_warnings(tmp_path, capsys):
+    long_name = "L" * 70
+    pipe = _write_project(tmp_path, {long_name: _chain(), "Fit_w-6_w-7": _chain()}, [])
+
+    assert check_pipeline_names(load_pipeline_configuration(str(pipe)))
+    assert main(["validate", str(pipe)]) == 0
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert "70 characters" in err
+    assert "repeats key" in err

@@ -19,7 +19,7 @@ Pipelines are defined as a **directed acyclic graph (DAG)** of computation nodes
 
 - **Reproducible, transparent workflows** defined declaratively in YAML — version-controllable and LLM-friendly.
 - **Uniform node abstraction** — preprocessing, features, and any custom nodes are treated identically.
-- **Directory-agnostic** — outputs mirror inputs' organization. Derivatives are labeled with a `@DerivativeName` suffix.
+- **Directory-agnostic** — outputs mirror inputs' organization. Derivatives are labeled with an `@<name>` suffix using the derivative name verbatim, and a `.done` manifest marks each finished file.
 - **xarray-centered outputs** — derivatives stored as language-agnostic, metadata-rich, dimension-aware xarray → NetCDF.
 - **Graph-based reuse** — if a derivative is already computed and `overwrite=False`, it is skipped automatically.
 

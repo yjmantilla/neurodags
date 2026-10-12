@@ -11,7 +11,7 @@ SourceFile → CleanedEEG → CrossSpectralDensity → PowerSpectrum → BandPow
 
 ## Derivative
 
-A **derivative** is a named, reusable computation result associated with an input file. Derivatives are stored on disk with a `@DerivativeName` suffix appended to their source file's name:
+A **derivative** is a named, reusable computation result associated with an input file. Derivatives are stored on disk with `@` and the derivative name, exactly as written in the YAML, appended to their source file's name:
 
 ```
 sub-1.fif                     → source
@@ -19,7 +19,7 @@ sub-1.fif@CleanedEEG.fif      → derivative
 sub-1.fif@PowerSpectrum.nc    → derivative
 ```
 
-Derivatives mirror the input directory structure — NeuroDAGs is agnostic to how your data is organized. Derivative names containing `_` are written in CamelCase on disk (`power_spectrum` → `@PowerSpectrum`); see **[File Naming Conventions](naming.md)** for every naming rule and restriction.
+Derivatives mirror the directory structure below each dataset's `source_root` (inside `derivatives_path` when it is set, otherwise next to the sources) — NeuroDAGs is agnostic to how your data is organized. A derivative named `power_spectrum` writes `@power_spectrum` files; names are never converted. See **[File Naming and Output Layout](naming.md)** for every naming rule and restriction.
 
 ### Chaining pipelines (neurodags output as source)
 
@@ -88,9 +88,9 @@ If your workflow needs cross-file operations mid-pipeline, consider Snakemake or
 
 ## Caching
 
-If a derivative's final artifact already exists on disk and `overwrite: False` (the default), the entire derivative computation is skipped. This allows you to resume interrupted pipelines and avoid redundant computation in large studies.
+When a derivative finishes for a file, NeuroDAGs writes a small `.done` manifest next to its outputs listing every file it wrote. If that manifest is valid (every listed file still exists) and `overwrite: False` (the default), the entire derivative computation is skipped. This allows you to resume interrupted pipelines and avoid redundant computation in large studies; a unit interrupted mid-write has no `.done` and is recomputed (see {ref}`Completion manifest <naming-done-manifest>`).
 
-**Cache invalidation is existence-based, not code-based.** If you change a node's implementation, NeuroDAGs has no way to know the cached output is stale — it only checks whether the output file exists. To force recomputation after modifying a node, either set `overwrite: true` on that derivative or delete the relevant `@DerivativeName` files manually.
+**Cache invalidation is manifest-based, not code-based.** If you change a node's implementation, NeuroDAGs has no way to know the cached output is stale — it only checks the manifest and the files it lists. To force recomputation after modifying a node, either set `overwrite: true` on that derivative or delete the relevant `@<name>.done` files (or all `@<name>.*` files) manually.
 
 ## SourceFile
 

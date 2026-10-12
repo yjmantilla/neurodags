@@ -256,7 +256,7 @@ def test_run_writes_under_expanded_derivatives_path(monkeypatch, tmp_path, n_job
 
     derivs = out / "derivatives"
     assert (derivs / "code" / "pl.yml").exists()
-    assert sorted(p.name for p in derivs.glob("*@Meta*")) == [
+    assert sorted(p.name for p in derivs.glob("*@Meta.json")) == [
         "x0_raw.fif@Meta.json",
         "x1_raw.fif@Meta.json",
     ]

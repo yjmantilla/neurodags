@@ -19,9 +19,14 @@ from neurodags.iterators import (
     discover_inputs,
     enumerate_inputs,
     format_inputs,
+    output_tree_warnings,
     write_inputs_file,
 )
-from neurodags.loaders import ConfigVersionError, load_pipeline_configuration
+from neurodags.loaders import (
+    ConfigVersionError,
+    check_pipeline_names,
+    load_pipeline_configuration,
+)
 from neurodags.loggers import configure_logging
 from neurodags.mermaid import (
     derivative_to_html,
@@ -29,7 +34,7 @@ from neurodags.mermaid import (
     pipeline_to_html,
     pipeline_to_mermaid,
 )
-from neurodags.naming import NamingError
+from neurodags.naming import NamingError, validate_derivative_name
 from neurodags.orchestrators import (
     _derivative_topo_order,
     build_derivative_dataframe,
@@ -37,7 +42,6 @@ from neurodags.orchestrators import (
 )
 from neurodags.utils import (
     DatasetConfigError,
-    check_derivative_names,
     expand_path,
     inspect_dataset_paths,
     resolve_dataset_paths,
@@ -159,6 +163,8 @@ def _cli_enumeration(args: argparse.Namespace) -> InputEnumeration:
 
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
     if derivatives:
+        for name in derivatives:  # --derivative values follow the name grammar (spec 2.2)
+            validate_derivative_name(name)
         return derivatives
     derivative_list = config.get("DerivativeList", [])
     if not derivative_list:
@@ -380,30 +386,55 @@ EOF
     return submit, worker
 
 
-def _status_classify(plan: list) -> str:
-    """Return 'done', 'skipped', 'missing', 'errored', 'no-save', or 'unknown' from a dry-run plan list.
+_STATE_TO_STATUS = {
+    "done": "done",
+    "skipped": "skipped",
+    "error": "errored",
+    "incomplete": "incomplete",
+    "missing": "missing",
+}
 
-    'done' means at least one artifact file matching the derivative prefix exists on disk.
-    It does NOT verify that all artifact files are present — a derivative that produces
-    multiple artifacts (multiple keys in NodeResult.artifacts) will show as 'done' even
-    if only one of those files was written (e.g. after a partial failure).
-    'skipped' means a .skip marker exists — the derivative was intentionally not computed
-    for this source file (e.g. a condition not present in a subject's recording).
-    """
+
+def _status_final(plan: list) -> dict | None:
     if not isinstance(plan, list):
-        return "unknown"
-    final = next((s for s in plan if s.get("kind") == "derivative_output"), None)
+        return None
+    return next((s for s in plan if s.get("kind") == "derivative_output"), None)
+
+
+def _status_classify(plan: list) -> str:
+    """Return the status of one unit from its dry-run plan.
+
+    One of 'done', 'skipped', 'errored', 'incomplete', 'missing', 'no-save' or 'unknown':
+
+    - 'done': the ``.done`` manifest is valid (it parses, matches the derivative and
+      naming version, and every file it lists exists);
+    - 'skipped': a ``.skip`` marker exists (intentionally not computed for this source);
+    - 'errored': a ``.error`` marker exists;
+    - 'incomplete': output files exist without a valid ``.done`` (a partial or
+      interrupted write, or 0.3.x outputs not yet migrated); recomputed by the next run;
+    - 'missing': nothing exists for the unit.
+    """
+    final = _status_final(plan)
     if final is None:
         return "unknown"
-    if final.get("has_skip_marker"):
-        return "skipped"
-    if final.get("has_error_marker"):
-        return "errored"
     if not final.get("will_save", True):
         return "no-save"
+    state = final.get("state")
+    if state in _STATE_TO_STATUS:
+        return _STATE_TO_STATUS[state]
+    # Plans without a state (older payloads): marker-based fallback.
+    if final.get("has_skip_marker"):
+        return "skipped"
     if final.get("cached"):
         return "done"
+    if final.get("has_error_marker"):
+        return "errored"
     return "missing"
+
+
+def _status_unlisted(plan: list) -> list[str]:
+    final = _status_final(plan)
+    return list(final.get("unlisted") or []) if final else []
 
 
 def _status_error_path(plan: list) -> str | None:
@@ -448,6 +479,7 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
                 "file_path": row.get("file_path", ""),
                 "status": "missing-source" if missing_source else _status_classify(plan),
                 "error_path": _status_error_path(plan),
+                "unlisted": [] if missing_source else _status_unlisted(plan),
             }
         )
     return rows
@@ -489,6 +521,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "total": 0,
         "done": 0,
         "skipped": 0,
+        "incomplete": 0,
         "missing": 0,
         "errored": 0,
         "missing-source": 0,
@@ -504,19 +537,26 @@ def _cmd_status(args: argparse.Namespace) -> int:
         for k, v in per_deriv[deriv].items():
             grand[k] += v
 
-    complete = grand["missing"] == 0 and grand["errored"] == 0 and grand["missing-source"] == 0
+    complete = (
+        grand["missing"] == 0
+        and grand["incomplete"] == 0
+        and grand["errored"] == 0
+        and grand["missing-source"] == 0
+    )
+    n_unlisted = sum(len(r["unlisted"]) for r in rows)
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
     missing_source_indices = _status_indices(rows, ("missing-source",))
     n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
     inputs_file = enumeration.inputs_file if enumeration is not None else None
 
     if fmt == "indices":
+        # Incomplete units are recomputed like missing ones, so they count as missing here.
         if args.list_missing and not args.list_errors:
-            wanted: tuple[str, ...] = ("missing",)
+            wanted: tuple[str, ...] = ("missing", "incomplete")
         elif args.list_errors and not args.list_missing:
             wanted = ("errored",)
         else:
-            wanted = ("missing", "errored")
+            wanted = ("missing", "incomplete", "errored")
         print(" ".join(str(i) for i in _status_indices(rows, wanted)))
         return exit_code
 
@@ -528,7 +568,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "grand_total": grand,
             "complete": complete,
             "missing_indices": _status_indices(rows, ("missing",)),
+            "incomplete_indices": _status_indices(rows, ("incomplete",)),
             "errored_indices": _status_indices(rows, ("errored",)),
+            "unlisted_files": n_unlisted,
             "inputs": inputs_file,
             "missing_source_indices": missing_source_indices,
             "not_in_list": n_not_in_list,
@@ -542,6 +584,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "derivative": r["derivative"],
                     "status": r["status"],
                     "error_path": r["error_path"],
+                    "unlisted": r["unlisted"],
                 }
                 for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
             ]
@@ -570,7 +613,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     col_w = max(24, max(len(d) for d in all_derivs) + 2)
     header = (
         f"{'Derivative':<{col_w}} {'total':>6}  {'done':>6}  {'skipped':>8}"
-        f"  {'missing':>8}  {'errored':>8}"
+        f"  {'incomplete':>10}  {'missing':>8}  {'errored':>8}"
     )
     sep = "─" * len(header)
 
@@ -586,21 +629,28 @@ def _cmd_status(args: argparse.Namespace) -> int:
         c = per_deriv[deriv]
         print(
             f"{deriv:<{col_w}} {c['total']:>6}  {c['done']:>6}  {c['skipped']:>8}"
-            f"  {c['missing']:>8}  {c['errored']:>8}"
+            f"  {c['incomplete']:>10}  {c['missing']:>8}  {c['errored']:>8}"
         )
 
     print(sep)
     print(
         f"{'Total':<{col_w}} {grand['total']:>6}  {grand['done']:>6}  {grand['skipped']:>8}"
-        f"  {grand['missing']:>8}  {grand['errored']:>8}"
+        f"  {grand['incomplete']:>10}  {grand['missing']:>8}  {grand['errored']:>8}"
     )
     print(
         "\nNote: 'total' counts (derivative x source-file) pairs, not output files. "
-        "'done' means ≥1 artifact file exists — a derivative that writes multiple files "
-        "per source file may show 'done' even after a partial write. "
+        "'done' means the unit's .done manifest is valid and every file it lists exists. "
+        "'incomplete' means output files exist without a valid .done (an interrupted "
+        "write, or 0.3.x outputs not yet migrated with 'neurodags migrate'); the next run "
+        "recomputes them. "
         "'skipped' means a .skip marker exists — the derivative was intentionally not "
         "computed for that source file (e.g. condition absent from the recording)."
     )
+    if n_unlisted:
+        print(
+            f"\n{n_unlisted} file(s) match an output prefix but are not listed in its .done "
+            "manifest; they are ignored (see --format json --include-files)."
+        )
     _print_input_list_report()
 
     if grand["errored"]:
@@ -613,6 +663,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(
             f"\n{grand['skipped']} derivative(s) skipped (not applicable for those source files)."
         )
+
+    if grand["incomplete"]:
+        print(f"{grand['incomplete']} derivative(s) incomplete (no valid .done manifest).", end="")
+        if not args.list_missing:
+            print("  Run with --list-missing for details.", end="")
+        print()
 
     if grand["missing"] and not complete:
         print(f"{grand['missing']} derivative(s) missing.", end="")
@@ -643,6 +699,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_list("Errored files:", "errored", show_error_path=True)
 
     if args.list_missing:
+        _print_list("Incomplete files:", "incomplete", show_error_path=False)
         _print_list("Missing files:", "missing", show_error_path=False)
 
     return exit_code
@@ -842,7 +899,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show how many files are done, missing, or errored per derivative.",
+        help="Show how many units are done, skipped, incomplete, missing or errored per derivative.",
     )
     status_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
     status_parser.add_argument(
@@ -1021,12 +1078,15 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             args.config, datasets_input=args.datasets
         )
         resolved_paths, problems = inspect_dataset_paths(datasets, mount_point)
-        file_names = check_derivative_names(config.get("DerivativeDefinitions") or {})
+        # Errors were raised when the configuration was loaded; this returns the warnings.
+        name_warnings = check_pipeline_names(config)
+        for name in getattr(args, "derivatives", None) or []:
+            validate_derivative_name(name)
+        layout_warnings = output_tree_warnings(datasets, mount_point)
     except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     defs = config.get("DerivativeDefinitions") or {}
-    renamed = {name: fname for name, fname in file_names.items() if name != fname}
     defined = list(defs.keys())
     derivative_list = list(config.get("DerivativeList") or [])
 
@@ -1044,11 +1104,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
     print(f"mount_point: {mount_point}")
     _print_dataset_report(datasets, resolved_paths, mount_point, problems)
+    for warning in [*name_warnings, *layout_warnings]:
+        print(f"warning: {warning}", file=sys.stderr)
     print(f"derivatives_defined ({len(defined)}): {', '.join(defined) or 'none'}")
-    if renamed:
-        print(f"on-disk names differing from YAML names ({len(renamed)}):")
-        for name, fname in renamed.items():
-            print(f"  {name} -> files named @{fname}")
     print(f"run_set [{selection_source}] ({len(selected)}): {', '.join(selected) or 'none'}")
     print(f"computed_with_dependencies ({len(computed)}): {', '.join(computed) or 'none'}")
     if deps_only:

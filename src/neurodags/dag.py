@@ -1,5 +1,4 @@
 # dag_exec.py
-import glob
 import inspect
 import json
 import os
@@ -30,9 +29,23 @@ from neurodags.derivatives import (
 )
 from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
-from neurodags.naming import ColumnCollisionError, find_column_collisions, format_column
+from neurodags.naming import (
+    ColumnCollisionError,
+    find_column_collisions,
+    format_column,
+    validate_artifact_suffixes,
+)
 from neurodags.nodes import get_node
-from neurodags.utils import snake_to_camel
+from neurodags.outputs import (
+    build_manifest,
+    manifest_artifacts,
+    output_prefix,
+    publish_marker,
+    remove_markers,
+    unit_state,
+    write_manifest,
+    writer_paths,
+)
 
 log = get_logger(__name__)
 # A node reference is ``id.N`` (whole result of node N) or, for a node that
@@ -231,50 +244,6 @@ def _topo_order(nodes: list[dict[str, Any]]) -> list[int]:
     return order
 
 
-# Optional: simple cache probe (customize for your FS layout)
-def _is_step_cached(
-    derivative_name: str, step_derivative_name: str, reference_base: Path, accept_ambiguous=False
-) -> bool:
-    """
-    Decide if a 'derivative' step can be considered already computed.
-    By default: look for any file whose prefix matches:
-    <reference_base>@<CamelCase(step_derivative_name)>.*
-    """
-    # prefix = f"{reference_base}@{snake_to_camel(step_derivative_name)}"
-    postfix = f"@{step_derivative_name}"
-    # return any(reference_base.parent.glob(Path(prefix).name + ".*"))
-    # Escape the literal path so glob metacharacters ([, ], *, ?) in file or
-    # directory names are matched verbatim.
-    candidates = glob.glob(
-        glob.escape(
-            reference_base.as_posix() + postfix
-            if isinstance(reference_base, Path)
-            else reference_base + postfix
-        )
-    )  # or use
-    if len(candidates) > 1:
-        if not accept_ambiguous:
-            log.error(
-                "Multiple cached artifacts found",
-                derivative=derivative_name,
-                step_reference=step_derivative_name,
-                reference_base=reference_base,
-                candidates=candidates,
-            )
-            raise RuntimeError(
-                f"Multiple cached artifacts found for {reference_base}{postfix}: {candidates}"
-            )
-        else:
-            log.warning(
-                "Multiple cached artifacts found, using the first one",
-                derivative=derivative_name,
-                step_reference=step_derivative_name,
-                reference_base=reference_base,
-                candidates=candidates,
-            )
-    return len(candidates) >= 1, candidates[0] if candidates else None
-
-
 # --- registration from YAML ---
 def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
     cfg = load_configuration(yaml_path)
@@ -317,18 +286,18 @@ def _ensure_parent_dir(reference_base: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
-def _artifact_candidates_for(prefix: str) -> list[str]:
-    # Returns all non-error, non-skip files matching prefix.*. Used by the dry-run plan to set
-    # cached=True when any artifact exists. Does NOT guarantee all expected artifact files
-    # are present — a derivative that writes N files shows as cached after only 1 is written.
-    # TODO: How to add option to skip derivatives that previously failed? (.error files)
-    # The prefix is a literal path built from source/derivative names, so escape it: glob
-    # metacharacters ([, ], *, ?) in any file or directory name must match verbatim.
-    return [
-        x
-        for x in sorted(glob.glob(glob.escape(prefix) + ".*"))
-        if not x.endswith(".error") and not x.endswith(".skip") and os.path.isfile(x)
-    ]
+def _cached_unit(prefix: str, name: str) -> dict[str, list[str]] | None:
+    """Files per suffix of a done unit (valid ``.done`` manifest), else ``None`` (spec 6.2)."""
+    return manifest_artifacts(prefix, name)
+
+
+def _main_files(artifacts: Mapping[str, Sequence[str]]) -> list[str]:
+    """The main file of every artifact (first listed path), sorted like the 0.3.x glob.
+
+    MNE split parts follow their main file in the manifest and are loaded through it, so
+    they are never handed to nodes on their own.
+    """
+    return sorted(paths[0] for paths in artifacts.values() if paths)
 
 
 class _MissingPrecomputedArtifacts(RuntimeError):
@@ -354,23 +323,40 @@ def run_derivative(
     mount_point: Path | None = None,
     dry_run: bool = False,
     skip_errors: bool = False,
+    *,
+    source_dataset: str | None = None,
+    source_rel: str | None = None,
 ) -> NodeResult | dict[str, Any]:
     """
     Evaluate (or dry-run) a derivative on a single file.
 
+    Outputs of the unit are ``<reference_base>@<derivative_name><suffix>``, with the
+    derivative name used verbatim (see :mod:`neurodags.outputs`). A unit is cached when its
+    ``.done`` manifest is valid (spec 6.2); files without one are recomputed.
+
     When dry_run=True:
       - Do NOT execute any steps.
-      - Report, per step, whether the expected artifacts are already present.
+      - Report, per step, whether the expected artifacts are already present (``state``
+        of the final output: done, error, skipped, incomplete or missing).
       - Return a dict with a 'plan' list (so callers don't confuse it with NodeResult).
 
     Normal mode:
       - 'derivative' steps: if cached and overwrite=False, skip compute; else compute or recurse.
-      - 'node' steps: execute; if it's the last step, save artifacts under '@<DerivativeName>*'.
+      - 'node' steps: execute; if it's the last step, validate the artifact suffixes, delete
+        the old ``.done``, write every artifact, then publish the ``.done`` manifest
+        atomically from the paths the writers reported.
+
+    Parameters
+    ----------
+    source_dataset, source_rel : str, optional
+        Dataset key and source path relative to ``source_root``, recorded in the
+        manifest's ``source``. ``source_rel`` defaults to the source file's basename.
     """
     overwrite = bool(derivative_def.get("overwrite", False))
     save = bool(derivative_def.get("save", True))
     nodes = derivative_def.get("nodes", [])
     order = _topo_order(nodes)
+    manifest_rel = source_rel if source_rel is not None else os.path.basename(file_path)
 
     store: dict[int, Any] = {}
     last_result: NodeResult | None = None
@@ -381,10 +367,8 @@ def run_derivative(
             plan.append(kwargs)
 
     # In dry-run, also check the final output of the derivative upfront
-    base_reference = (
-        reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-    )
-    final_prefix = base_reference + "@" + snake_to_camel(derivative_name) if save else None
+    base_reference = os.fspath(reference_base)
+    final_prefix = output_prefix(base_reference, derivative_name) if save else None
     error_path = (final_prefix + ".error") if final_prefix else None
     skip_marker_path = (final_prefix + ".skip") if final_prefix else None
     has_error_marker = bool(error_path and Path(error_path).exists())
@@ -392,14 +376,19 @@ def run_derivative(
 
     if dry_run:
         if save:
-            final_candidates = _artifact_candidates_for(final_prefix)
+            state = unit_state(final_prefix, derivative_name)
             _record(
                 id="final",
                 kind="derivative_output",
                 name=derivative_name,
                 prefix=final_prefix,
-                cached=len(final_candidates) > 0,
-                paths=final_candidates,
+                state=state.state,
+                cached=state.state == "done",
+                paths=_main_files(state.artifacts),
+                artifacts=state.artifacts,
+                origin=state.origin,
+                manifest_problem=state.problem,
+                unlisted=list(state.unlisted),
                 has_error_marker=has_error_marker,
                 error_path=error_path if has_error_marker else None,
                 has_skip_marker=has_skip_marker,
@@ -428,18 +417,19 @@ def run_derivative(
                 file_path=file_path,
             )
             return {"skipped": skip_marker_path}
-        # Early skip if final already cached and not overwriting
+        # Early skip if the unit is done (valid .done manifest) and not overwriting
         if save and not overwrite:
-            final_candidates = _artifact_candidates_for(final_prefix)
-            if len(final_candidates) > 0:
+            cached = _cached_unit(final_prefix, derivative_name)
+            if cached is not None:
+                final_candidates = _main_files(cached)
                 log.info(
                     "Last step of the derivative is cached",
                     derivative=derivative_name,
                     final_prefix=final_prefix,
                     reference_base=reference_base,
-                    candidate=final_candidates[0],
+                    candidate=final_candidates[0] if final_candidates else None,
                 )
-                return {"cached": final_candidates}
+                return {"cached": final_candidates, "artifacts": cached}
         # Early skip if prior error marker exists and skip_errors=True
         if skip_errors and has_error_marker:
             log.info(
@@ -455,6 +445,12 @@ def run_derivative(
         # dataframe reads never touch the filesystem (#33).
         _ensure_parent_dir(base_reference)
 
+    def _write_skip(text: str) -> str:
+        assert final_prefix is not None
+        path = publish_marker(final_prefix, "skip", text)
+        log.debug("Wrote skip marker", path=path)
+        return path
+
     for sid in order:
         step = next(s for s in nodes if s["id"] == sid)
 
@@ -468,12 +464,9 @@ def run_derivative(
                 continue
 
             base_name, ext = _split_derivative_ref(derivative_ref)
-            prefix = (
-                reference_base.as_posix() + "@" + snake_to_camel(base_name)
-                if isinstance(reference_base, Path)
-                else reference_base + "@" + snake_to_camel(base_name)
-            )
-            candidates = _artifact_candidates_for(prefix)
+            prefix = output_prefix(base_reference, base_name)
+            child_cached = _cached_unit(prefix, base_name)
+            candidates = _main_files(child_cached) if child_cached is not None else []
             if ext:
                 candidates = [p for p in candidates if p.endswith("." + ext)]
 
@@ -496,6 +489,8 @@ def run_derivative(
                         dataset_config=dataset_config,
                         mount_point=mount_point,
                         dry_run=True,
+                        source_dataset=source_dataset,
+                        source_rel=source_rel,
                     )
                 _record(**entry)
                 continue
@@ -546,6 +541,8 @@ def run_derivative(
                         dataset_config=dataset_config,
                         mount_point=mount_point,
                         dry_run=False,
+                        source_dataset=source_dataset,
+                        source_rel=source_rel,
                     )
                 except SkipDerivative as skip_exc:
                     # save:False sub-derivative raised SkipDerivative — propagate skip upward
@@ -556,11 +553,11 @@ def run_derivative(
                         reason=str(skip_exc),
                     )
                     if save:
-                        assert skip_marker_path is not None
-                        with open(skip_marker_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"Sub-derivative '{base_name}' was skipped: {skip_exc!s}\n")
-                        log.debug("Wrote skip marker", path=skip_marker_path)
-                        return {"skipped": skip_marker_path}
+                        return {
+                            "skipped": _write_skip(
+                                f"Sub-derivative '{base_name}' was skipped: {skip_exc!s}\n"
+                            )
+                        }
                     raise  # save:False parent also propagates
 
                 # If sub-derivative returned {"skipped": ...} (save:True sub wrote its own
@@ -572,11 +569,9 @@ def run_derivative(
                         child_derivative=base_name,
                     )
                     if save:
-                        assert skip_marker_path is not None
-                        with open(skip_marker_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"Sub-derivative '{base_name}' was skipped.\n")
-                        log.debug("Wrote skip marker", path=skip_marker_path)
-                        return {"skipped": skip_marker_path}
+                        return {
+                            "skipped": _write_skip(f"Sub-derivative '{base_name}' was skipped.\n")
+                        }
                     raise SkipDerivative(f"Sub-derivative '{base_name}' was skipped")
 
                 # If the sub-derivative early-returned its cached-file dict
@@ -667,28 +662,14 @@ def run_derivative(
                 last_result = res
 
                 if sid == order[-1] and save:
-                    # save final artifacts under '@<DerivativeName>'
                     assert final_prefix is not None
-                    for artifact_name, artifact in res.artifacts.items():
-                        try:
-                            log.debug("Processed artifact", name=artifact_name, file=artifact)
-                            artifact_path = final_prefix + artifact_name
-                            artifact.writer(artifact_path)
-                            log.debug("Saved artifact", file=artifact_path)
-                        except Exception as e:
-                            log.error(
-                                "Error saving artifact",
-                                artifact_name=artifact_name,
-                                path=final_prefix + artifact_name,
-                                error=str(e),
-                                exc_info=True,
-                            )
-                            raise
-                    # clean up any prior .error marker now that save succeeded
-                    stale_error = Path(final_prefix + ".error")
-                    if stale_error.exists():
-                        stale_error.unlink()
-                        log.debug("Removed stale error marker", path=str(stale_error))
+                    _save_final_artifacts(
+                        res,
+                        final_prefix,
+                        derivative_name,
+                        source_dataset=source_dataset,
+                        source_rel=manifest_rel,
+                    )
             except SkipDerivative as skip_exc:
                 log.info(
                     "Node signaled skip; derivative not applicable for this source file",
@@ -698,13 +679,10 @@ def run_derivative(
                     reason=str(skip_exc),
                 )
                 if save:
-                    assert skip_marker_path is not None
                     try:
-                        with open(skip_marker_path, "w", encoding="utf-8") as sf:
-                            sf.write(
-                                f"Derivative '{derivative_name}' step id={sid} node='{node_name}' skipped:\n{skip_exc!s}\n"
-                            )
-                        log.debug("Wrote skip marker", path=skip_marker_path)
+                        path = _write_skip(
+                            f"Derivative '{derivative_name}' step id={sid} node='{node_name}' skipped:\n{skip_exc!s}\n"
+                        )
                     except Exception as ee:
                         log.error(
                             "Error writing skip marker file",
@@ -712,7 +690,8 @@ def run_derivative(
                             error=str(ee),
                             exc_info=True,
                         )
-                    return {"skipped": skip_marker_path}
+                        path = skip_marker_path
+                    return {"skipped": path}
                 raise  # save:False — propagate to parent
             except Exception as e:
                 log.error(
@@ -727,11 +706,11 @@ def run_derivative(
                 if save:
                     try:
                         assert final_prefix is not None
-                        error_path = final_prefix + ".error"
-                        with open(error_path, "w", encoding="utf-8") as ef:
-                            ef.write(
-                                f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{e!s}\n"
-                            )
+                        error_path = publish_marker(
+                            final_prefix,
+                            "error",
+                            f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{e!s}\n",
+                        )
                         log.debug("Wrote error marker file", path=error_path)
                     except Exception as ee:
                         log.error(
@@ -748,9 +727,7 @@ def run_derivative(
         return {
             "derivative": derivative_name,
             "file": file_path,
-            "reference_base": (
-                reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-            ),
+            "reference_base": base_reference,
             "overwrite": overwrite,
             "plan": plan,
         }
@@ -758,6 +735,55 @@ def run_derivative(
     if last_result is None:
         raise RuntimeError(f"Derivative '{derivative_name}' produced no result")
     return last_result
+
+
+def _save_final_artifacts(
+    res: NodeResult,
+    final_prefix: str,
+    derivative_name: str,
+    *,
+    source_dataset: str | None,
+    source_rel: str,
+) -> str:
+    """Write a unit's artifacts and publish its ``.done`` manifest (spec 3, 6.2).
+
+    1. Validate every artifact suffix before the first writer runs (an invalid key fails
+       the unit and nothing is written).
+    2. Delete the old ``.done``, so a crash from here on leaves the unit unfinished.
+    3. Run every writer and record the files it reports (:func:`neurodags.outputs.writer_paths`).
+    4. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
+
+    Returns the manifest path. Errors propagate (the caller writes the ``.error`` marker).
+    """
+    validate_artifact_suffixes(res.artifacts)
+    remove_markers(final_prefix, "done")
+    written: dict[str, list[str]] = {}
+    for artifact_name, artifact in res.artifacts.items():
+        artifact_path = final_prefix + artifact_name
+        try:
+            log.debug("Processed artifact", name=artifact_name, file=artifact)
+            written[artifact_name] = writer_paths(artifact_path, artifact.writer(artifact_path))
+            log.debug("Saved artifact", file=artifact_path, files=written[artifact_name])
+        except Exception as e:
+            log.error(
+                "Error saving artifact",
+                artifact_name=artifact_name,
+                path=artifact_path,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+    manifest = build_manifest(
+        final_prefix,
+        derivative_name,
+        dataset=source_dataset,
+        rel=source_rel,
+        artifacts=written,
+    )
+    manifest_path = write_manifest(final_prefix, manifest)
+    remove_markers(final_prefix, "error", "skip")
+    log.debug("Published completion manifest", path=manifest_path)
+    return manifest_path
 
 
 def collect_derivative_for_dataframe(
@@ -770,13 +796,15 @@ def collect_derivative_for_dataframe(
     *,
     flatten_xarray_artifacts: bool = True,
     preserve_complex_values: bool = False,
+    source_dataset: str | None = None,
+    source_rel: str | None = None,
 ) -> dict[str, Any]:
     """
     Collect artifacts for a derivative and convert them into dataframe-ready values.
 
-    This helper prefers cached artifacts if they exist on disk. If none are available,
-    it will execute ``run_derivative`` to obtain the necessary results (without forcing a recompute
-    when cached outputs are already present).
+    This helper prefers cached artifacts: a unit with a valid ``.done`` manifest is read
+    from the files the manifest lists. Otherwise it executes ``run_derivative`` to obtain
+    the results (without forcing a recompute when cached outputs are already present).
 
     Parameters
     ----------
@@ -788,6 +816,10 @@ def collect_derivative_for_dataframe(
         When True, skip flattening and value simplification so artifacts retain their original
         Python objects (after potential on-disk loading).
 
+    source_dataset, source_rel:
+        Recorded in the ``.done`` manifest when the derivative has to be computed (see
+        :func:`run_derivative`).
+
     Returns
     -------
     dict[str, Any]
@@ -795,8 +827,8 @@ def collect_derivative_for_dataframe(
         :func:`neurodags.naming.format_column`: ``{derivative_name}{artifact_suffix}``, plus
         ``@dim-value_dim-value`` (percent-encoded, dims sorted by encoded name) per flattened
         element. Derivatives flagged with ``save=True`` and ``for_dataframe=True`` are skipped
-        (empty dictionary) when no cached artifacts are found instead of triggering a
-        recomputation.
+        (empty dictionary) when the unit has no valid ``.done`` manifest instead of
+        triggering a recomputation.
 
     Raises
     ------
@@ -817,15 +849,15 @@ def collect_derivative_for_dataframe(
             dataset_config=dataset_config,
             mount_point=mount_point,
             precomputed_only=enforce_precomputed,
+            source_dataset=source_dataset,
+            source_rel=source_rel,
         )
     except _MissingPrecomputedArtifacts:
         log.debug(
             "Skipping derivative during dataframe collection because cached artifacts are missing",
             derivative=derivative_name,
             file=file_path,
-            reference_base=(
-                reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-            ),
+            reference_base=os.fspath(reference_base),
         )
         return {}
 
@@ -861,24 +893,24 @@ def _resolve_derivative_artifacts(
     mount_point: Path | None = None,
     *,
     precomputed_only: bool = False,
+    source_dataset: str | None = None,
+    source_rel: str | None = None,
 ) -> dict[str, Any]:
     save = bool(derivative_def.get("save", True))
-    base_reference = (
-        reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-    )
-    prefix = base_reference + "@" + snake_to_camel(derivative_name)
+    prefix = output_prefix(os.fspath(reference_base), derivative_name) if save else None
 
-    payloads: dict[str, Any] = {}
+    def _from_manifest(artifacts: Mapping[str, Sequence[str]]) -> dict[str, Any]:
+        # The main file of each artifact (MNE split parts are read through it).
+        return {suffix: Path(paths[0]) for suffix, paths in artifacts.items() if paths}
+
     if save:
-        cached_paths = _artifact_candidates_for(prefix)
-        if cached_paths:
-            for path in cached_paths:
-                suffix = path[len(prefix) :]
-                payloads[suffix] = Path(path)
-            return payloads
+        cached = _cached_unit(prefix, derivative_name)
+        if cached is not None:
+            return _from_manifest(cached)
         if precomputed_only:
             raise _MissingPrecomputedArtifacts(
-                f"Cached artifacts not found for derivative '{derivative_name}' with prefix '{prefix}'"
+                f"No valid .done manifest for derivative '{derivative_name}' "
+                f"at prefix '{prefix}'"
             )
 
     result = run_derivative(
@@ -889,24 +921,22 @@ def _resolve_derivative_artifacts(
         dataset_config=dataset_config,
         mount_point=mount_point,
         dry_run=False,
+        source_dataset=source_dataset,
+        source_rel=source_rel,
     )
 
     if isinstance(result, NodeResult):
+        written = _cached_unit(prefix, derivative_name) if save else None
+        payloads: dict[str, Any] = {}
         for suffix, artifact in result.artifacts.items():
             payload: Any = artifact.item
-            if save:
-                artifact_path = prefix + suffix
-                if Path(artifact_path).exists():
-                    payload = Path(artifact_path)
+            if written and written.get(suffix):
+                payload = Path(written[suffix][0])
             payloads[suffix] = payload
         return payloads
 
-    if isinstance(result, dict) and "cached" in result:
-        paths = result["cached"]
-        for path in paths:
-            suffix = path[len(prefix) :]
-            payloads[suffix] = Path(path)
-        return payloads
+    if isinstance(result, dict) and "artifacts" in result:
+        return _from_manifest(result["artifacts"])
 
     raise RuntimeError(
         f"Unexpected result type when collecting derivative '{derivative_name}': {type(result)!r}"
