@@ -1,6 +1,5 @@
-import yaml
-
 from neurodags.derivatives import register_derivative_with_name
+from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
 
 log = get_logger(__name__)
@@ -8,8 +7,7 @@ log = get_logger(__name__)
 this_file = __file__
 this_yaml = this_file.replace(".py", ".yml")
 
-with open(this_yaml) as f:
-    yaml_definitions = yaml.safe_load(f)
+yaml_definitions = load_configuration(this_yaml)
 
 
 def register_derivatives_from_dict(yaml_definitions: dict):

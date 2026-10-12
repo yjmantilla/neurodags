@@ -18,8 +18,6 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     xr = None
 
-import yaml
-
 from neurodags.definitions import NodeResult, SkipDerivative
 from neurodags.derivatives import (
     get_derivative as get_derivative_definition,
@@ -30,6 +28,7 @@ from neurodags.derivatives import (
 from neurodags.derivatives import (
     register_derivative_with_name,
 )
+from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
 from neurodags.nodes import get_node
 from neurodags.utils import snake_to_camel
@@ -273,8 +272,7 @@ def _is_step_cached(
 
 # --- registration from YAML ---
 def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
-    with open(yaml_path, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_configuration(yaml_path)
     derivative_defs: dict[str, dict] = cfg.get("DerivativeDefinitions", {}) or {}
     registered: list[str] = []
 

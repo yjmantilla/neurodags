@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 # Import the function under test
 from neurodags.loaders import load_configuration
@@ -97,3 +98,88 @@ def test_ioerror_when_file_missing(tmp_path: Path):
     p = tmp_path / "does_not_exist.yml"
     with pytest.raises(IOError, match="Couldn't read rules file"):
         load_configuration(p)
+
+
+# --- YAML merge keys (#44) ---
+
+
+def _load_text(text: str):
+    return load_configuration(io.StringIO(text))
+
+
+def test_merge_key_with_extra_key():
+    doc = "base: &base {x: 1, y: 2}\nm: {<<: *base, z: 3}\n"
+    data = _load_text(doc)
+    assert data["m"] == {"x": 1, "y": 2, "z": 3}
+    assert data == yaml.safe_load(doc)
+
+
+def test_merge_key_explicit_value_overrides_merged():
+    # Overriding a merged key is legal and the explicit value wins, whatever
+    # the textual position of the merge key.
+    for doc in (
+        "base: &base {x: 1, y: 2}\nm:\n  <<: *base\n  x: 9\n",
+        "base: &base {x: 1, y: 2}\nm:\n  x: 9\n  <<: *base\n",
+    ):
+        data = _load_text(doc)
+        assert data["m"] == {"x": 9, "y": 2}
+        assert data == yaml.safe_load(doc)
+
+
+def test_merge_key_list_earlier_entries_take_precedence():
+    doc = "a: &a {x: 1}\n" "b: &b {x: 2, y: 2}\n" "m:\n" "  <<: [*a, *b]\n" "  z: 3\n"
+    data = _load_text(doc)
+    assert data["m"] == {"x": 1, "y": 2, "z": 3}
+    assert data == yaml.safe_load(doc)
+
+
+def test_merge_key_chained_anchors():
+    doc = "base: &base {p: 1}\nmid: &mid {<<: *base, q: 2}\nm: {<<: *mid, r: 3}\n"
+    data = _load_text(doc)
+    assert data["m"] == {"p": 1, "q": 2, "r": 3}
+    assert data == yaml.safe_load(doc)
+
+
+def test_merge_key_in_node_args_issue_example():
+    doc = (
+        "_defaults: &fitargs\n"
+        "  n_iter: 100\n"
+        "  alphas: [1.0, 1000.0, 20]\n"
+        "DerivativeDefinitions:\n"
+        "  FitA:\n"
+        "    nodes:\n"
+        "      - {id: 1, node: my_fit, args: {<<: *fitargs, space: a}}\n"
+        "  FitB:\n"
+        "    nodes:\n"
+        "      - id: 1\n"
+        "        node: my_fit\n"
+        "        args:\n"
+        "          <<: *fitargs\n"
+        "          n_iter: 5\n"
+        "          space: b\n"
+    )
+    data = _load_text(doc)
+    defs = data["DerivativeDefinitions"]
+    assert defs["FitA"]["nodes"][0]["args"] == {
+        "n_iter": 100,
+        "alphas": [1.0, 1000.0, 20],
+        "space": "a",
+    }
+    assert defs["FitB"]["nodes"][0]["args"] == {
+        "n_iter": 5,
+        "alphas": [1.0, 1000.0, 20],
+        "space": "b",
+    }
+    assert data == yaml.safe_load(doc)
+
+
+def test_explicit_duplicate_next_to_merge_key_still_raises():
+    doc = "base: &base {x: 1}\nm:\n  <<: *base\n  y: 1\n  y: 2\n"
+    with pytest.raises(ValueError, match="Duplicate key 'y' at line 5, column 3"):
+        _load_text(doc)
+
+
+def test_duplicate_inside_anchored_mapping_still_raises():
+    doc = "base: &base\n  x: 1\n  x: 2\nm: {<<: *base, y: 3}\n"
+    with pytest.raises(ValueError, match="Duplicate key 'x' at line 3, column 3"):
+        _load_text(doc)

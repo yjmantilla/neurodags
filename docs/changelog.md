@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **YAML merge keys (`<<: *anchor`) failed to load** (#44): the duplicate-key-checking loader
+  (`UniqueKeySafeLoader`) overrode `construct_mapping` without flattening merge keys, so a
+  pipeline such as `args: {<<: *fitargs, space: a}` failed with `could not determine a
+  constructor for the tag 'tag:yaml.org,2002:merge'`, and shared node arguments had to be
+  repeated in every derivative. The loader now flattens merges as PyYAML's `SafeConstructor`
+  does, with standard semantics: `<<: *a` and `<<: [*a, *b]` are supported, keys written in
+  the mapping override merged ones, and with a list of merges the earlier one wins (results
+  match `yaml.safe_load`). Duplicate keys are still rejected with their line/column, both in
+  a mapping that uses a merge and inside an anchored mapping; only keys written explicitly in
+  the same mapping count, so overriding a merged key is not a duplicate.
+- `register_derivatives_from_yaml` and the built-in `derivatives/pipeline.yml` now load
+  through `load_configuration` too, so every pipeline YAML path rejects duplicate keys the
+  same way.
+
+### Documentation
+
+- The pipeline YAML guide has a new section on sharing node arguments across derivatives
+  with anchors and merge keys, kept under a top-level helper key such as `_defaults`
+  (unknown top-level keys are ignored by the loader and `neurodags validate`).
+
 ## 0.3.4 — 2026-10-12
 
 ### Added
