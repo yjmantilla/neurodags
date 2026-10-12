@@ -243,10 +243,14 @@ def _is_step_cached(
     # prefix = f"{reference_base}@{snake_to_camel(step_derivative_name)}"
     postfix = f"@{step_derivative_name}"
     # return any(reference_base.parent.glob(Path(prefix).name + ".*"))
+    # Escape the literal path so glob metacharacters ([, ], *, ?) in file or
+    # directory names are matched verbatim.
     candidates = glob.glob(
-        reference_base.as_posix() + postfix
-        if isinstance(reference_base, Path)
-        else reference_base + postfix
+        glob.escape(
+            reference_base.as_posix() + postfix
+            if isinstance(reference_base, Path)
+            else reference_base + postfix
+        )
     )  # or use
     if len(candidates) > 1:
         if not accept_ambiguous:
@@ -319,10 +323,12 @@ def _artifact_candidates_for(prefix: str) -> list[str]:
     # cached=True when any artifact exists. Does NOT guarantee all expected artifact files
     # are present — a derivative that writes N files shows as cached after only 1 is written.
     # TODO: How to add option to skip derivatives that previously failed? (.error files)
+    # The prefix is a literal path built from source/derivative names, so escape it: glob
+    # metacharacters ([, ], *, ?) in any file or directory name must match verbatim.
     return [
         x
-        for x in sorted(glob.glob(prefix + ".*"))
-        if not x.endswith(".error") and not x.endswith(".skip")
+        for x in sorted(glob.glob(glob.escape(prefix) + ".*"))
+        if not x.endswith(".error") and not x.endswith(".skip") and os.path.isfile(x)
     ]
 
 
@@ -827,6 +833,7 @@ def collect_derivative_for_dataframe(
             flatten_xarray=flatten_xarray_artifacts and not preserve_complex_values,
             sort_dims_alphabetically=sort_flattened_dims,
             preserve_complex_values=preserve_complex_values,
+            derivative_name=derivative_name,
         )
         if isinstance(simplified, _FlattenedArtifactColumns):
             for flatten_suffix, value in simplified.items():
@@ -914,6 +921,7 @@ def _simplify_artifact_payload(
     flatten_xarray: bool = False,
     sort_dims_alphabetically: bool = True,
     preserve_complex_values: bool = False,
+    derivative_name: str | None = None,
 ) -> Any:
     value = _load_from_path(payload, suffix=suffix) if isinstance(payload, Path) else payload
 
@@ -921,7 +929,12 @@ def _simplify_artifact_payload(
         return value
 
     if flatten_xarray and xr is not None and isinstance(value, xr.DataArray):
-        return _flatten_dataarray_payload(value, sort_dims_alphabetically=sort_dims_alphabetically)
+        return _flatten_dataarray_payload(
+            value,
+            sort_dims_alphabetically=sort_dims_alphabetically,
+            derivative_name=derivative_name,
+            suffix=suffix,
+        )
 
     return _simplify_value(value)
 
@@ -959,7 +972,11 @@ class _FlattenedArtifactColumns(dict):
 
 
 def _flatten_dataarray_payload(
-    data_array: "xr.DataArray", *, sort_dims_alphabetically: bool
+    data_array: "xr.DataArray",
+    *,
+    sort_dims_alphabetically: bool,
+    derivative_name: str | None = None,
+    suffix: str | None = None,
 ) -> _FlattenedArtifactColumns:
     if data_array.ndim == 0:
         try:
@@ -973,6 +990,8 @@ def _flatten_dataarray_payload(
     index_iterator = _ndindex(shape)
 
     flattened: dict[str, Any] = {}
+    # Original (dim, coord_value) pairs behind each generated key, so collisions can be reported.
+    key_sources: dict[str, list[tuple[Any, Any]]] = {}
     for index_tuple in index_iterator:
         dims_with_values = []
         for dim, idx in zip(dims, index_tuple, strict=False):
@@ -1005,6 +1024,20 @@ def _flatten_dataarray_payload(
         except Exception:
             raw_value = data_array.values[index_tuple]
 
+        # _format_coord_value is not injective (e.g. "a-b" and "a~b" both become "a~b"), so two
+        # distinct coordinates can produce the same key. The later value overwrites the earlier
+        # one; warn so the silent data loss is visible.
+        if key in flattened:
+            log.warning(
+                "Dataframe column collision while flattening artifact: distinct coordinate "
+                "values map to the same column name; the earlier value is overwritten",
+                derivative=derivative_name,
+                suffix=suffix,
+                column_suffix=key,
+                kept_coords=dims_with_values,
+                overwritten_coords=key_sources[key],
+            )
+        key_sources[key] = list(dims_with_values)
         flattened[key] = _simplify_value(raw_value)
 
     return _FlattenedArtifactColumns(flattened)
@@ -1038,6 +1071,8 @@ def _format_coord_value(value: Any) -> str:
             value = value.item()
         except Exception:
             pass
+    # NOTE: the line below is a no-op (its result is discarded), so ``None`` currently becomes
+    # "None", not "NA". Left as is because generated column names are a compatibility surface.
     "NA" if value is None else str(value)
     # sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
     # sanitized = sanitized.strip("-")
