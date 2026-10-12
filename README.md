@@ -185,6 +185,15 @@ neurodags slurm-script pipeline.yml --derivative CleanedEEG      # restrict to s
 
 See [HPC guide](https://yjmantilla.github.io/neurodags/user_guide/hpc.html) for details on each pattern.
 
+### Upgrading a 0.3.x project
+
+```bash
+neurodags migrate pipeline.yml --report plan.json   # preview: changes nothing
+neurodags migrate pipeline.yml --apply              # rewrite the config, move outputs, write .done
+```
+
+See the [migration guide](https://yjmantilla.github.io/neurodags/user_guide/migrating_to_0_4.html).
+
 ### TUI (Terminal User Interface)
 
 Requires `pip install neurodags[tui]`:

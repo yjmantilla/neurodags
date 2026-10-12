@@ -10,6 +10,7 @@ tui
 concepts
 pipeline_yaml
 naming
+migrating_to_0_4
 datasets_yaml
 custom_nodes
 parser_nodes

@@ -20,7 +20,7 @@ NeuroDAGs installs a unified `neurodags` command with several subcommands. Every
 Every pipeline YAML must declare `naming_version: 1`. A configuration without it (or with
 another value) is refused by every command, the TUI and the Python API with a one-line error
 (exit code `2` on the CLI); to upgrade a 0.3.x configuration, run `neurodags migrate`
-(available in 0.4.0). See {doc}`pipeline_yaml`.
+(see {doc}`migrating_to_0_4`). See {doc}`pipeline_yaml`.
 ```
 
 ## Global Options
@@ -303,6 +303,16 @@ neurodags slurm-script pipeline.yml --derivative CleanedEEG      # restrict to o
 ```
 
 See {doc}`hpc` for full details on each pattern and how to submit.
+
+## Migrating a 0.3.x Project
+
+```bash
+neurodags migrate pipeline.yml --report plan.json        # preview: prints the plan, changes nothing
+neurodags migrate pipeline.yml --apply                   # rewrite config, move outputs, write .done
+neurodags migrate pipeline.yml --mount hpc --apply       # then each other mount's output tree
+```
+
+Exit code `2` when the plan is refused (nothing is changed). See {doc}`migrating_to_0_4`.
 
 ## TUI (Terminal User Interface)
 

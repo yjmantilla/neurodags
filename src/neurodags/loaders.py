@@ -207,7 +207,9 @@ NAMING_VERSION = 1
 
 #: How to upgrade an older configuration; one place so the wording is easy to update.
 MIGRATE_HINT = (
-    "To upgrade a neurodags 0.3.x configuration, run `neurodags migrate` (available in 0.4.0)."
+    "To upgrade a neurodags 0.3.x configuration and its outputs, preview with "
+    "`neurodags migrate pipeline.yml`, then run it again with --apply "
+    "(see the 'Migrating to 0.4' guide)."
 )
 
 

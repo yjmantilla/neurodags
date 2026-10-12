@@ -16,7 +16,7 @@ one.
 output folders are computed from each dataset's `source_root` (never from the set of discovered
 files), and a unit is done only when its `.done` manifest is valid. Outputs written by 0.3.x have
 no manifest: `neurodags status` reports them as `incomplete` and the next run recomputes them,
-unless you convert the tree with `neurodags migrate` (next 0.4.0 step).
+unless you convert the tree with `neurodags migrate` (see {doc}`migrating_to_0_4`).
 ```
 
 ## Rules at a glance
