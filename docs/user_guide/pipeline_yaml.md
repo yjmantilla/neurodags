@@ -159,6 +159,46 @@ When step `N` produces a **mapping** (a dict — e.g. a [parser node](parser_nod
 
 ---
 
+## Sharing Arguments with Anchors and Merge Keys
+
+When many derivatives share the same node arguments, define them once with a YAML anchor
+(`&name`) and pull them into each `args` mapping with a merge key (`<<: *name`):
+
+```yaml
+_defaults: &fitargs
+  n_iter: 100
+  alphas: [1.0, 1000.0, 20]
+
+DerivativeDefinitions:
+  FitA:
+    nodes:
+      - {id: 1, node: my_fit, args: {<<: *fitargs, space: a}}
+  FitB:
+    nodes:
+      - id: 1
+        node: my_fit
+        args:
+          <<: *fitargs
+          n_iter: 5        # overrides the merged value
+          space: b
+```
+
+Standard YAML merge semantics apply:
+
+- Keys written in the mapping itself override merged ones (`FitB` above runs with `n_iter: 5`).
+- `<<: [*a, *b]` merges several anchors; when they share a key, the earlier one wins.
+
+The anchor can live under any top-level key that neurodags does not use; `_defaults` is a
+good convention. Unknown top-level keys are ignored by the loader and by `neurodags validate`,
+so the helper key needs no extra configuration. An anchor must be defined before it is used,
+so put the helper key above `DerivativeDefinitions`.
+
+Duplicate keys are still rejected: writing the same key twice in one mapping (including inside
+the anchored mapping) raises `Duplicate key '<key>' at line L, column C`. Overriding a key that
+came from a merge, as in `FitB`, is not a duplicate.
+
+---
+
 ## DerivativeList
 
 Controls which derivatives execute and in what order. Derivatives not listed here are defined but never run. Comment out entries to skip without removing definitions:

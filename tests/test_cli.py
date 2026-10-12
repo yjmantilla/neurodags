@@ -64,6 +64,53 @@ def test_validate_prints_summary(tmp_path, capsys):
     assert "derivatives_enabled" not in out
 
 
+def test_validate_accepts_anchor_and_merge_keys(tmp_path, capsys):
+    # #44: a top-level helper key holding an anchor, merged into node args.
+    pipe = tmp_path / "pipeline.yml"
+    data = tmp_path / "datasets.yml"
+    pipe.write_text(
+        "datasets: datasets.yml\n"
+        "mount_point: null\n"
+        "_defaults: &psd\n"
+        "  fmin: 1\n"
+        "  fmax: 40\n"
+        "DerivativeDefinitions:\n"
+        "  PsdA:\n"
+        "    nodes:\n"
+        "      - {id: 0, derivative: SourceFile}\n"
+        "      - {id: 1, node: my_psd, args: {<<: *psd, data: id.0}}\n"
+        "  PsdB:\n"
+        "    nodes:\n"
+        "      - id: 0\n"
+        "        derivative: PsdA.nc\n"
+        "      - id: 1\n"
+        "        node: my_psd\n"
+        "        args:\n"
+        "          <<: *psd\n"
+        "          fmax: 30\n"
+        "          data: id.0\n"
+        "DerivativeList:\n"
+        "  - PsdB\n"
+    )
+    data.write_text(
+        "demo:\n"
+        "  name: Demo\n"
+        f"  file_pattern: {tmp_path}/**/*.vhdr\n"
+        f"  derivatives_path: {tmp_path}/derivatives\n"
+    )
+
+    assert main(["validate", str(pipe)]) == 0
+    out = capsys.readouterr().out
+    assert "derivatives_defined (2): PsdA, PsdB" in out
+    assert "computed_with_dependencies (2): PsdA, PsdB" in out
+
+    from neurodags.loaders import load_configuration
+
+    defs = load_configuration(pipe)["DerivativeDefinitions"]
+    assert defs["PsdA"]["nodes"][1]["args"] == {"fmin": 1, "fmax": 40, "data": "id.0"}
+    assert defs["PsdB"]["nodes"][1]["args"] == {"fmin": 1, "fmax": 30, "data": "id.0"}
+
+
 def test_validate_shows_effective_run_set_with_dependencies(tmp_path, capsys):
     pipe = tmp_path / "pipeline.yml"
     data = tmp_path / "datasets.yml"

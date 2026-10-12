@@ -25,7 +25,15 @@ class UniqueKeySafeLoader(_BaseSafeLoader):
     """
     Safe YAML loader that raises on duplicate keys within the same mapping.
     Logs the exact location (line/column).
+
+    YAML merge keys (``<<: *anchor`` and ``<<: [*a, *b]``) are supported with
+    standard semantics: keys written explicitly in the mapping override merged
+    ones, and earlier entries in a merge list take precedence over later ones.
+    Only keys written explicitly in the same mapping count as duplicates; a key
+    pulled in by a merge and then overridden explicitly is legal.
     """
+
+    _MERGE_TAG = "tag:yaml.org,2002:merge"
 
     def construct_mapping(self, node, deep: bool = False):  # type: ignore[override]
         if not isinstance(node, yaml.MappingNode):
@@ -33,8 +41,18 @@ class UniqueKeySafeLoader(_BaseSafeLoader):
                 None, None, f"Expected a mapping node, got {node.id}", node.start_mark
             )
 
+        # Remember which key nodes were written explicitly in this mapping (by
+        # identity) before flatten_mapping prepends the merged pairs, so the
+        # duplicate scan below ignores keys that came in through a merge.
+        explicit_keys = {
+            id(key_node) for key_node, _ in node.value if key_node.tag != self._MERGE_TAG
+        }
+        self.flatten_mapping(node)
+
         seen: set[Any] = set()
         for key_node, _ in node.value:
+            if id(key_node) not in explicit_keys:
+                continue
             key = self.construct_object(key_node, deep=deep)
             if key in seen:
                 mark = key_node.start_mark
