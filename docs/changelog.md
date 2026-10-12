@@ -33,6 +33,27 @@
 - The generated `slurm-script` templates load the pipeline with
   `load_pipeline_configuration` and pass `base_dir=` (the pipeline's directory) to
   `run_pipeline`.
+- **Dataframe columns use a new, reversible coordinate encoding** (`neurodags.naming.format_column`):
+  dimension names and coordinate values are percent-encoded (UTF-8, uppercase hex) instead of
+  the lossy 0.3.x character swaps, and dims are sorted by encoded name. Wide column names and
+  long-format `derivative` values change wherever a coordinate contained `-`, `_`, `@`, `,`, a
+  space or a non-ASCII character, or a dimension name contained anything outside `[A-Za-z0-9]`:
+  `band-8~12` → `band-8-12`, `freq-~1.5` → `freq--1.5`, `cond-a|b` → `cond-a%5Fb`,
+  `ref-a$b` → `ref-a%40b`, `x-1.5` (from `1,5`) → `x-1%2C5`, `channel-EEG 001` →
+  `channel-EEG%20001`, `freq_band-alpha` → `freq%5Fband-alpha`, and an empty coordinate
+  `dim-NA` → `dim-`. Columns split back with `neurodags.naming.parse_column`; the guide shows
+  a pandas recipe (the dataframe stays "easy to split, not pre-split": no extra columns).
+- **Error columns are `<name>.error`** (were `<name>__error`); long-format error rows have
+  `derivative = "<name>.error"`.
+- **Dataframe column collisions are errors** (were warnings in 0.3.5, with the earlier value
+  overwritten): two coordinates of one artifact (non-unique index, or mixed types such as `1`
+  and `"1"`), two artifacts or two derivatives producing the same column raise
+  `neurodags.naming.ColumnCollisionError` naming the column and both origins, even with
+  `raise_on_error=False` (never recorded as a per-file `.error`). `neurodags dataframe` prints
+  one `neurodags: error: ...` line and exits `2`. `build_derivative_dataframe` also rejects
+  selected derivative names that break the 0.4.0 name grammar (`NamingError`).
+- **`sort_flattened_dims` is removed** from `neurodags.dag.collect_derivative_for_dataframe`
+  (dims are always sorted by encoded name: one identity per column).
 
 ### Added
 
@@ -61,7 +82,8 @@
   key-value convention (`Fit_alpha-0p5_w-6`, `alpha-0p5_w-6_Fit`, `alpha-0p5_w-6`) with
   `encode_number`/`decode_number` (`0p5`, `m1`), artifact suffix validation, output basenames (`<source>@<name><suffix>`), reference parsing, and
   reversible percent-encoded dataframe columns (`Name.nc@ch-C3_freq-8-12`, `Name.error`).
-  Not yet used by the pipeline; behaviour is unchanged.
+  Dataframe assembly uses the column functions (see Breaking); new
+  `neurodags.naming.ColumnCollisionError`.
 
 ### Changed
 

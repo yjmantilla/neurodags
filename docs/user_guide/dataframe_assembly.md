@@ -50,30 +50,117 @@ One row per source file. Each collected derivative becomes one or more columns.
 in the column names. Best for file-level features.
 
 ```
-file_path               BandPower.nc@freqbands-alpha  BandPower.nc@freqbands-beta  Entropy.json
-sub-01_task-rest.vhdr   0.32                          0.18                         1.24
-sub-02_task-rest.vhdr   0.27                          0.21                         1.11
+index  dataset  file_path              BandPower.nc@band-alpha_channel-Fp1  BandPower.nc@band-beta_channel-Fp1  Entropy.json
+0      demo     sub-01_task-rest.vhdr  0.32                                 0.18                                1.24
+1      demo     sub-02_task-rest.vhdr  0.27                                 0.21                                1.11
 ```
-
-Columns are named `<derivative name><artifact suffix>`, using the derivative's YAML name (not its
-on-disk CamelCase name). A `.nc` `DataArray` is flattened into one column per element, adding
-`@<dim>-<value>_<dim>-<value>...` (dimensions sorted alphabetically, coordinate values escaped:
-`-`→`~`, `_`→`|`, `@`→`$`, `,`→`.`). See
-{ref}`Dataframe column names <naming-dataframe-columns>` for how to read a column back.
 
 ### Long Format (`output_format="long"`)
 
-One row per collected value. `file_path` still refers to the source file, while
-the collected derivative value is identified in the `derivative` column. No
-column synthesis is performed. Best for multi-dimensional derivatives.
+One row per collected value, with the columns `index`, `dataset`, `file_path`, `derivative`
+and `value`. `derivative` holds the full wide column name, so both formats use the same
+identity. No column synthesis is performed. Best for multi-dimensional derivatives.
 
 ```
-file_path               derivative                     value
-sub-01_task-rest.vhdr   BandPower.nc@freqbands-alpha   0.32
-sub-01_task-rest.vhdr   BandPower.nc@freqbands-beta    0.18
-sub-01_task-rest.vhdr   Entropy.json                   1.24
-sub-02_task-rest.vhdr   BandPower.nc@freqbands-alpha   0.27
+file_path               derivative                           value
+sub-01_task-rest.vhdr   BandPower.nc@band-alpha_channel-Fp1  0.32
+sub-01_task-rest.vhdr   BandPower.nc@band-beta_channel-Fp1   0.18
+sub-01_task-rest.vhdr   Entropy.json                         1.24
+sub-02_task-rest.vhdr   BandPower.nc@band-alpha_channel-Fp1  0.27
 ```
+
+(dataframe-column-names)=
+
+## Column Names
+
+Every generated column is built by {func}`neurodags.naming.format_column`:
+
+```text
+<name><artifact suffix>                                   # one column per artifact
+<name><artifact suffix>@<dim>-<value>_<dim>-<value>...    # one column per DataArray element
+<name>.error                                              # the derivative failed for this file
+```
+
+- `<name>` is the derivative's YAML name, verbatim; `<artifact suffix>` is the artifact key
+  (`.nc`, `.json`, `.report.html`).
+- A `.nc` artifact holding an N-dimensional `xarray.DataArray` is flattened into one column
+  per element. Each element contributes one `dim-value` pair per dimension, joined by `_` and
+  **sorted by encoded dimension name**. 0-d arrays get no `@` part.
+- Dimension names are percent-encoded except `A-Z`, `a-z`, `0-9`; coordinate values are
+  percent-encoded except `A-Z`, `a-z`, `0-9`, `.`, `+`, `~`, `-`. Encoding is UTF-8 with
+  uppercase hex, so `_`, `@`, `%`, `,`, spaces and non-ASCII characters never appear literally.
+  Non-string coordinates are written with `str()` (`1.5`, `-1`, `None`).
+- Metadata columns (`index`, `dataset`, `file_path`) never contain `.`; generated columns always
+  do, so the two can never collide.
+
+| Coordinate | Column |
+|------------|--------|
+| `band="alpha"`, `channel="Fp1"` | `BandPower.nc@band-alpha_channel-Fp1` |
+| `band="8-12"` | `BandPower.nc@band-8-12` |
+| `freq=-1.5` | `Psd.nc@freq--1.5` |
+| `channel="EEG 001"` | `Psd.nc@channel-EEG%20001` |
+| `cond="a_b"` | `Erp.nc@cond-a%5Fb` |
+| dimension `freq_band`, value `alpha` | `Psd.nc@freq%5Fband-alpha` |
+
+The encoding is reversible: every column maps back to exactly one derivative, artifact and set
+of `(dimension, value)` pairs. To read one by hand, split at the first `@`, then the head at its
+first `.` (name and suffix), then the coordinates on `_` and each pair at its first `-`, and
+percent-decode. {func}`neurodags.naming.parse_column` does exactly this.
+
+**Collisions are errors.** If two coordinates, artifacts or derivatives would produce the same
+column (possible only with a non-unique coordinate index, or with mixed types such as `1` and
+`"1"` in one coordinate), the build stops with {class}`neurodags.naming.ColumnCollisionError`
+naming the column and both origins. This happens even with `raise_on_error=False`: a collision
+is a problem of the pipeline's outputs, not of one file, so it is never recorded in a
+`name.error` column. With `n_jobs > 1` the error is re-raised in the calling process; the
+`neurodags dataframe` CLI prints `neurodags: error: Dataframe column collision: ...` and exits
+with code `2`.
+
+**Errors.** With `raise_on_error=False`, a derivative that fails for a file leaves its message in
+the `<name>.error` column of that row (wide) or in a row with `derivative = "<name>.error"`
+(long).
+
+(dataframe-splitting-columns)=
+
+## Splitting Column Names
+
+The dataframe is **easy to split, not pre-split**: neurodags guarantees that every generated
+column name splits unambiguously, but does not add columns for the pieces. Which pieces you need
+(one column per dimension, parameters encoded in derivative names, pivots) depends on the
+analysis, so you split them yourself with the public helpers in {mod}`neurodags.naming`:
+{func}`~neurodags.naming.parse_column`, {func}`~neurodags.naming.decode_dim`,
+{func}`~neurodags.naming.decode_value`, {func}`~neurodags.naming.parse_entities` and
+{func}`~neurodags.naming.decode_number`.
+
+On the long format, parse the `derivative` column and expand the coordinates into one column per
+dimension. If your derivative names follow the key-value convention (`Fit_alpha-0p5_w-6`: base
+`Fit`, parameters `alpha=0p5`, `w=6`), {func}`~neurodags.naming.parse_entities` turns the name
+into parameter columns and {func}`~neurodags.naming.decode_number` reads `0p5` as `0.5`:
+
+<!-- tested by tests/test_dataframe_columns.py::test_docs_split_recipe -->
+
+```python
+import pandas as pd
+
+from neurodags.naming import decode_number, parse_column, parse_entities
+
+# df = build_derivative_dataframe("pipeline.yml", output_format="long")
+parsed = df["derivative"].map(parse_column)
+df["name"] = parsed.map(lambda p: p.name)
+df["suffix"] = parsed.map(lambda p: p.suffix)  # ".error" for error rows
+coords = pd.DataFrame([dict(p.coords) for p in parsed], index=df.index)
+df = df.join(coords)  # one column per dimension; values are strings ("8-12", "-1.5")
+
+# Optional: parameters encoded in derivative names (key-value convention).
+entities = df["name"].map(lambda n: (parse_entities(n) or (None, {}))[1])
+df = df.join(pd.DataFrame(entities.tolist(), index=df.index))
+df["alpha"] = df["alpha"].map(decode_number, na_action="ignore")  # "0p5" -> Decimal("0.5")
+```
+
+Coordinate values stay strings: convert them with `pd.to_numeric` where that makes sense. If a
+dimension name clashes with an existing column (for example a dimension called `value`), pass
+`rsuffix=` to `join` or rename the columns first. On the wide format, parse the column labels
+instead: `{c: parse_column(c) for c in df.columns}` maps metadata columns to `None`.
 
 ## Selecting Derivatives
 
