@@ -122,11 +122,13 @@ Quick summary of done / missing / errored counts per derivative — no CSV neede
 ```bash
 neurodags status pipeline.yml                        # summary table
 neurodags status pipeline.yml --derivative Alpha     # filter to one derivative
-neurodags status pipeline.yml --list-errors          # print errored file paths + .error paths
-neurodags status pipeline.yml --list-missing         # print missing file paths
+neurodags status pipeline.yml --list-errors          # errored files: [idx N] path + .error path
+neurodags status pipeline.yml --list-missing         # missing files: [idx N] path
 neurodags status pipeline.yml --list-errors --list-missing
 neurodags status pipeline.yml --n-jobs 4             # parallelize underlying dry-run
 neurodags status pipeline.yml --format json          # machine-readable JSON
+neurodags status pipeline.yml --format json --include-files   # + per-file records
+neurodags status pipeline.yml --format indices       # missing/errored indices for --only-index
 ```
 
 Exit code `0` only when all derivatives are complete (no missing, no errored); `1` otherwise.

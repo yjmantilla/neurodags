@@ -21,6 +21,31 @@
   `"id.1.subject"` or `"id.2.a.b"`) is no longer passed through verbatim — it now resolves
   as a field reference or raises an error.
 
+- **`neurodags status` reports file indices for `--only-index` resubmission** (#29): the
+  global file index — the one `--only-index` and the SLURM array templates consume — was
+  dropped from the status rows, so there was no direct way from "which files are
+  missing/errored" to "resubmit exactly those".
+  - `--list-missing` / `--list-errors` now print `[idx N] path`, sorted by index within each
+    derivative (the `error file:` lines are kept).
+    **Behaviour change:** scripts that scraped paths from these text lists see the new
+    `[idx N]` prefix; use `--format json` for machine consumption.
+  - `--format json` always adds `missing_indices` and `errored_indices` (sorted,
+    de-duplicated ints). All existing keys are unchanged.
+  - New `--include-files` (requires `--format json`) adds a flat `files` list with one
+    `{index, dataset, file_path, derivative, status, error_path}` record per
+    (source file, derivative) pair, sorted by `(index, derivative)`.
+  - New `--format indices` prints only the space-separated, sorted missing/errored indices
+    (narrowed by `--list-missing` / `--list-errors`), ready for `--only-index` or
+    `sbatch --array`. The exit code keeps its meaning (`1` when anything is missing or
+    errored), so guard `$(...)` with `|| true` under `set -e`.
+  - See the new "Resubmitting missing/errored files" section in the HPC guide (retry workers
+    must not use `skip_errors=True`; flat-array task IDs are not file indices).
+
+### Fixed
+
+- **`status --format json` with no input files emitted `No files found.`** (invalid JSON);
+  it now emits a valid document with zero counts, empty index lists and `"complete": true`.
+
 ## 0.3.1 — 2026-10-11
 
 ### Fixed
