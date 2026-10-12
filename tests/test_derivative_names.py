@@ -208,6 +208,13 @@ def test_non_string_yaml_key_is_rejected(tmp_path):
         ({"SourceFile": _chain()}, [], "reserved"),
         ({"Clean": _chain(), "Clean-1": _chain()}, [], "split"),
         ({"A": _chain("B.c.d@x")}, [], "step id=0"),
+        # Reference suffix grammar (spec section 5): checked at load, before any run.
+        ({"A": _chain("B..fif")}, [], "'B..fif'"),
+        ({"A": _chain("B.fif.")}, [], "'B.fif.'"),
+        ({"A": _chain("B._x.fif")}, [], "'B._x.fif'"),
+        ({"A": _chain("B.report.done")}, [], "'B.report.done'"),
+        ({"A": _chain("SourceFile.fif")}, [], "takes no artifact suffix"),
+        ({"A": _chain("sourcefile")}, [], "reserved"),
         ({"A": _chain()}, ["not ok"], "DerivativeList"),
     ],
 )

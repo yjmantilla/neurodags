@@ -5,7 +5,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 try:
     import numpy as np
@@ -33,6 +33,7 @@ from neurodags.naming import (
     ColumnCollisionError,
     find_column_collisions,
     format_column,
+    parse_reference,
     validate_artifact_suffixes,
 )
 from neurodags.nodes import get_node
@@ -304,11 +305,113 @@ class _MissingPrecomputedArtifacts(RuntimeError):
     """Raised when dataframe-only collection requires cached artifacts but none are available."""
 
 
-def _split_derivative_ref(derivative_ref: str) -> tuple[str, str | None]:
-    if "." in derivative_ref:
-        base, ext = derivative_ref.split(".", 1)
-        return base, ext
-    return derivative_ref, None
+_T = TypeVar("_T")
+
+
+class ArtifactSelectionError(LookupError):
+    """A ``derivative:`` reference does not select exactly one artifact (spec section 5).
+
+    Raised when ``Name.suffix`` names a suffix the derivative did not produce, or when a
+    bare ``Name`` refers to a derivative with zero or several artifacts. The message is the
+    same whether the referenced derivative was read from its ``.done`` manifest, computed
+    in the same run, or kept in memory (``save: false``), and it lists the available
+    suffixes. There is no fallback to another artifact or to the whole result.
+    """
+
+
+def artifact_selection_message(
+    consumer: str, ref: str, name: str, suffix: str | None, available: Sequence[str]
+) -> str:
+    """Return the :class:`ArtifactSelectionError` message (identical on every path)."""
+    listed = ", ".join(repr(s) for s in sorted(available)) or "none"
+    hint = f" Write the full suffix, e.g. '{name}{sorted(available)[0]}'." if available else ""
+    if suffix is None:
+        return (
+            f"Derivative {consumer!r}: reference {ref!r} has no artifact suffix, but "
+            f"derivative {name!r} produced {len(available)} artifacts (available suffixes: "
+            f"{listed}). A bare name is allowed only for a derivative with exactly one "
+            f"artifact.{hint}"
+        )
+    return (
+        f"Derivative {consumer!r}: reference {ref!r} selects artifact {suffix!r}, which "
+        f"derivative {name!r} did not produce (available suffixes: {listed}). References "
+        f"select the artifact whose suffix is exactly the text after the name.{hint}"
+    )
+
+
+def select_artifact(
+    artifacts: Mapping[str, _T],
+    name: str,
+    suffix: str | None,
+    *,
+    consumer: str,
+    ref: str,
+) -> tuple[str, _T]:
+    """Select the artifact a reference names (spec section 5).
+
+    Parameters
+    ----------
+    artifacts : Mapping[str, T]
+        The referenced derivative's artifacts keyed by suffix: the ``.done`` manifest's
+        ``{suffix: [paths]}`` or ``NodeResult.artifacts``.
+    name, suffix : str, str or None
+        The parsed reference (:func:`neurodags.naming.parse_reference`).
+    consumer, ref : str
+        The referencing derivative and the reference as written, for the error message.
+
+    Returns
+    -------
+    tuple[str, T]
+        The selected suffix and value. ``Name.suffix`` selects the key equal to ``suffix``
+        (string equality); a bare ``Name`` selects the only artifact.
+
+    Raises
+    ------
+    ArtifactSelectionError
+        When the suffix is absent, or a bare name refers to zero or several artifacts.
+    """
+    if suffix is None:
+        if len(artifacts) == 1:
+            return next(iter(artifacts.items()))
+    elif suffix in artifacts:
+        return suffix, artifacts[suffix]
+    raise ArtifactSelectionError(
+        artifact_selection_message(consumer, ref, name, suffix, list(artifacts))
+    )
+
+
+def _select_or_fail(
+    artifacts: Mapping[str, _T],
+    *,
+    name: str,
+    suffix: str | None,
+    consumer: str,
+    ref: str,
+    sid: Any,
+    error_prefix: str | None,
+) -> tuple[str, _T]:
+    """:func:`select_artifact` inside ``run_derivative``: a failure fails the consumer unit.
+
+    On :class:`ArtifactSelectionError` the consumer's ``.error`` marker is written (when it
+    saves, i.e. *error_prefix* is set) and the error is re-raised.
+    """
+    try:
+        return select_artifact(artifacts, name, suffix, consumer=consumer, ref=ref)
+    except ArtifactSelectionError as exc:
+        log.error(
+            "Artifact selection failed",
+            derivative=consumer,
+            id=sid,
+            child_derivative=ref,
+            available=sorted(artifacts),
+        )
+        if error_prefix is not None:
+            publish_marker(
+                error_prefix,
+                "error",
+                f"Derivative '{consumer}' step id={sid} derivative='{ref}' failed:\n{exc!s}\n",
+            )
+        raise
 
 
 # ---------- executor ----------
@@ -342,6 +445,8 @@ def run_derivative(
 
     Normal mode:
       - 'derivative' steps: if cached and overwrite=False, skip compute; else compute or recurse.
+        The referenced artifact is selected exactly (:func:`select_artifact`) on every path;
+        a failed selection raises :class:`ArtifactSelectionError`.
       - 'node' steps: execute; if it's the last step, validate the artifact suffixes, delete
         the old ``.done``, write every artifact, then publish the ``.done`` manifest
         atomically from the paths the writers reported.
@@ -463,22 +568,43 @@ def run_derivative(
                 _record(id=sid, kind="source", name="SourceFile", path=file_path)
                 continue
 
-            base_name, ext = _split_derivative_ref(derivative_ref)
+            base_name, ref_suffix = parse_reference(derivative_ref)
             prefix = output_prefix(base_reference, base_name)
             child_cached = _cached_unit(prefix, base_name)
-            candidates = _main_files(child_cached) if child_cached is not None else []
-            if ext:
-                candidates = [p for p in candidates if p.endswith("." + ext)]
+
+            selection = {
+                "name": base_name,
+                "suffix": ref_suffix,
+                "consumer": derivative_name,
+                "ref": derivative_ref,
+                "sid": sid,
+                "error_prefix": final_prefix,
+            }
 
             if dry_run:
+                selected: str | None = None
+                selection_problem: str | None = None
+                if child_cached is not None:
+                    try:
+                        selected = select_artifact(
+                            child_cached,
+                            base_name,
+                            ref_suffix,
+                            consumer=derivative_name,
+                            ref=derivative_ref,
+                        )[1][0]
+                    except ArtifactSelectionError as exc:
+                        selection_problem = str(exc)
                 entry: dict[str, Any] = {
                     "id": sid,
                     "kind": "derivative",
                     "name": derivative_ref,
                     "prefix": prefix,
-                    "cached": len(candidates) > 0,
-                    "paths": candidates,
+                    "cached": selected is not None,
+                    "paths": [selected] if selected is not None else [],
                 }
+                if selection_problem is not None:
+                    entry["selection_problem"] = selection_problem
                 if base_name in list_derivative_definitions():
                     sub_def = get_derivative_definition(base_name).definition
                     entry["subderivative_plan"] = run_derivative(
@@ -504,26 +630,19 @@ def run_derivative(
                 child_overwrite = bool(
                     get_derivative_definition(base_name).definition.get("overwrite", False)
                 )
-            cached_here = (len(candidates) > 0) and not child_overwrite
-            if cached_here:
+            if child_cached is not None and not child_overwrite:
+                # Done unit: select by suffix key from its manifest and pass the main file
+                # (MNE split parts are loaded through it).
+                _, paths = _select_or_fail(child_cached, **selection)
                 log.debug(
                     "Using cached derivative",
                     derivative=derivative_name,
                     id=sid,
                     child_derivative=derivative_ref,
-                    paths=candidates,
+                    path=paths[0],
                 )
-                store[sid] = candidates[0]  # marker
-                if len(candidates) > 1:
-                    log.warning(
-                        "Multiple cached artifacts found, using the first one",
-                        derivative=derivative_name,
-                        child_derivative=derivative_ref,
-                        reference_base=reference_base,
-                        candidates=candidates,
-                        selected=candidates[0],
-                    )
-                last_result = {"cached": candidates}
+                store[sid] = paths[0]
+                last_result = {"cached": [paths[0]]}
                 continue
 
             if base_name in list_derivative_definitions():
@@ -574,42 +693,21 @@ def run_derivative(
                         }
                     raise SkipDerivative(f"Sub-derivative '{base_name}' was skipped")
 
-                # If the sub-derivative early-returned its cached-file dict
-                # ({"cached": [path, ...]}) instead of a NodeResult, resolve it
-                # to the matching path so downstream nodes receive a plain path
-                # string rather than the internal bookkeeping dict.
-                if isinstance(sub_result, dict) and "cached" in sub_result:
-                    cached_paths = sub_result["cached"]
-                    if ext:
-                        filtered = [p for p in cached_paths if p.endswith("." + ext)]
-                        store[sid] = (
-                            filtered[0]
-                            if filtered
-                            else (cached_paths[0] if cached_paths else sub_result)
-                        )
-                    else:
-                        store[sid] = cached_paths[0] if cached_paths else sub_result
-                    last_result = last_result  # cached sub-derivative; last_result unchanged
+                # The sub-derivative was done and early-returned its manifest
+                # ({"cached": [...], "artifacts": {suffix: [paths]}}): select by suffix key
+                # and pass the main file, exactly as for a cached child above.
+                if isinstance(sub_result, dict) and "artifacts" in sub_result:
+                    _, paths = _select_or_fail(sub_result["artifacts"], **selection)
+                    store[sid] = paths[0]
                     continue
 
-                # If a specific artifact suffix was requested (e.g. "derivative:
-                # Splitter.condA.fif"), narrow the in-memory NodeResult to just
-                # that artifact so downstream nodes receive the right object.
-                # This mirrors the on-disk filter already applied via
-                # `candidates = [p for p in candidates if p.endswith("." + ext)]`.
-                if isinstance(sub_result, NodeResult) and ext:
-                    target = "." + ext
-                    if target in sub_result.artifacts:
-                        sub_result = NodeResult(artifacts={target: sub_result.artifacts[target]})
-                    else:
-                        log.warning(
-                            "Artifact suffix not found in sub-derivative; "
-                            "passing full NodeResult",
-                            requested_suffix=target,
-                            available=list(sub_result.artifacts.keys()),
-                            parent_derivative=derivative_name,
-                            child_derivative=derivative_ref,
-                        )
+                # Freshly computed (save: true) or in-memory (save: false) NodeResult:
+                # select by suffix key; Name.suffix passes a NodeResult holding only that
+                # artifact, a bare Name (single artifact) the NodeResult itself.
+                if isinstance(sub_result, NodeResult):
+                    key, artifact = _select_or_fail(sub_result.artifacts, **selection)
+                    if ref_suffix is not None:
+                        sub_result = NodeResult(artifacts={key: artifact})
                 store[sid] = sub_result
                 last_result = sub_result if isinstance(sub_result, NodeResult) else last_result
             else:
