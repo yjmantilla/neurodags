@@ -55,6 +55,14 @@
   a file lies strictly below `source_root`), `check_derivatives_subdir`,
   `effective_derivatives_base` and `inspect_dataset_paths`.
 
+- **Internal `neurodags.naming` module** (#49, #50): pure functions that define the 0.4.0
+  naming rules in one place: derivative-name grammar and validation (string keys, reserved
+  `SourceFile`, case-insensitive uniqueness, the `X`/`X-1` split-file rule), the optional
+  key-value convention (`Fit_alpha-0p5_w-6`, `alpha-0p5_w-6_Fit`, `alpha-0p5_w-6`) with
+  `encode_number`/`decode_number` (`0p5`, `m1`), artifact suffix validation, output basenames (`<source>@<name><suffix>`), reference parsing, and
+  reversible percent-encoded dataframe columns (`Name.nc@ch-C3_freq-8-12`, `Name.error`).
+  Not yet used by the pipeline; behaviour is unchanged.
+
 ### Changed
 
 - Example pipelines and datasets (`example_pipelines/`), the documentation and the gallery
