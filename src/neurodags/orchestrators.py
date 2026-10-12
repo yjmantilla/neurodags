@@ -189,7 +189,7 @@ def iterate_derivative_pipeline(
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
-) -> None | pd.DataFrame:
+) -> pd.DataFrame | None:
     """
     Iterate over all files specified in the pipeline configuration and call a given function on each file.
 
@@ -619,7 +619,7 @@ def run_pipeline(
     n_jobs: int | None = None,
     joblib_backend: str | None = None,
     joblib_prefer: str | None = None,
-) -> None | pd.DataFrame:
+) -> pd.DataFrame | None:
     """
     Execute multiple derivatives from a pipeline configuration in dependency order.
 
