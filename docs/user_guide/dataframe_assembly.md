@@ -50,10 +50,16 @@ One row per source file. Each collected derivative becomes one or more columns.
 in the column names. Best for file-level features.
 
 ```
-file_path               BandPower@alpha  BandPower@beta  Entropy
-sub-01_task-rest.vhdr   0.32             0.18            1.24
-sub-02_task-rest.vhdr   0.27             0.21            1.11
+file_path               BandPower.nc@freqbands-alpha  BandPower.nc@freqbands-beta  Entropy.json
+sub-01_task-rest.vhdr   0.32                          0.18                         1.24
+sub-02_task-rest.vhdr   0.27                          0.21                         1.11
 ```
+
+Columns are named `<derivative name><artifact suffix>`, using the derivative's YAML name (not its
+on-disk CamelCase name). A `.nc` `DataArray` is flattened into one column per element, adding
+`@<dim>-<value>_<dim>-<value>...` (dimensions sorted alphabetically, coordinate values escaped:
+`-`→`~`, `_`→`|`, `@`→`$`, `,`→`.`). See
+{ref}`Dataframe column names <naming-dataframe-columns>` for how to read a column back.
 
 ### Long Format (`output_format="long"`)
 
@@ -62,11 +68,11 @@ the collected derivative value is identified in the `derivative` column. No
 column synthesis is performed. Best for multi-dimensional derivatives.
 
 ```
-file_path               derivative               value
-sub-01_task-rest.vhdr   BandPower@alpha          0.32
-sub-01_task-rest.vhdr   BandPower@beta           0.18
-sub-01_task-rest.vhdr   Entropy                  1.24
-sub-02_task-rest.vhdr   BandPower@alpha          0.27
+file_path               derivative                     value
+sub-01_task-rest.vhdr   BandPower.nc@freqbands-alpha   0.32
+sub-01_task-rest.vhdr   BandPower.nc@freqbands-beta    0.18
+sub-01_task-rest.vhdr   Entropy.json                   1.24
+sub-02_task-rest.vhdr   BandPower.nc@freqbands-alpha   0.27
 ```
 
 ## Selecting Derivatives

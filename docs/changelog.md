@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Colliding or layout-breaking derivative names silently shared cached outputs** (#42):
+  derivative names are converted with `snake_to_camel` to build file names
+  (`<source>@<OnDiskName><artifact suffix>`), so two different derivatives such as `band_power`
+  and `BandPower` both wrote and read `@BandPower` files; because caching is existence-based,
+  the second one silently reused the first one's output. Every name in `DerivativeDefinitions`
+  is now validated up front (not only the run set: dependencies are pulled in and all
+  derivatives share the derivatives directory), raising a `ValueError` that lists each problem:
+  - two names with the same on-disk name — the message names both YAML names and the shared
+    `@<OnDiskName>` — or on-disk names equal up to case (the same file on case-insensitive
+    filesystems, e.g. `Bandpower` / `band_power`);
+  - names containing `.` (the artifact-suffix separator: `Fit.v2`'s files `@Fit.v2.*` matched
+    `Fit`'s cache lookup `@Fit.*`, so `Fit` was never computed and its dataframe columns showed
+    `Fit.v2`'s data), `@` (breaks the one-`@`-per-file-name rule), `/` or `\` (path separators:
+    the write failed), or the glob characters `*`, `?`, `[`, `]` (the cache lookup globbed them:
+    `F*` treated `@Fit…` files as its own);
+  - the reserved name `SourceFile` and the empty name (`derivative: SourceFile` always means the
+    raw input, so such a derivative could never be referenced).
+
+  The check runs in `neurodags validate` (exit code 1) and before anything is written in
+  `run_pipeline` / `iterate_derivative_pipeline` / `build_derivative_dataframe` (and hence
+  `neurodags run`, `dry-run`, `status`, `count-inputs`, `dataframe`), so it is never swallowed
+  into per-file error records. New helpers `neurodags.utils.derivative_file_names` and
+  `check_derivative_names`.
+  **Behaviour change:** pipelines with such names now fail fast; they were producing wrong
+  results (or failing per file) before. Rename the derivative(s). On-disk naming of all valid
+  names is unchanged.
+
+### Changed
+
+- **On-disk derivative names are shown** (#42): `neurodags validate` lists each derivative whose
+  on-disk name differs from its YAML name (e.g. `fit_w_l06 -> files named @FitWL06`). The naming
+  rule itself is unchanged: it keeps the derivative name a single token without `_` (a
+  separator in many naming conventions, including BIDS), and existing caches keep working.
+
+### Added
+
+- **"File Naming Conventions" docs page** (`user_guide/naming.md`, #42), linked from the
+  pipeline YAML guide, Core Concepts and Dataframe Assembly: the `@` / `&` output-name rules,
+  the derivative-name conversion and the rejected names, artifact suffixes (must start with
+  `.`), `.error` / `.skip` markers, how `derivative: Name.ext` references are parsed (YAML name,
+  split at the first `.`), reserved arg strings (`id.N`, `id.N.field`, `$var`, `eval%`), the
+  output layout (common root, single-file datasets, no `derivatives_path`, `code/` snapshot) and
+  dataframe column names (YAML name, flattened `@dim-value_...` suffixes and their escaping, how
+  to read a column back), with a worked example tree and a Do / Don't table. Core Concepts'
+  output example now shows the source extension (`sub-1.fif@CleanedEEG.fif`), and Dataframe
+  Assembly's example columns now match the real format (`BandPower.nc@freqbands-alpha`). The
+  `snake_to_camel` docstring explains why the conversion exists.
+
 ## 0.3.4 — 2026-10-12
 
 ### Added

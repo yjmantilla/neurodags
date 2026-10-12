@@ -24,7 +24,7 @@ from neurodags.orchestrators import (
     build_derivative_dataframe,
     run_pipeline,
 )
-from neurodags.utils import resolve_dataset_paths
+from neurodags.utils import check_derivative_names, resolve_dataset_paths
 
 
 def _save_dataframe(df: pd.DataFrame, output_path: str | None, default_name: str) -> Path:
@@ -799,10 +799,12 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             args.config, datasets_input=args.datasets
         )
         resolved_paths = resolve_dataset_paths(datasets, mount_point)
+        file_names = check_derivative_names(config.get("DerivativeDefinitions") or {})
     except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     defs = config.get("DerivativeDefinitions") or {}
+    renamed = {name: fname for name, fname in file_names.items() if name != fname}
     defined = list(defs.keys())
     derivative_list = list(config.get("DerivativeList") or [])
 
@@ -825,6 +827,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if fields["exclude_pattern"]:
             print(f"  {ds_name}.exclude_pattern: {fields['exclude_pattern']}")
     print(f"derivatives_defined ({len(defined)}): {', '.join(defined) or 'none'}")
+    if renamed:
+        print(f"on-disk names differing from YAML names ({len(renamed)}):")
+        for name, fname in renamed.items():
+            print(f"  {name} -> files named @{fname}")
     print(f"run_set [{selection_source}] ({len(selected)}): {', '.join(selected) or 'none'}")
     print(f"computed_with_dependencies ({len(computed)}): {', '.join(computed) or 'none'}")
     if deps_only:
