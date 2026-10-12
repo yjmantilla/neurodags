@@ -109,6 +109,8 @@ Beta                        42     25       15        2
 Total                       84     55       25        4
 
 2 error(s) found.  Run with --list-errors for details.
+25 derivative(s) missing.  Run with --list-missing for details.
+Use --format indices to get the file indices for --only-index resubmission.
 ```
 
 **Status definitions:**
@@ -125,10 +127,10 @@ Total                       84     55       25        4
 # show only specific derivatives
 neurodags status pipeline.yml --derivative Alpha --derivative Beta
 
-# print the file path of each errored file
+# print the file index and path of each errored file
 neurodags status pipeline.yml --list-errors
 
-# print the file path of each missing file
+# print the file index and path of each missing file
 neurodags status pipeline.yml --list-missing
 
 # combine both
@@ -139,14 +141,27 @@ neurodags status pipeline.yml --n-jobs 4
 neurodags status pipeline.yml --n-jobs -1   # all cores
 ```
 
-With `--list-errors` the `.error` marker file path is shown alongside each failed input, making it easy to inspect or delete:
+Each listed file is prefixed with its global **file index** — the same index that
+`neurodags run --only-index` and the SLURM array templates consume — and files are sorted by
+index within each derivative. With `--list-errors` the `.error` marker file path is shown
+alongside each failed input, making it easy to inspect or delete:
 
 ```
 Errored files:
   [Alpha]
-    /data/sub-01/ses-01/sub-01_task-rest.vhdr
+    [idx 0] /data/sub-01/ses-01/sub-01_task-rest.vhdr
       error file: /derivatives/sub-01/ses-01/sub-01_task-rest.vhdr@Alpha.error
+
+Missing files:
+  [Alpha]
+    [idx 7] /data/sub-02/ses-01/sub-02_task-rest.vhdr
+    [idx 12] /data/sub-05/ses-01/sub-05_task-rest.vhdr
 ```
+
+The index is a position in the discovered input list (datasets in config order, files in
+discovery order). It identifies the same file only while the dataset configuration and the
+set of input files are unchanged — regenerate it right before resubmitting, don't store it.
+If an index cannot be determined it is shown as `[idx ?]`.
 
 **Exit codes:** `0` only when all derivatives are complete (no missing, no errored); `1` when any derivative is missing or has a `.error` marker. This makes `status` usable in shell scripts and CI dependency chains:
 
@@ -166,12 +181,65 @@ neurodags status pipeline.yml --format json
   "config": "pipeline.yml",
   "n_files": 42,
   "derivatives": {
-    "Alpha": {"total": 42, "done": 30, "missing": 10, "errored": 2}
+    "Alpha": {"total": 42, "done": 30, "skipped": 0, "missing": 10, "errored": 2}
   },
-  "grand_total": {"total": 42, "done": 30, "missing": 10, "errored": 2},
-  "complete": false
+  "grand_total": {"total": 42, "done": 30, "skipped": 0, "missing": 10, "errored": 2},
+  "complete": false,
+  "missing_indices": [3, 7, 12, 15, 18, 21, 25, 30, 33, 40],
+  "errored_indices": [0, 9]
 }
 ```
+
+`missing_indices` / `errored_indices` are the sorted, de-duplicated file indices with at least
+one missing / errored derivative (across the selected derivatives; narrow with
+`--derivative`). A file can appear in both lists if it is missing for one derivative and
+errored for another.
+
+Add `--include-files` (only valid with `--format json`) for a per-file breakdown: a flat
+`files` list with one record per *(source file, derivative)* pair, sorted by `(index,
+derivative)`:
+
+```bash
+neurodags status pipeline.yml --format json --include-files
+```
+
+```json
+  "files": [
+    {"index": 0, "dataset": "my_dataset", "file_path": "/data/sub-01/ses-01/sub-01_task-rest.vhdr",
+     "derivative": "Alpha", "status": "errored",
+     "error_path": "/derivatives/sub-01/ses-01/sub-01_task-rest.vhdr@Alpha.error"},
+    {"index": 1, "dataset": "my_dataset", "file_path": "/data/sub-02/ses-01/sub-02_task-rest.vhdr",
+     "derivative": "Alpha", "status": "done", "error_path": null}
+  ]
+```
+
+`status` is one of `done`, `skipped`, `missing`, `errored`, `no-save`, `unknown`. When no
+input files are found, `--format json` still emits a valid document (zero counts, empty
+index lists, `"complete": true`).
+
+**Index-only output:** `--format indices` prints nothing but the sorted, space-separated file
+indices that are missing or errored — ready to paste into `--only-index` or `sbatch --array`.
+Narrow it with `--list-missing` (missing only) or `--list-errors` (errored only); with neither
+or both flags it prints the union. A complete pipeline prints an empty line.
+
+```bash
+neurodags status pipeline.yml --format indices                  # e.g. "0 3 7 9 12"
+neurodags status pipeline.yml --format indices --list-errors    # errored only: "0 9"
+neurodags status pipeline.yml --derivative Alpha --format indices
+```
+
+The exit code keeps its meaning in every format: `1` whenever something is missing or
+errored, i.e. exactly when the list is non-empty. Under `set -e`, capturing it with `$(...)`
+aborts the script precisely when there is something to resubmit, so guard it:
+
+```bash
+IDX=$(neurodags status pipeline.yml --format indices 2>/dev/null || true)
+[ -n "$IDX" ] && neurodags run pipeline.yml --only-index $IDX
+```
+
+(`|| true` also hides real failures such as a broken config — those print nothing on stdout,
+so `IDX` is empty; check stderr if a resubmission list is unexpectedly empty.)
+See {doc}`hpc` for resubmitting through SLURM.
 
 ## DAG Visualization (Mermaid)
 

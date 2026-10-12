@@ -122,11 +122,13 @@ Quick at-a-glance summary of done / missing / errored counts per derivative — 
 ```bash
 neurodags status pipeline.yml                        # summary table for all derivatives
 neurodags status pipeline.yml --derivative Alpha     # filter to one derivative
-neurodags status pipeline.yml --list-errors          # print errored file paths + .error file paths
-neurodags status pipeline.yml --list-missing         # print paths of not-yet-computed files
+neurodags status pipeline.yml --list-errors          # errored files: [idx N] path + .error path
+neurodags status pipeline.yml --list-missing         # missing files: [idx N] path
 neurodags status pipeline.yml --list-errors --list-missing
 neurodags status pipeline.yml --n-jobs 4             # parallelize the underlying dry-run
 neurodags status pipeline.yml --format json          # machine-readable JSON output
+neurodags status pipeline.yml --format json --include-files   # + per-file records
+neurodags status pipeline.yml --format indices       # missing/errored indices for --only-index
 ```
 
 Example output:
@@ -144,6 +146,7 @@ Total                       84     55       25        4
 
 2 error(s) found.  Run with --list-errors for details.
 4 derivative(s) missing.  Run with --list-missing for details.
+Use --format indices to get the file indices for --only-index resubmission.
 ```
 
 Exit code `0` only when all derivatives are complete (no missing, no errored); `1` otherwise — suitable for CI and shell dependency chains:

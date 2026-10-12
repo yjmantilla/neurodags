@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from neurodags.cli import main
 
@@ -500,6 +501,8 @@ def test_status_list_errors_prints_file_paths(dummy_pipeline, capsys):
     fake_df = _status_df(
         [
             {
+                "index": 3,
+                "dataset": "ds",
                 "derivative": "BasicPrep",
                 "file_path": "/data/sub-01.vhdr",
                 "plan": _make_plan(
@@ -514,8 +517,8 @@ def test_status_list_errors_prints_file_paths(dummy_pipeline, capsys):
     ):
         main(["status", "pipeline.yml", "--list-errors"])
     out = capsys.readouterr().out
-    assert "/data/sub-01.vhdr" in out
-    assert "/out/sub-01@BasicPrep.error" in out
+    assert "[idx 3] /data/sub-01.vhdr" in out
+    assert "error file: /out/sub-01@BasicPrep.error" in out
 
 
 def test_status_list_missing_prints_file_paths(dummy_pipeline, capsys):
@@ -523,6 +526,8 @@ def test_status_list_missing_prints_file_paths(dummy_pipeline, capsys):
     fake_df = _status_df(
         [
             {
+                "index": 5,
+                "dataset": "ds",
                 "derivative": "BasicPrep",
                 "file_path": "/data/sub-02.vhdr",
                 "plan": _make_plan(cached=False, has_error=False),
@@ -535,7 +540,7 @@ def test_status_list_missing_prints_file_paths(dummy_pipeline, capsys):
     ):
         main(["status", "pipeline.yml", "--list-missing"])
     out = capsys.readouterr().out
-    assert "/data/sub-02.vhdr" in out
+    assert "[idx 5] /data/sub-02.vhdr" in out
 
 
 def test_status_no_list_errors_hint_shown(dummy_pipeline, capsys):
@@ -608,6 +613,253 @@ def test_status_njobs_passed_to_run_pipeline(dummy_pipeline, capsys):
         main(["status", "pipeline.yml", "--n-jobs", "4"])
         _, kwargs = mock_run.call_args
         assert kwargs.get("n_jobs") == 4
+
+
+def _indexed_status_df() -> pd.DataFrame:
+    """Two derivatives, four files, mixed statuses, deliberately out of index order.
+
+    Row labels (0..n) are unrelated to the global ``index`` column, as in the real
+    dry-run dataframe (``pd.concat(..., ignore_index=True)``). Indices are numpy int64.
+    """
+    rows = [
+        # BasicPrep: 9 errored, 4 missing, 1 missing, 2 done
+        (
+            "BasicPrep",
+            9,
+            "/d/i.vhdr",
+            _make_plan(cached=False, has_error=True, error_path="/o/i.e"),
+        ),
+        ("BasicPrep", 4, "/d/e.vhdr", _make_plan(cached=False, has_error=False)),
+        ("BasicPrep", 1, "/d/b.vhdr", _make_plan(cached=False, has_error=False)),
+        ("BasicPrep", 2, "/d/c.vhdr", _make_plan(cached=True, has_error=False)),
+        # Spectrum: 4 errored, 1 done
+        ("Spectrum", 4, "/d/e.vhdr", _make_plan(cached=False, has_error=True, error_path="/o/e.e")),
+        ("Spectrum", 1, "/d/b.vhdr", _make_plan(cached=True, has_error=False)),
+    ]
+    df = pd.DataFrame(
+        [
+            {"index": idx, "dataset": "ds", "derivative": d, "file_path": fp, "plan": plan}
+            for d, idx, fp, plan in rows
+        ]
+    )
+    df["index"] = df["index"].astype("int64")
+    return df
+
+
+def _run_status_with(dummy_pipeline, fake_df, argv):
+    cfg = dummy_pipeline["config"]
+    with (
+        patch("neurodags.cli._load_pipeline_config", return_value=cfg),
+        patch("neurodags.cli.run_pipeline", return_value=fake_df),
+    ):
+        return main(["status", "pipeline.yml", *argv])
+
+
+def test_status_list_missing_shows_index_sorted(dummy_pipeline, capsys):
+    rc = _run_status_with(dummy_pipeline, _indexed_status_df(), ["--list-missing"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    section = out[out.index("Missing files:") :]
+    assert "  [BasicPrep]" in section
+    lines = [ln.strip() for ln in section.splitlines() if ln.strip().startswith("[idx")]
+    assert lines == ["[idx 1] /d/b.vhdr", "[idx 4] /d/e.vhdr"]
+    # summary table unchanged
+    assert "Total" in out
+
+
+def test_status_list_errors_shows_index_and_error_file(dummy_pipeline, capsys):
+    _run_status_with(dummy_pipeline, _indexed_status_df(), ["--list-errors"])
+    out = capsys.readouterr().out
+    section = out[out.index("Errored files:") :]
+    assert section.index("[BasicPrep]") < section.index("[idx 9] /d/i.vhdr")
+    assert section.index("[Spectrum]") < section.index("[idx 4] /d/e.vhdr")
+    assert "error file: /o/i.e" in section
+    assert "error file: /o/e.e" in section
+
+
+def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys):
+    rc = _run_status_with(dummy_pipeline, _indexed_status_df(), ["--format", "json"])
+    data = json.loads(capsys.readouterr().out)  # also guards numpy int64 serialisation
+    assert rc == 1
+    assert set(data) == {
+        "config",
+        "n_files",
+        "derivatives",
+        "grand_total",
+        "complete",
+        "missing_indices",
+        "errored_indices",
+    }
+    assert data["missing_indices"] == [1, 4]
+    assert data["errored_indices"] == [4, 9]
+    assert all(type(i) is int for i in data["missing_indices"] + data["errored_indices"])
+    for counts in data["derivatives"].values():
+        assert set(counts) == {"total", "done", "skipped", "missing", "errored"}
+    assert data["derivatives"]["BasicPrep"] == {
+        "total": 4,
+        "done": 1,
+        "skipped": 0,
+        "missing": 2,
+        "errored": 1,
+    }
+    assert data["n_files"] == 4
+    assert "files" not in data
+
+
+def test_status_json_include_files(dummy_pipeline, capsys):
+    _run_status_with(dummy_pipeline, _indexed_status_df(), ["--format", "json", "--include-files"])
+    data = json.loads(capsys.readouterr().out)
+    files = data["files"]
+    assert len(files) == 6
+    assert [(f["index"], f["derivative"]) for f in files] == [
+        (1, "BasicPrep"),
+        (1, "Spectrum"),
+        (2, "BasicPrep"),
+        (4, "BasicPrep"),
+        (4, "Spectrum"),
+        (9, "BasicPrep"),
+    ]
+    assert set(files[0]) == {"index", "dataset", "file_path", "derivative", "status", "error_path"}
+    rec = next(f for f in files if f["index"] == 4 and f["derivative"] == "Spectrum")
+    assert rec == {
+        "index": 4,
+        "dataset": "ds",
+        "file_path": "/d/e.vhdr",
+        "derivative": "Spectrum",
+        "status": "errored",
+        "error_path": "/o/e.e",
+    }
+    assert files[0]["error_path"] is None
+
+
+def test_status_include_files_requires_json(dummy_pipeline, capsys):
+    with (
+        patch("neurodags.cli.run_pipeline") as mock_run,
+        pytest.raises(SystemExit) as exc,
+    ):
+        main(["status", "pipeline.yml", "--include-files"])
+    assert exc.value.code == 2
+    mock_run.assert_not_called()
+    assert "--include-files requires --format json" in capsys.readouterr().err
+
+
+def test_status_format_indices_union_and_narrowing(dummy_pipeline, capsys):
+    cases = [
+        ([], "1 4 9"),
+        (["--list-missing"], "1 4"),
+        (["--list-errors"], "4 9"),
+        (["--list-missing", "--list-errors"], "1 4 9"),
+    ]
+    for extra, expected in cases:
+        rc = _run_status_with(dummy_pipeline, _indexed_status_df(), ["--format", "indices", *extra])
+        out = capsys.readouterr().out
+        assert out == expected + "\n", extra
+        assert rc == 1
+
+
+def test_status_format_indices_complete_prints_empty_line_exit_0(dummy_pipeline, capsys):
+    df = pd.DataFrame(
+        [
+            {
+                "index": 0,
+                "dataset": "ds",
+                "derivative": "BasicPrep",
+                "file_path": "a.vhdr",
+                "plan": _make_plan(cached=True, has_error=False),
+            }
+        ]
+    )
+    rc = _run_status_with(dummy_pipeline, df, ["--format", "indices"])
+    assert rc == 0
+    assert capsys.readouterr().out == "\n"
+
+
+def test_status_empty_result_json_is_valid(dummy_pipeline, capsys):
+    rc = _run_status_with(dummy_pipeline, pd.DataFrame(), ["--format", "json", "--include-files"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert data["n_files"] == 0
+    assert data["derivatives"] == {}
+    assert data["grand_total"] == {
+        "total": 0,
+        "done": 0,
+        "skipped": 0,
+        "missing": 0,
+        "errored": 0,
+    }
+    assert data["complete"] is True
+    assert data["missing_indices"] == []
+    assert data["errored_indices"] == []
+    assert data["files"] == []
+
+
+def test_status_empty_result_indices_prints_empty_line(dummy_pipeline, capsys):
+    rc = _run_status_with(dummy_pipeline, None, ["--format", "indices"])
+    assert rc == 0
+    assert capsys.readouterr().out == "\n"
+
+
+def test_status_rows_without_index_column_do_not_crash(dummy_pipeline, capsys):
+    df = _status_df(
+        [
+            {
+                "derivative": "BasicPrep",
+                "file_path": "/d/x.vhdr",
+                "plan": _make_plan(cached=False, has_error=False),
+            }
+        ]
+    )
+    rc = _run_status_with(dummy_pipeline, df, ["--list-missing"])
+    assert rc == 1
+    assert "[idx ?] /d/x.vhdr" in capsys.readouterr().out
+
+    _run_status_with(dummy_pipeline, df, ["--format", "json", "--include-files"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["missing_indices"] == []
+    assert data["files"][0]["index"] is None
+    assert data["files"][0]["dataset"] is None
+
+
+def test_status_index_round_trips_to_only_index(dummy_pipeline, tmp_path, capsys):
+    """The index printed by `status` is the one `--only-index` consumes (#29)."""
+    import yaml
+
+    from neurodags.orchestrators import iterate_derivative_pipeline, run_pipeline
+
+    cfg = dummy_pipeline["config"]
+    pipeline_yml = tmp_path / "pipeline.yml"
+    pipeline_yml.write_text(yaml.safe_dump(cfg))
+
+    # Compute BasicPrep for file index 1 only.
+    iterate_derivative_pipeline(cfg, "BasicPrep", only_index=1, raise_on_error=True)
+    capsys.readouterr()
+
+    status_argv = ["status", str(pipeline_yml), "--derivative", "BasicPrep"]
+    rc = main([*status_argv, "--format", "indices"])
+    assert rc == 1
+    assert capsys.readouterr().out == "0\n"
+
+    main([*status_argv, "--format", "json", "--include-files"])
+    files = json.loads(capsys.readouterr().out)["files"]
+    by_index = {f["index"]: f for f in files}
+    assert by_index[0]["status"] == "missing"
+    assert by_index[1]["status"] == "done"
+    missing_path = by_index[0]["file_path"]
+
+    # The text list shows the same index next to the same path.
+    main([*status_argv, "--list-missing"])
+    assert f"[idx 0] {missing_path}" in capsys.readouterr().out
+
+    # Feeding that index to only_index targets exactly that file ...
+    plan = run_pipeline(cfg, derivatives=["BasicPrep"], dry_run=True, only_index=[0])
+    assert list(plan["file_path"]) == [missing_path]
+    assert list(plan["index"]) == [0]
+
+    # ... and running it completes the derivative.
+    iterate_derivative_pipeline(cfg, "BasicPrep", only_index=0, raise_on_error=True)
+    capsys.readouterr()
+    assert main([*status_argv, "--format", "indices"]) == 0
+    assert capsys.readouterr().out == "\n"
 
 
 def test_cmd_run_passes_path_string_to_run_pipeline(dummy_pipeline):

@@ -206,6 +206,63 @@ EOF
 
 ---
 
+## Resubmitting missing/errored files
+
+`neurodags status` reports the global **file index** of every missing or errored file — the
+same index the per-file and chained arrays use as `SLURM_ARRAY_TASK_ID` (see
+{doc}`inspection`). `--format indices` prints just those indices, space-separated:
+
+```bash
+# status exits 1 when something is missing/errored — keep `|| true` under `set -e`
+IDX=$(neurodags status pipeline.yml --format indices 2>/dev/null || true)
+[ -z "$IDX" ] && { echo "nothing to resubmit"; exit 0; }
+
+# run them locally / in one job ...
+neurodags run pipeline.yml --only-index $IDX
+
+# ... or as a sparse per-file array (sbatch wants a comma-separated list)
+sbatch --array=$(echo "$IDX" | tr ' ' ',') retry_array.sh
+```
+
+Narrow the list with `--list-missing` or `--list-errors`, and per derivative with
+`--derivative` (for the chained pattern, resubmit each derivative's array with its own list:
+`neurodags status pipeline.yml --derivative Spectrum --format indices`).
+`--format json` carries the same lists as `missing_indices` / `errored_indices`, and
+`--format json --include-files` adds one record per file × derivative with the index,
+dataset and path, so a script can verify the index → path mapping before submitting.
+
+Things to keep in mind:
+
+- **Retry workers must not use `skip_errors=True`.** The per-file and chained templates above
+  (and the ones `neurodags slurm-script` emits) pass `skip_errors=True`, which skips exactly
+  the errored files you are trying to retry. Use a copy of the worker without it (the default
+  `skip_errors=False` retries files with a `.error` marker), e.g. `retry_array.sh` = `run_array.sh`
+  minus the `skip_errors=True` line. If a failed run left partial outputs next to its `.error`
+  marker, delete them (or set `overwrite`) so the retry actually recomputes.
+- **Flat-array task IDs are not file indices.** In the flat pattern
+  `SLURM_ARRAY_TASK_ID = file_index * N_DERIVATIVES + derivative_index`, so never pass status
+  indices straight to `run_array_per_deriv.sh`. Convert them per derivative, using the
+  position of the derivative in that worker's `DERIVATIVES` array:
+
+  ```bash
+  DERIVATIVES=("Preprocessed" "Spectrum" "BandPower")
+  N_DERIVATIVES=${#DERIVATIVES[@]}
+  TASKS=()
+  for D in "${!DERIVATIVES[@]}"; do
+    for F in $(neurodags status pipeline.yml --derivative "${DERIVATIVES[$D]}" \
+                 --format indices 2>/dev/null || true); do
+      TASKS+=($(( F * N_DERIVATIVES + D )))
+    done
+  done
+  [ ${#TASKS[@]} -gt 0 ] && sbatch --array=$(IFS=,; echo "${TASKS[*]}") run_array_per_deriv.sh
+  ```
+
+- **Indices are positions, not IDs.** They are stable only while the dataset configuration
+  and the set of input files stay the same — compute the list right before resubmitting, on
+  the same filesystem/mount point the jobs will use.
+
+---
+
 ## Checking Failed Tasks
 
 After a run, find failed files via `.error` markers:

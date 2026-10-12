@@ -287,7 +287,57 @@ def _status_error_path(plan: list) -> str | None:
     return final.get("error_path") if final else None
 
 
+def _status_scalar(value: object) -> object:
+    """Return ``None`` for missing/NaN values, else the value unchanged."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _status_rows(result: pd.DataFrame) -> list[dict]:
+    """Project a dry-run dataframe onto one status record per (source file, derivative).
+
+    Each record carries the global file ``index`` (the same index ``--only-index`` and the
+    SLURM array templates consume), cast to a plain ``int`` so it is JSON serialisable. A
+    missing ``index`` column is tolerated (``index`` is then ``None``) — this is a reporting
+    path and must not fail.
+    """
+    rows = []
+    for _, row in result.iterrows():
+        plan = row.get("plan", [])
+        idx = _status_scalar(row.get("index"))
+        dataset = _status_scalar(row.get("dataset"))
+        rows.append(
+            {
+                "index": None if idx is None else int(idx),
+                "dataset": None if dataset is None else str(dataset),
+                "derivative": row.get("derivative", "unknown"),
+                "file_path": row.get("file_path", ""),
+                "status": _status_classify(plan),
+                "error_path": _status_error_path(plan),
+            }
+        )
+    return rows
+
+
+def _status_index_key(row: dict) -> tuple[bool, int]:
+    idx = row["index"]
+    return (idx is None, idx if idx is not None else 0)
+
+
+def _status_indices(rows: list[dict], statuses: tuple[str, ...]) -> list[int]:
+    """Sorted, de-duplicated file indices whose status is one of *statuses*."""
+    return sorted({r["index"] for r in rows if r["status"] in statuses and r["index"] is not None})
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
+    import json
+
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
 
@@ -299,73 +349,63 @@ def _cmd_status(args: argparse.Namespace) -> int:
         n_jobs=args.n_jobs,
     )
 
-    if result is None or result.empty:
-        print("No files found.")
-        return 0
-
-    rows = []
-    for _, row in result.iterrows():
-        plan = row.get("plan", [])
-        status = _status_classify(plan)
-        rows.append(
-            {
-                "derivative": row.get("derivative", "unknown"),
-                "file_path": row.get("file_path", ""),
-                "status": status,
-                "error_path": _status_error_path(plan),
-            }
-        )
-
-    import json
-
-    import pandas as pd
-
-    status_df = pd.DataFrame(rows)
-    all_derivs = sorted(status_df["derivative"].unique())
-    total_files = status_df["file_path"].nunique()
+    fmt = getattr(args, "format", "table")
+    include_files = getattr(args, "include_files", False)
+    rows = [] if result is None or result.empty else _status_rows(result)
 
     grand = {"total": 0, "done": 0, "skipped": 0, "missing": 0, "errored": 0}
     per_deriv: dict[str, dict[str, int]] = {}
+    all_derivs = sorted({r["derivative"] for r in rows})
+    total_files = len({r["file_path"] for r in rows})
 
     for deriv in all_derivs:
-        sub = status_df[status_df["derivative"] == deriv]
-        counts = sub["status"].value_counts()
-        total = len(sub)
-        done = int(counts.get("done", 0))
-        skipped = int(counts.get("skipped", 0))
-        missing = int(counts.get("missing", 0))
-        errored = int(counts.get("errored", 0))
-        per_deriv[deriv] = {
-            "total": total,
-            "done": done,
-            "skipped": skipped,
-            "missing": missing,
-            "errored": errored,
-        }
-        for k, v in (
-            ("total", total),
-            ("done", done),
-            ("skipped", skipped),
-            ("missing", missing),
-            ("errored", errored),
-        ):
+        sub = [r for r in rows if r["derivative"] == deriv]
+        counts = {k: sum(1 for r in sub if r["status"] == k) for k in grand if k != "total"}
+        per_deriv[deriv] = {"total": len(sub), **counts}
+        for k, v in per_deriv[deriv].items():
             grand[k] += v
 
     complete = grand["missing"] == 0 and grand["errored"] == 0
     exit_code = 0 if complete else 1
 
-    fmt = getattr(args, "format", "table")
+    if fmt == "indices":
+        if args.list_missing and not args.list_errors:
+            wanted: tuple[str, ...] = ("missing",)
+        elif args.list_errors and not args.list_missing:
+            wanted = ("errored",)
+        else:
+            wanted = ("missing", "errored")
+        print(" ".join(str(i) for i in _status_indices(rows, wanted)))
+        return exit_code
 
     if fmt == "json":
-        payload = {
+        payload: dict = {
             "config": args.config,
             "n_files": total_files,
             "derivatives": per_deriv,
             "grand_total": grand,
             "complete": complete,
+            "missing_indices": _status_indices(rows, ("missing",)),
+            "errored_indices": _status_indices(rows, ("errored",)),
         }
+        if include_files:
+            payload["files"] = [
+                {
+                    "index": r["index"],
+                    "dataset": r["dataset"],
+                    "file_path": r["file_path"],
+                    "derivative": r["derivative"],
+                    "status": r["status"],
+                    "error_path": r["error_path"],
+                }
+                for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
+            ]
         print(json.dumps(payload, indent=2))
         return exit_code
+
+    if not rows:
+        print("No files found.")
+        return 0
 
     # --- table output ---
     col_w = max(24, max(len(d) for d in all_derivs) + 2)
@@ -418,31 +458,30 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print("  Run with --list-missing for details.", end="")
         print()
 
+    if not complete:
+        print("Use --format indices to get the file indices for --only-index resubmission.")
+
+    def _print_list(title: str, status: str, show_error_path: bool) -> None:
+        selected = [r for r in rows if r["status"] == status]
+        if not selected:
+            return
+        print(f"\n{title}")
+        for deriv in all_derivs:
+            sub = sorted((r for r in selected if r["derivative"] == deriv), key=_status_index_key)
+            if not sub:
+                continue
+            print(f"  [{deriv}]")
+            for r in sub:
+                tag = f"[idx {r['index'] if r['index'] is not None else '?'}]"
+                print(f"    {tag} {r['file_path']}")
+                if show_error_path and r["error_path"]:
+                    print(f"      error file: {r['error_path']}")
+
     if args.list_errors:
-        errored_df = status_df[status_df["status"] == "errored"]
-        if not errored_df.empty:
-            print("\nErrored files:")
-            for deriv in all_derivs:
-                sub = errored_df[errored_df["derivative"] == deriv]
-                if sub.empty:
-                    continue
-                print(f"  [{deriv}]")
-                for _, row in sub.iterrows():
-                    print(f"    {row['file_path']}")
-                    if row.get("error_path"):
-                        print(f"      error file: {row['error_path']}")
+        _print_list("Errored files:", "errored", show_error_path=True)
 
     if args.list_missing:
-        missing_df = status_df[status_df["status"] == "missing"]
-        if not missing_df.empty:
-            print("\nMissing files:")
-            for deriv in all_derivs:
-                sub = missing_df[missing_df["derivative"] == deriv]
-                if sub.empty:
-                    continue
-                print(f"  [{deriv}]")
-                for _, row in sub.iterrows():
-                    print(f"    {row['file_path']}")
+        _print_list("Missing files:", "missing", show_error_path=False)
 
     return exit_code
 
@@ -638,12 +677,18 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument(
         "--list-errors",
         action="store_true",
-        help="Print the file paths of errored files below the summary table.",
+        help=(
+            "Print the file index and path of errored files below the summary table. "
+            "With --format indices, restrict the output to errored indices."
+        ),
     )
     status_parser.add_argument(
         "--list-missing",
         action="store_true",
-        help="Print the file paths of missing (not yet computed) files below the summary table.",
+        help=(
+            "Print the file index and path of missing (not yet computed) files below the "
+            "summary table. With --format indices, restrict the output to missing indices."
+        ),
     )
     status_parser.add_argument(
         "--n-jobs",
@@ -653,9 +698,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument(
         "--format",
-        choices=("table", "json"),
+        choices=("table", "json", "indices"),
         default="table",
-        help="Output format: 'table' (default) or 'json'.",
+        help=(
+            "Output format: 'table' (default), 'json', or 'indices' (only the sorted, "
+            "space-separated file indices that are missing or errored — narrow with "
+            "--list-missing / --list-errors — ready for --only-index or sbatch --array). "
+            "The exit code is 1 whenever anything is missing or errored, in every format."
+        ),
+    )
+    status_parser.add_argument(
+        "--include-files",
+        action="store_true",
+        help=(
+            "With --format json, add a 'files' list with one record per "
+            "(source file, derivative) pair: index, dataset, file_path, derivative, "
+            "status, error_path."
+        ),
     )
 
     slurm_parser = subparsers.add_parser(
@@ -916,6 +975,9 @@ def _cmd_view(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.command == "status" and getattr(args, "include_files", False) and args.format != "json":
+        parser.error("--include-files requires --format json")
 
     configure_logging(
         level=args.log_level,
