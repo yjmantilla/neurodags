@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **Slow CLI startup** (#30): `import neurodags.cli` took ~7.5 s because node discovery
+  imported `antropy` (which JIT-compiles numba kernels at import), `neurokit2`, `matplotlib`
+  and `fooof`, and `datasets.py` imported `mne.export`. These are now imported the first time
+  a node that needs them runs (and `mne.export` only inside `save_dummy_vhdr`);
+  `nodes/spectral.py` also uses postponed annotations so its `mne.io.BaseRaw` signatures no
+  longer load `mne.io`/`mne.viz`/matplotlib at import. CLI startup drops from ~7.5 s to
+  ~1.3 s; the saving also applies to every parallel worker and SLURM task that does not run
+  those nodes. `matplotlib.use("Agg")` is no longer a side effect of importing `neurodags`;
+  it now happens when a neurokit node first executes.
+  **Behaviour change:** if `antropy`, `neurokit2` or `fooof` is missing, the corresponding
+  nodes are now still registered and raise an actionable `ImportError` when called (recorded
+  as a per-file error), instead of being silently skipped at discovery and failing with
+  `KeyError: Unknown node`. (`nodes/antropy.py`, `nodes/neurokit.py`, `nodes/spectral.py`,
+  `datasets.py`)
+
 - **Docs site now shows the released version**: the Docs workflow checked out without tags, so
   hatch-vcs fell back to `0.1.dev1+g<hash>` on the published documentation. The workflow now
   fetches full history and tags (`fetch-depth: 0`), and `docs/conf.py` displays the nearest

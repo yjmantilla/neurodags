@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import io
 import json
@@ -7,21 +9,11 @@ import time
 import warnings
 from collections.abc import Mapping, Sequence
 from itertools import permutations
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import mne
 import numpy as np
 import xarray as xr
-
-# `fooof` (1.x) emits a DeprecationWarning at import announcing its rename to
-# `specparam`, and its __init__ calls ``warnings.simplefilter('always')`` first,
-# which would also clobber the process-wide warning filters. ``record=True``
-# captures (swallows) any warning raised during the import and restores the
-# prior filter state on exit, so nothing prints on every CLI invocation that
-# imports the node registry (see #16). Migration to specparam is tracked
-# separately.
-with warnings.catch_warnings(record=True):
-    from fooof import FOOOF
 
 from neurodags.definitions import Artifact, NodeResult
 from neurodags.loaders import load_meeg
@@ -31,7 +23,36 @@ from neurodags.writers import _json_safe
 
 from . import register_node
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from fooof import FOOOF
+
 log = get_logger(__name__)
+
+
+def _fooof_cls() -> type[FOOOF]:
+    """Import and return :class:`fooof.FOOOF` on first use.
+
+    ``fooof`` is imported lazily so that registering the spectral nodes (which
+    happens on every CLI invocation and in every worker process) does not pay
+    for it (see #30).
+
+    ``fooof`` (1.x) emits a DeprecationWarning at import announcing its rename to
+    ``specparam``, and its ``__init__`` calls ``warnings.simplefilter('always')``
+    first, which would also clobber the process-wide warning filters.
+    ``record=True`` captures (swallows) any warning raised during the import and
+    restores the prior filter state on exit (see #16). Migration to specparam is
+    tracked separately.
+    """
+
+    try:
+        with warnings.catch_warnings(record=True):
+            from fooof import FOOOF
+    except ImportError as exc:  # pragma: no cover - optional dependency guidance
+        raise ImportError(
+            "The 'fooof' package is required for the fooof* spectral nodes. "
+            "Install it via 'pip install fooof'."
+        ) from exc
+    return FOOOF
 
 
 DEFAULT_BANDS: dict[str, tuple[float, float]] = {
@@ -83,7 +104,7 @@ def _resolve_psd_dataarray(
 
 
 def _resolve_fooof_dataarray(
-    fooof_like: "NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str]",
+    fooof_like: NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str],
 ) -> xr.DataArray:
     """Resolve a FOOOF artifact to the DataArray of JSON strings."""
     if isinstance(fooof_like, xr.DataArray):
@@ -569,6 +590,9 @@ def fooof(
         coords_for_output[dim] = values
 
     fallback_value = "" if failure_value is None else str(failure_value)
+    # Resolve outside the per-spectrum try/except so a missing dependency fails
+    # loudly instead of being recorded as a failed fit for every slice.
+    fooof_cls = _fooof_cls()
 
     for flat_idx in range(flattened.shape[0]):
         if other_dims:
@@ -595,7 +619,7 @@ def fooof(
                     "Downsampled signal and frequency vectors must be the same length."
                 )
 
-            fm = FOOOF(verbose=False, **fooof_init_kwargs)
+            fm = fooof_cls(verbose=False, **fooof_init_kwargs)
             fm.fit(freq_values_downsampled, signal_to_fit, **fit_kwargs)
 
             buffer = io.StringIO()
@@ -740,6 +764,7 @@ def fooof_scalars(
     except json.JSONDecodeError:
         fooof_meta = {}
 
+    fooof_cls = _fooof_cls()
     loaded_models: list[FOOOF | None] = [None] * flat_count
     invalid_indices: list[int] = []
 
@@ -749,7 +774,7 @@ def fooof_scalars(
             continue
 
         try:
-            fm = FOOOF()
+            fm = fooof_cls()
             fm.load(io.StringIO(payload))
             if not fm.has_model:
                 raise ValueError("FOOOF object missing model")
@@ -929,6 +954,7 @@ def fooof_component(
     except json.JSONDecodeError:
         fooof_meta = {}
 
+    fooof_cls = _fooof_cls()
     loaded_models: list[FOOOF | None] = [None] * flat_count
     invalid_indices: list[int] = []
     freq_values_model: np.ndarray | None = None
@@ -939,7 +965,7 @@ def fooof_component(
             continue
 
         try:
-            fm = FOOOF()
+            fm = fooof_cls()
             fm.load(io.StringIO(payload))
             if not fm.has_model:
                 raise ValueError("FOOOF object missing model")
@@ -1362,7 +1388,7 @@ def band_ratios(
 
 @register_node
 def fooof_peaks(
-    fooof_like: "NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str]",
+    fooof_like: NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str],
     *,
     alpha_band: tuple[float, float] = (8.0, 13.0),
 ) -> NodeResult:
@@ -1400,12 +1426,13 @@ def fooof_peaks(
     alpha_bw = np.full(flat_count, np.nan)
 
     alpha_lo, alpha_hi = float(alpha_band[0]), float(alpha_band[1])
+    fooof_cls = _fooof_cls()
 
     for idx, payload in enumerate(fooof_flat):
         if not isinstance(payload, str) or not payload.strip():
             continue
         try:
-            fm = FOOOF()
+            fm = fooof_cls()
             fm.load(io.StringIO(payload))
             if not fm.has_model:
                 continue
@@ -1465,10 +1492,10 @@ def fooof_peaks(
 
 @register_node
 def bandpower_corrected(
-    psd_like: "NodeResult | xr.DataArray | str | os.PathLike[str]",
-    fooof_like: "NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str]",
+    psd_like: NodeResult | xr.DataArray | str | os.PathLike[str],
+    fooof_like: NodeResult | xr.DataArray | xr.Dataset | str | os.PathLike[str],
     *,
-    bands: "Mapping[str, tuple[float, float]] | None" = None,
+    bands: Mapping[str, tuple[float, float]] | None = None,
     freq_dim: str = "frequencies",
     relative: bool = False,
     log_transform: bool = False,
@@ -1531,13 +1558,14 @@ def bandpower_corrected(
     fooof_flat = np.asarray(fooof_xr.values, dtype=object).reshape(flat_count)
 
     corrected_flat = np.full_like(psd_flat, np.nan)
+    fooof_cls = _fooof_cls()
 
     for idx in range(flat_count):
         payload = fooof_flat[idx]
         if not isinstance(payload, str) or not payload.strip():
             continue
         try:
-            fm = FOOOF()
+            fm = fooof_cls()
             fm.load(io.StringIO(payload))
             if not fm.has_model:
                 continue

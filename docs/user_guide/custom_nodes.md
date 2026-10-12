@@ -106,6 +106,24 @@ new_definitions:
 
 Paths relative to the pipeline YAML. Each module is imported once before any derivative executes.
 
+### Keep definition files cheap to import
+
+Definition files are imported in every process that runs derivatives, including each parallel
+worker (`--n-jobs`) and each SLURM array task. Import heavy third-party packages inside the node
+function rather than at module level, so processes that never call the node do not pay for the
+import:
+
+```python
+@register_node
+def my_entropy(data) -> NodeResult:
+    import antropy  # heavy (numba JIT at import); only paid when this node runs
+
+    ...
+```
+
+The built-in nodes follow the same convention: `antropy`, `neurokit2`, `fooof` and
+`matplotlib` are imported the first time a node that needs them executes.
+
 ## Splitting Definitions Across Files
 
 For large projects, split nodes by domain (e.g. `nodes_preprocessing.py`, `nodes_features.py`, `nodes_cleaning.py`) and list all files under `new_definitions`.

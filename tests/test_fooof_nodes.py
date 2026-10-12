@@ -318,13 +318,14 @@ class TestFooofComponent:
     def test_manual_periodic_fallback_when_peak_fit_missing(self, fooof_result, monkeypatch):
         import neurodags.nodes.spectral as spec_mod
 
-        original_load = spec_mod.FOOOF.load
+        fooof_cls = spec_mod._fooof_cls()
+        original_load = fooof_cls.load
 
         def patched_load(self, *args, **kwargs):
             original_load(self, *args, **kwargs)
             self._peak_fit = None
 
-        monkeypatch.setattr(spec_mod.FOOOF, "load", patched_load)
+        monkeypatch.setattr(fooof_cls, "load", patched_load)
         result = fooof_component(fooof_result, component="periodic", space="log", mode="manual")
         ds = result.artifacts[".nc"].item
         assert "periodic" in ds

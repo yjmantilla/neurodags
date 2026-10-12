@@ -8,29 +8,24 @@ contains:
 * ``value`` - the direct numerical output of the ``neurokit2`` function,
 * ``metadata`` - JSON-serialisable metadata associated with each slice, and
 * optional ``figure_*`` variables that hold the encoded Matplotlib output.
+
+``neurokit2`` and ``matplotlib`` are imported lazily, the first time one of
+these nodes runs, so that registering the nodes (which happens on every CLI
+invocation and in every worker process) stays cheap (see #30). The ``Agg``
+backend is selected at that point rather than as an import side effect.
 """
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-
-matplotlib.use("Agg", force=True)  # avoid GUI backends for figure generation
-
-try:  # pragma: no cover - optional dependency guidance
-    import neurokit2 as nk
-except ImportError as exc:  # pragma: no cover - optional dependency guidance
-    raise ImportError(
-        "The 'neurokit2' extra is required for neurodags.nodes.neurokit. Install it via 'pip install neurokit2'."
-    ) from exc
 
 try:  # pragma: no cover - optional dependency guidance
     import pandas as pd
@@ -44,6 +39,35 @@ from neurodags.writers import _json_safe
 
 FigureEncoding = str | None
 CallableLike = Callable[[np.ndarray], Any]
+
+
+def _nk():
+    """Import ``neurokit2`` on first use (heavy import, ~2 s)."""
+
+    try:
+        import neurokit2 as nk
+    except ImportError as exc:  # pragma: no cover - optional dependency guidance
+        raise ImportError(
+            "The 'neurokit2' package is required for the neurokit_* nodes. "
+            "Install it via 'pip install neurokit2'."
+        ) from exc
+    return nk
+
+
+@functools.cache
+def _plt():
+    """Return ``matplotlib.pyplot``, selecting the non-GUI ``Agg`` backend once.
+
+    This used to happen as a side effect of importing the node registry; it now
+    happens the first time a neurokit node executes (once per process).
+    """
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)  # avoid GUI backends for figure generation
+    import matplotlib.pyplot as plt
+
+    return plt
 
 
 @dataclass(slots=False)  # breaks parallelization?
@@ -77,7 +101,7 @@ class _ResultCollector:
                 figure_payload = _capture_current_figure(self._figure_encoding)
         finally:
             # Always close figures raised by the underlying call to avoid leaks.
-            plt.close("all")
+            _plt().close("all")
 
         self._records.append(_CallRecord(metadata=metadata_payload, figure=figure_payload))
         return value
@@ -97,6 +121,7 @@ def _capture_current_figure(mode: str) -> dict[str, np.ndarray] | None:
     if mode in {"none", ""}:
         return None
 
+    plt = _plt()
     fig_numbers = plt.get_fignums()
     if not fig_numbers:
         return None
@@ -285,8 +310,12 @@ def _to_netcdf_writer(dataset: xr.Dataset) -> Callable[[str], None]:
     return lambda path: dataset.to_netcdf(path, engine="netcdf4", format="NETCDF4")
 
 
-def _build_node(name: str, func: CallableLike) -> None:
-    """Register ``neurokit2`` function ``func`` as a node."""
+def _build_node(name: str, func_name: str) -> None:
+    """Register ``neurokit2.<func_name>`` as node ``name``.
+
+    The function is resolved by name when the node is called, so registering the
+    node does not import ``neurokit2``.
+    """
 
     @register_node(name=name, override=True)
     def _node(  # type: ignore[override]
@@ -305,6 +334,10 @@ def _build_node(name: str, func: CallableLike) -> None:
             raise ValueError(
                 "neurokit nodes currently require mode='iterative' to capture metadata and figures."
             )
+
+        func = getattr(_nk(), func_name)
+        # Select the Agg backend before neurokit2 draws anything.
+        _plt()
 
         resolved_kwargs = dict(function_kwargs)
         resolved_args = tuple(function_args or ())
@@ -348,22 +381,23 @@ def _build_node(name: str, func: CallableLike) -> None:
         artifact = Artifact(item=dataset, writer=_to_netcdf_writer(dataset))
         return NodeResult(artifacts={".nc": artifact})
 
-    _node.__doc__ = f"Node wrapper for neurokit2.{name}."
+    _node.__doc__ = f"Node wrapper for neurokit2.{func_name}."
 
 
-_NEUROKIT_FUNCTIONS: Mapping[str, CallableLike] = {
-    "neurokit_complexity_delay": nk.complexity_delay,
-    "neurokit_entropy_multiscale": nk.entropy_multiscale,
-    "neurokit_entropy_shannon": nk.entropy_shannon,
-    "neurokit_entropy_fuzzy": nk.entropy_fuzzy,
-    "neurokit_entropy_dispersion": nk.entropy_dispersion,
-    "neurokit_fractal_hurst": nk.fractal_hurst,
-    "neurokit_complexity_k": nk.complexity_k,
+# node name -> ``neurokit2`` function name (resolved lazily at call time)
+_NEUROKIT_FUNCTIONS: Mapping[str, str] = {
+    "neurokit_complexity_delay": "complexity_delay",
+    "neurokit_entropy_multiscale": "entropy_multiscale",
+    "neurokit_entropy_shannon": "entropy_shannon",
+    "neurokit_entropy_fuzzy": "entropy_fuzzy",
+    "neurokit_entropy_dispersion": "entropy_dispersion",
+    "neurokit_fractal_hurst": "fractal_hurst",
+    "neurokit_complexity_k": "complexity_k",
 }
 
 
-for _name, _func in _NEUROKIT_FUNCTIONS.items():  # pragma: no cover - registration side effect
-    _build_node(_name, _func)
+for _name, _func_name in _NEUROKIT_FUNCTIONS.items():  # pragma: no cover - registration side effect
+    _build_node(_name, _func_name)
 
 
 __all__: list[str] = []  # nodes registered via _build_node; no module-level names exported
