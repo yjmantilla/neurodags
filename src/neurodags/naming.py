@@ -18,8 +18,9 @@ Summary of the grammar
 - Wide dataframe column: ``name suffix ["@" dim-value ("_" dim-value)*]`` with dims and
   values percent-encoded, or ``name.error`` for the error column.
 
-Optional key-value convention for names: ``base(_key-value)*`` (for example
-``Fit_alpha-0p5_w-6``), with numbers written using ``p`` for the decimal point and ``m`` for
+Optional key-value convention for names: ``_``-separated parts, each a ``key-value`` pair or
+a bare word, with at least one pair and at most one bare word (the base) in any position (for
+example ``Fit_alpha-0p5_w-6``, ``alpha-0p5_w-6_Fit`` or ``alpha-0p5_w-6``), with numbers written using ``p`` for the decimal point and ``m`` for
 minus (see :func:`encode_number`). Names that do not follow it are equally valid.
 """
 
@@ -33,12 +34,13 @@ from numbers import Integral
 from typing import Any, NamedTuple
 
 __all__ = [
+    "ENTITY_PAIR_RE",
+    "ENTITY_WORD_RE",
     "FIELD_RE",
     "MARKER_SEGMENTS",
     "NAME_LENGTH_WARNING",
     "NAME_RE",
     "RESERVED_NAME",
-    "STRUCTURED_NAME_RE",
     "SUFFIX_RE",
     "NamingError",
     "ParsedColumn",
@@ -91,12 +93,13 @@ SUFFIX_RE = re.compile(r"(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+")
 #: index, group 2 the optional field. Use with ``fullmatch``.
 FIELD_RE = re.compile(r"id\.([0-9]+)(?:\.([A-Za-z_][A-Za-z0-9_]*))?")
 
-#: Optional key-value convention ``base(_key-value)*`` (spec section 2.3). Use with
-#: ``fullmatch``.
-STRUCTURED_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]+)*")
+#: One ``key-value`` part of the key-value convention (spec section 2.3). Group 1 is the
+#: key, group 2 the value. Use with ``fullmatch`` on a single ``_``-separated part.
+ENTITY_PAIR_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)-([A-Za-z0-9]+)")
 
-_ENTITY_RE = re.compile(r"_([A-Za-z][A-Za-z0-9]*)-([A-Za-z0-9]+)")
-_BASE_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+#: One bare word (the base) of the key-value convention. Use with ``fullmatch`` on a single
+#: ``_``-separated part.
+ENTITY_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
 #: Reserved reference to the input file itself; not usable as a derivative name (any case).
 RESERVED_NAME = "SourceFile"
@@ -292,8 +295,14 @@ def check_derivative_names(names: Iterable[Any]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def entity_pairs(name: str) -> tuple[str, list[tuple[str, str]]] | None:
+def entity_pairs(name: str) -> tuple[str | None, list[tuple[str, str]]] | None:
     """Split a name that follows the key-value convention into base and ordered pairs.
+
+    The name is split on ``_``. Each part must be either a pair ``key-value`` (exactly one
+    ``-``; key ``[A-Za-z][A-Za-z0-9]*``, value ``[A-Za-z0-9]+``, see :data:`ENTITY_PAIR_RE`)
+    or a bare word ``[A-Za-z][A-Za-z0-9]*`` (:data:`ENTITY_WORD_RE`). The name follows the
+    convention when it has **at least one pair** and **at most one bare word**, in any
+    position; that bare word is the base.
 
     Parameters
     ----------
@@ -302,23 +311,37 @@ def entity_pairs(name: str) -> tuple[str, list[tuple[str, str]]] | None:
 
     Returns
     -------
-    tuple[str, list[tuple[str, str]]] or None
-        ``(base, [(key, value), ...])`` in written order (repeated keys kept), or ``None``
-        when *name* does not fully match :data:`STRUCTURED_NAME_RE`.
+    tuple[str or None, list[tuple[str, str]]] or None
+        ``(base, [(key, value), ...])`` with pairs in written order (repeated keys kept) and
+        ``base`` ``None`` when there is no bare word; ``None`` when *name* does not follow
+        the convention. A non-``None`` result always has at least one pair.
 
     Examples
     --------
     >>> entity_pairs("Fit_alpha-0p5_w-6")
     ('Fit', [('alpha', '0p5'), ('w', '6')])
-    >>> entity_pairs("Ep_HiguchiFD") is None
-    True
+    >>> entity_pairs("alpha-0p5_w-6_Fit")
+    ('Fit', [('alpha', '0p5'), ('w', '6')])
+    >>> entity_pairs("feature-BandPower_w-6")
+    (None, [('feature', 'BandPower'), ('w', '6')])
+    >>> entity_pairs("Ep_HiguchiFD") is None, entity_pairs("Fit") is None
+    (True, True)
     """
-    if not isinstance(name, str) or not STRUCTURED_NAME_RE.fullmatch(name):
+    if not isinstance(name, str):
         return None
-    base = _BASE_RE.match(name)
-    assert base is not None  # guaranteed by the full match above
-    pairs = [(m.group(1), m.group(2)) for m in _ENTITY_RE.finditer(name, base.end())]
-    return base.group(0), pairs
+    base: str | None = None
+    pairs: list[tuple[str, str]] = []
+    for part in name.split("_"):
+        pair = ENTITY_PAIR_RE.fullmatch(part)
+        if pair is not None:
+            pairs.append((pair.group(1), pair.group(2)))
+        elif ENTITY_WORD_RE.fullmatch(part) and base is None:
+            base = part
+        else:
+            return None
+    if not pairs:
+        return None
+    return base, pairs
 
 
 def repeated_entity_keys(name: str) -> list[str]:
@@ -343,13 +366,13 @@ def repeated_entity_keys(name: str) -> list[str]:
     return repeated
 
 
-def parse_entities(name: str) -> tuple[str, dict[str, str]]:
-    """Parse the optional key-value convention ``base(_key-value)*``.
+def parse_entities(name: str) -> tuple[str | None, dict[str, str]] | None:
+    """Parse the optional key-value convention into a base and a mapping of entities.
 
-    Parsing is lenient: a name that does not fully match the convention is returned as
-    ``(name, {})``. Values stay strings; use :func:`decode_number` to read numbers. Identity
-    never depends on this parse (``Fit_w-6_a-1`` and ``Fit_a-1_w-6`` are different
-    derivatives).
+    See :func:`entity_pairs` for the rule. Parsing is lenient: a name that does not follow
+    the convention is still a valid derivative name, and this function returns ``None`` for
+    it. Values stay strings; use :func:`decode_number` to read numbers. Identity never
+    depends on this parse (``Fit_w-6_a-1`` and ``Fit_a-1_w-6`` are different derivatives).
 
     Parameters
     ----------
@@ -358,8 +381,10 @@ def parse_entities(name: str) -> tuple[str, dict[str, str]]:
 
     Returns
     -------
-    tuple[str, dict[str, str]]
-        The base and the entities in written order.
+    tuple[str or None, dict[str, str]] or None
+        ``None`` when the name does not follow the convention. Otherwise ``(base,
+        entities)``: ``base`` is the bare word or ``None`` when there is none, and
+        ``entities`` is a non-empty dict in written order.
 
     Raises
     ------
@@ -371,12 +396,14 @@ def parse_entities(name: str) -> tuple[str, dict[str, str]]:
     --------
     >>> parse_entities("Fit_alpha-0p5_w-6")
     ('Fit', {'alpha': '0p5', 'w': '6'})
-    >>> parse_entities("Ep_HiguchiFD")
-    ('Ep_HiguchiFD', {})
+    >>> parse_entities("alpha-0p5_w-6")
+    (None, {'alpha': '0p5', 'w': '6'})
+    >>> parse_entities("Ep_HiguchiFD") is None
+    True
     """
     parsed = entity_pairs(name)
     if parsed is None:
-        return name, {}
+        return None
     base, pairs = parsed
     repeated = repeated_entity_keys(name)
     if repeated:

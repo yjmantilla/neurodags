@@ -174,32 +174,64 @@ def test_check_names_unhashable():
     [
         ("Fit_alpha-0p5_w-6", ("Fit", {"alpha": "0p5", "w": "6"})),
         ("Fit_w-6_alpha-0p5", ("Fit", {"w": "6", "alpha": "0p5"})),
-        ("Fit", ("Fit", {})),
-        ("Ep_HiguchiFD", ("Ep_HiguchiFD", {})),
-        ("Fit_w-6_x", ("Fit_w-6_x", {})),
-        ("Fit_w-6-7", ("Fit_w-6-7", {})),
-        ("Fit_w_6", ("Fit_w_6", {})),
-        ("Fit_1w-6", ("Fit_1w-6", {})),
+        ("alpha-0p5_w-6_Fit", ("Fit", {"alpha": "0p5", "w": "6"})),
+        ("alpha-0p5_Fit_w-6", ("Fit", {"alpha": "0p5", "w": "6"})),
+        ("alpha-0p5_w-6", (None, {"alpha": "0p5", "w": "6"})),
+        ("feature-BandPower_w-6", (None, {"feature": "BandPower", "w": "6"})),
+        ("sub-01_task-rest_eeg", ("eeg", {"sub": "01", "task": "rest"})),
+        ("w-6", (None, {"w": "6"})),
+        ("a-b", (None, {"a": "b"})),
         ("Fit_w-m1", ("Fit", {"w": "m1"})),
-        ("a-b", ("a-b", {})),
+        ("Fit2_k1-V2", ("Fit2", {"k1": "V2"})),
     ],
 )
 def test_parse_entities(name, expected):
     assert parse_entities(name) == expected
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Fit",  # no pairs
+        "Ep_HiguchiFD",  # two bare words, no pairs
+        "Fit_w-6_x",  # two bare words
+        "Fit_w-6_Other",  # two bare words
+        "Ep_Fit_w-6",  # two bare words
+        "Fit_w-6-7",  # two '-' in one part
+        "Fit_w_6",  # '6' is neither a pair nor a word
+        "Fit_1w-6",  # key starts with a digit
+        "Fit_w1_x-",  # trailing '-' (also an invalid name)
+        "Fit__w-6",  # empty part
+        "Fit_-6",  # empty key
+        "Fit_w-",  # empty value
+        "Fit2a_k-v_2b",  # bare part starting with a digit
+        "",
+    ],
+)
+def test_parse_entities_not_structured(name):
+    assert parse_entities(name) is None
+    assert entity_pairs(name) is None
+    assert repeated_entity_keys(name) == []
+
+
 def test_entity_order_and_identity():
     assert list(parse_entities("Fit_w-6_alpha-0p5")[1]) == ["w", "alpha"]
     assert entity_pairs("Fit_w-6_w-7") == ("Fit", [("w", "6"), ("w", "7")])
+    assert entity_pairs("w-6_Fit_alpha-0p5") == ("Fit", [("w", "6"), ("alpha", "0p5")])
     assert entity_pairs("Ep_HiguchiFD") is None
+    assert entity_pairs(None) is None
 
 
 def test_repeated_keys():
     assert repeated_entity_keys("Fit_w-6_w-7_w-8_a-1_a-2") == ["w", "a"]
     assert repeated_entity_keys("Fit_w-6") == []
     assert repeated_entity_keys("Ep_HiguchiFD") == []
+    assert repeated_entity_keys("w-6_w-7") == ["w"]
     with pytest.raises(NamingError, match="repeats"):
         parse_entities("Fit_w-6_w-7")
+    with pytest.raises(NamingError, match="repeats"):
+        parse_entities("w-6_Fit_w-7")
+    assert check_derivative_names(["w-6_Fit_w-7"]) != []
 
 
 @pytest.mark.parametrize(
