@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Relative paths broke with `n_jobs>1` after an in-process `chdir`** (#35): loky reuses
+  worker processes, and a reused worker keeps the cwd it was started with. After an
+  `os.chdir` in the parent (notebooks, tests, scripts calling `run_pipeline` more than once),
+  workers resolved relative source files, `derivatives_path` and `common_root` against the
+  stale cwd: inputs were not found, outputs (or "cached" hits) landed in the previous
+  directory, while `n_jobs=1` worked. The parent now makes the source file path, the dataset
+  path fields (`file_pattern`, `derivatives_path`, `exclude_pattern`) and the common root
+  absolute before dispatch, for `run_pipeline` / `iterate_derivative_pipeline` and
+  `build_derivative_dataframe`. The derivative layout is unchanged (the path relative to the
+  common root is the same), and the reported `file_path` (logs, dataframe column, dry-run
+  `file_path` column) keeps the discovered spelling.
+  **Behaviour change:** nodes and derivatives now receive the absolute source path (e.g. the
+  `SourceFile` path and dry-run `file` entries), and outputs of datasets without
+  `derivatives_path` are addressed by absolute path; the files land in the same place.
+- **Parallel dataframe workers lacked `new_definitions` custom nodes** (#36):
+  `build_derivative_dataframe` loaded custom nodes only in the parent, so with `n_jobs>1` a
+  fresh worker computing an uncached or `save: False` derivative that used a custom node failed
+  with `Unknown node`. The absolute custom definition paths are now sent to each worker and
+  loaded there, as `run_pipeline` already did.
+
 ## 0.3.2 — 2026-10-12
 
 ### Added

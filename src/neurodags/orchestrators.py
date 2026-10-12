@@ -46,6 +46,11 @@ class _FileJob:
     # derivative registry — see #18). Mirrors how custom_node_paths re-registers
     # nodes.
     derivative_definitions: dict[str, Any] = field(default_factory=dict)
+    # Absolute spelling of ``file_path`` (resolved in the parent) used for all
+    # processing; ``file_path`` keeps the discovered spelling for reporting.
+    # Reused loky workers keep a stale cwd, so they must never see a relative
+    # path (#35).
+    source_path: str | None = None
 
 
 @dataclass(slots=False)  # break parallelization?
@@ -89,13 +94,77 @@ def _dataset_job_payload(dataset_config: Any, mount_point: Any) -> dict:
         payload = dataset_config.model_dump(mode="json")
     else:  # pragma: no cover - pydantic v1 fallback
         payload = dataset_config.dict()
-    if payload.get("derivatives_path"):
-        payload["derivatives_path"] = get_path(
-            payload["derivatives_path"],
-            mount_point=mount_point,
-            field=f"datasets.{payload.get('name')}.derivatives_path",
+    # Resolve the active path fields here and make them absolute against the
+    # *parent's* cwd: reused loky workers keep the cwd (and environment) they
+    # were started with, so a relative path would resolve elsewhere there (#35).
+    for attr in ("file_pattern", "derivatives_path"):
+        if payload.get(attr):
+            payload[attr] = _absolute(
+                get_path(
+                    payload[attr],
+                    mount_point=mount_point,
+                    field=f"datasets.{payload.get('name')}.{attr}",
+                )
+            )
+    if payload.get("exclude_pattern"):
+        payload["exclude_pattern"] = _absolute(
+            expand_path(
+                payload["exclude_pattern"],
+                field=f"datasets.{payload.get('name')}.exclude_pattern",
+            )
         )
     return payload
+
+
+def _absolute(path: Any) -> Any:
+    """Return *path* made absolute against the current (parent) cwd; non-strings pass through."""
+    if isinstance(path, str | os.PathLike):
+        return os.path.abspath(path)
+    return path
+
+
+def _worker_source_paths(file_path: str, common_root: str | None) -> tuple[str, str | None]:
+    """Absolute ``(file_path, common_root)`` for a worker job (#35).
+
+    Both are made absolute against the parent's cwd, so the relative structure
+    ``relpath(file_path, common_root)`` (and hence the derivative layout) is
+    unchanged. An empty ``common_root`` (files directly in the cwd) means the
+    cwd itself.
+    """
+    abs_root = os.path.abspath(common_root) if common_root is not None else None
+    return os.path.abspath(file_path), abs_root
+
+
+def _resolve_definition_paths(
+    config_dict: dict, pipeline_configuration: Any
+) -> tuple[list[Any], Path, tuple[str, ...]]:
+    """Return ``(raw_paths, base_dir, absolute_paths)`` for ``new_definitions``.
+
+    Relative entries resolve against the pipeline file's directory (or the cwd for
+    an in-memory config). The absolute paths are what workers receive: fresh loky
+    workers have no custom nodes and reused ones have a stale cwd (#35, #36).
+    """
+    new_definitions = config_dict.get("new_definitions")
+    if not new_definitions:
+        return [], Path.cwd(), ()
+    if isinstance(new_definitions, str | os.PathLike):
+        definition_paths = [new_definitions]
+    elif isinstance(new_definitions, list | tuple | set):
+        definition_paths = list(new_definitions)
+    else:
+        raise TypeError("new_definitions must be a string or list of paths")
+    is_path_like = isinstance(pipeline_configuration, str | os.PathLike)
+    base_dir = Path(pipeline_configuration).resolve().parent if is_path_like else Path.cwd()
+    resolved_definition_paths = []
+    for candidate in definition_paths:
+        candidate_path = Path(candidate).expanduser()
+        resolved_path = (
+            (base_dir / candidate_path).resolve()
+            if not candidate_path.is_absolute()
+            else candidate_path.resolve()
+        )
+        resolved_definition_paths.append(str(resolved_path))
+    return definition_paths, base_dir, tuple(resolved_definition_paths)
 
 
 def _resolve_reference_base(
@@ -132,9 +201,10 @@ def _process_file_job(job: _FileJob) -> _FileResult:
         register_derivatives_from_dict({"DerivativeDefinitions": job.derivative_definitions})
 
     dataset_config = DatasetConfig(**job.dataset_config)
+    source_path = job.source_path or job.file_path
     try:
         reference_base_str, reference_base_path = _resolve_reference_base(
-            job.file_path, dataset_config, job.common_root, job.mount_point
+            source_path, dataset_config, job.common_root, job.mount_point
         )
     except Exception as setup_error:  # pragma: no cover - safety net
         return _FileResult(
@@ -160,7 +230,7 @@ def _process_file_job(job: _FileJob) -> _FileResult:
                 node_kwargs["dataset_config"] = dataset_config
             if "mount_point" in node_parameters:
                 node_kwargs["mount_point"] = job.mount_point
-            node_callable(job.file_path, **node_kwargs)
+            node_callable(source_path, **node_kwargs)
             dry_payload: dict[str, Any] | None = None
         else:
             if job.derivative_definition is None or job.derivative_name is None:
@@ -169,7 +239,7 @@ def _process_file_job(job: _FileJob) -> _FileResult:
             result = run_derivative(
                 job.derivative_definition,
                 job.derivative_name,
-                job.file_path,
+                source_path,
                 reference_base=reference_base_path,
                 dataset_config=dataset_config,
                 mount_point=job.mount_point,
@@ -263,27 +333,11 @@ def iterate_derivative_pipeline(
         load_configuration(pipeline_configuration) if is_path_like else pipeline_configuration
     )
 
-    custom_node_paths: tuple[str, ...] = ()
-    new_definitions = config_dict.get("new_definitions")
-    if new_definitions:
-        if isinstance(new_definitions, str | os.PathLike):
-            definition_paths = [new_definitions]
-        elif isinstance(new_definitions, list | tuple | set):
-            definition_paths = list(new_definitions)
-        else:
-            raise TypeError("new_definitions must be a string or list of paths")
-        base_dir = Path(pipeline_configuration).resolve().parent if is_path_like else Path.cwd()
-        resolved_definition_paths = []
-        for candidate in definition_paths:
-            candidate_path = Path(candidate).expanduser()
-            resolved_path = (
-                (base_dir / candidate_path).resolve()
-                if not candidate_path.is_absolute()
-                else candidate_path.resolve()
-            )
-            resolved_definition_paths.append(str(resolved_path))
+    definition_paths, base_dir, custom_node_paths = _resolve_definition_paths(
+        config_dict, pipeline_configuration
+    )
+    if definition_paths:
         load_node_definitions(definition_paths, base_dir=base_dir)
-        custom_node_paths = tuple(resolved_definition_paths)
 
     if "DerivativeDefinitions" in config_dict:
         register_derivatives_from_dict(config_dict)
@@ -391,14 +445,16 @@ def iterate_derivative_pipeline(
                 datasets_configs[dataset_name], mount_point
             )
         dataset_payload = dataset_payloads[dataset_name]
+        source_path, common_root = _worker_source_paths(file_path, common_roots.get(dataset_name))
         jobs.append(
             _FileJob(
                 index=index,
                 dataset=dataset_name,
                 file_path=file_path,
+                source_path=source_path,
                 dataset_config=dataset_payload,
                 mount_point=mount_point,
-                common_root=common_roots.get(dataset_name),
+                common_root=common_root,
                 is_node=node_callable is not None,
                 node_name=derivative_label if node_callable is not None else None,
                 derivative_name=derivative_entry.name if derivative_entry is not None else None,
@@ -825,12 +881,12 @@ def build_derivative_dataframe(
         return pd.DataFrame()
 
     # Load custom node definitions so save=False derivatives using custom nodes work.
-    _new_defs = config_dict.get("new_definitions")
-    if _new_defs:
-        _is_path = isinstance(pipeline_configuration, str | os.PathLike)
-        _base = Path(pipeline_configuration).resolve().parent if _is_path else Path.cwd()
-        _paths = [_new_defs] if isinstance(_new_defs, str | os.PathLike) else list(_new_defs)
-        load_node_definitions(_paths, base_dir=_base)
+    # The absolute paths are also sent to the workers, which load them too (#36).
+    definition_paths, base_dir, custom_node_paths = _resolve_definition_paths(
+        config_dict, pipeline_configuration
+    )
+    if definition_paths:
+        load_node_definitions(definition_paths, base_dir=base_dir)
 
     register_derivatives_from_dict(config_dict)
 
@@ -919,7 +975,7 @@ def build_derivative_dataframe(
             dataset_name,
             file_path,
             dataset_payloads[dataset_name],
-            common_roots.get(dataset_name),
+            *_worker_source_paths(file_path, common_roots.get(dataset_name)),
             mount_point,
             selected_derivatives,
             derivative_definitions,
@@ -927,6 +983,7 @@ def build_derivative_dataframe(
             collect_long_rows,
             raise_on_error,
             n_files,
+            custom_node_paths,
         )
         for index, dataset_name, file_path in all_files
     ]
@@ -967,6 +1024,7 @@ def _collect_dataframe_file(
     dataset_name: str,
     file_path: str,
     dataset_config_dict: dict,
+    source_path: str,
     common_root: str | None,
     mount_point: Any,
     selected_derivatives: list[str],
@@ -975,12 +1033,23 @@ def _collect_dataframe_file(
     collect_long_rows: bool,
     raise_on_error: bool,
     n_files: int,
+    custom_node_paths: tuple[str, ...] = (),
 ) -> tuple[dict | None, list[dict]]:
-    """Worker function for parallel dataframe collection — one call per file."""
+    """Worker function for parallel dataframe collection — one call per file.
+
+    ``file_path`` is the discovered spelling reported in the row; ``source_path``
+    and ``common_root`` are absolute (resolved in the parent, #35) and used for
+    all processing.
+    """
     from neurodags.loggers import configure_logging
 
     configure_logging()  # no-op in main process; configures structlog in fresh loky workers
     from neurodags.definitions import DatasetConfig
+
+    # Fresh loky workers have no custom nodes: load them so uncached / save=False
+    # derivatives using them can be computed here (#36). No-op once loaded.
+    if custom_node_paths:
+        load_node_definitions(custom_node_paths)
 
     # Re-register YAML derivatives in this (possibly fresh) worker so uncached
     # inter-derivative references resolve via the registry rather than raising
@@ -996,7 +1065,7 @@ def _collect_dataframe_file(
         log.info("Collecting dataframe row", total=n_files)
         try:
             reference_base = _build_reference_base(
-                file_path, dataset_config, common_root, mount_point
+                source_path, dataset_config, common_root, mount_point
             )
             row: dict[str, Any] = {"index": index, "dataset": dataset_name, "file_path": file_path}
             long_rows: list[dict] = []
@@ -1007,7 +1076,7 @@ def _collect_dataframe_file(
                         derivative_values = collect_derivative_for_dataframe(
                             derivative_def,
                             derivative_name,
-                            file_path,
+                            source_path,
                             reference_base=reference_base,
                             dataset_config=dataset_config,
                             mount_point=mount_point,
