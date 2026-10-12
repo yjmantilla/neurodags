@@ -166,14 +166,14 @@ def _make_split_dataset(tmp_path: Path) -> str:
 
 def test_datasets_default_drops_splits(tmp_path: Path):
     pattern = _make_split_dataset(tmp_path)
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern=pattern)}
+    datasets = {"ds": DatasetConfig(name="ds", source_root=str(tmp_path), file_pattern=pattern)}
     _, all_files, _ = get_all_files_across_datasets(datasets)
     assert len(all_files) == 1
 
 
 def test_datasets_global_optout(tmp_path: Path):
     pattern = _make_split_dataset(tmp_path)
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern=pattern)}
+    datasets = {"ds": DatasetConfig(name="ds", source_root=str(tmp_path), file_pattern=pattern)}
     _, all_files, _ = get_all_files_across_datasets(datasets, drop_split_continuations=False)
     assert len(all_files) == 3
 
@@ -181,7 +181,12 @@ def test_datasets_global_optout(tmp_path: Path):
 def test_datasets_per_dataset_optout(tmp_path: Path):
     pattern = _make_split_dataset(tmp_path)
     datasets = {
-        "ds": DatasetConfig(name="ds", file_pattern=pattern, drop_split_continuations=False)
+        "ds": DatasetConfig(
+            name="ds",
+            source_root=str(tmp_path),
+            file_pattern=pattern,
+            drop_split_continuations=False,
+        )
     }
     _, all_files, _ = get_all_files_across_datasets(datasets)
     assert len(all_files) == 3
@@ -218,14 +223,16 @@ def _make_plain_dataset(tmp_path: Path, n: int = 3) -> str:
 
 def test_datasets_skip_true_is_skipped(tmp_path: Path):
     pattern = _make_plain_dataset(tmp_path)
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern=pattern, skip=True)}
+    datasets = {
+        "ds": DatasetConfig(name="ds", source_root=str(tmp_path), file_pattern=pattern, skip=True)
+    }
     files_per_dataset, all_files, _ = get_all_files_across_datasets(datasets)
     assert files_per_dataset == {}
     assert all_files == []
 
 
 def test_datasets_empty_pattern_is_skipped(tmp_path: Path):
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern="")}
+    datasets = {"ds": DatasetConfig(name="ds", source_root=str(tmp_path), file_pattern="")}
     files_per_dataset, all_files, _ = get_all_files_across_datasets(datasets)
     assert files_per_dataset == {}
     assert all_files == []
@@ -233,7 +240,7 @@ def test_datasets_empty_pattern_is_skipped(tmp_path: Path):
 
 def test_datasets_pattern_error_is_skipped(tmp_path: Path, monkeypatch):
     pattern = _make_plain_dataset(tmp_path)
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern=pattern)}
+    datasets = {"ds": DatasetConfig(name="ds", source_root=str(tmp_path), file_pattern=pattern)}
 
     def boom(*args, **kwargs):
         raise RuntimeError("glob blew up")
@@ -246,7 +253,11 @@ def test_datasets_pattern_error_is_skipped(tmp_path: Path, monkeypatch):
 
 def test_datasets_no_files_found_is_skipped(tmp_path: Path):
     # Pattern matches nothing -> dataset produces no files and is skipped
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern=str(tmp_path / "**" / "*.fif"))}
+    datasets = {
+        "ds": DatasetConfig(
+            name="ds", source_root=str(tmp_path), file_pattern=str(tmp_path / "**" / "*.fif")
+        )
+    }
     files_per_dataset, all_files, _ = get_all_files_across_datasets(datasets)
     assert files_per_dataset == {}
     assert all_files == []
@@ -254,7 +265,7 @@ def test_datasets_no_files_found_is_skipped(tmp_path: Path):
 
 def test_datasets_max_files_per_dataset(tmp_path: Path):
     pattern = _make_plain_dataset(tmp_path, n=3)
-    datasets = {"ds": DatasetConfig(name="ds", file_pattern=pattern)}
+    datasets = {"ds": DatasetConfig(name="ds", source_root=str(tmp_path), file_pattern=pattern)}
     files_per_dataset, all_files, _ = get_all_files_across_datasets(
         datasets, max_files_per_dataset=1
     )

@@ -33,6 +33,31 @@
 - The generated `slurm-script` templates load the pipeline with
   `load_pipeline_configuration` and pass `base_dir=` (the pipeline's directory) to
   `run_pipeline`.
+- **Sorted discovery: file indices change once** (#41). Per dataset, discovered files are
+  deduplicated and sorted by their path relative to `source_root` (`/` separators, code-point
+  order: `sub-10` sorts before `sub-2`; zero-pad labels for a natural order), instead of the
+  filesystem's glob order. `max_files_per_dataset` keeps the first N after sorting (a limited
+  run is a prefix of the full run) and is applied before indexing, so with a limit
+  `--only-index` refers to the limited list (in 0.3.x `run` indexed the unlimited list).
+  Datasets are concatenated in YAML order. Regenerate any stored index lists after upgrading.
+- **`--only-index` with an unknown or negative index is an error** (was a warning, the index
+  being ignored): a clean `neurodags: error: ...` line and exit code `2` on the CLI;
+  `neurodags.iterators.IndexSelectionError` (a `ValueError`) from `run_pipeline`,
+  `iterate_derivative_pipeline` and `build_derivative_dataframe`, raised before anything is
+  written.
+- **A discovered file outside its dataset's `source_root` is a configuration error** naming
+  the file (`DatasetConfigError`), in every command that discovers files.
+- **One enumeration per invocation**: `run_pipeline` discovers the inputs once and shares them
+  with every derivative (it rediscovered per derivative), and `build_derivative_dataframe`
+  scans once (it scanned twice).
+- **`count-inputs` counts the enumeration directly** (number of index entries, as in 0.3.6)
+  instead of dry-running a derivative; `--derivative` is accepted but no longer affects it.
+- **`slurm-script` templates use a frozen input list**: the submit instructions run
+  `neurodags inputs pipeline.yml -o inputs.tsv` and size the array with
+  `count-inputs --inputs inputs.tsv`, and the workers pass `inputs=os.path.abspath("inputs.tsv")`.
+- `neurodags status --format json` gains `inputs`, `missing_source_indices` and `not_in_list`
+  keys, and a `missing-source` count per derivative and in `grand_total`.
+
 - **Dataframe columns use a new, reversible coordinate encoding** (`neurodags.naming.format_column`):
   dimension names and coordinate values are percent-encoded (UTF-8, uppercase hex) instead of
   the lossy 0.3.x character swaps, and dims are sorted by encoded name. Wide column names and
@@ -56,6 +81,27 @@
   (dims are always sorted by encoded name: one identity per column).
 
 ### Added
+
+- **`neurodags inputs pipeline.yml [-d DATASETS] [-o inputs.tsv]`** (#41): writes the frozen
+  input list, `# neurodags-inputs naming_version=1` followed by `index<TAB>dataset<TAB>rel`
+  lines (`rel`: path below `source_root`, POSIX separators), so one list works on every mount.
+- **`--inputs FILE`** on `run`, `dry-run`, `status`, `count-inputs` and `dataframe` (path
+  relative to the working directory), and `inputs=` on `run_pipeline`,
+  `iterate_derivative_pipeline` and `build_derivative_dataframe`: the list replaces discovery
+  for selection and indexing. Files on disk not in the list are counted and reported (logged;
+  printed by `status`) but not processed; listed files that no longer exist are reported as
+  `missing-source` at their original index (`status` shows them; `run` skips them with a
+  per-file error record; `--only-index` on such an index fails). The list is validated
+  (header/version, known non-skipped datasets, no duplicate indices, indices contiguous from
+  0); combining it with `max_files_per_dataset` is an error. `count-inputs --inputs` prints
+  the number of entries.
+- Enumeration API in `neurodags.iterators`: `discover_inputs`, `load_inputs`,
+  `enumerate_inputs`, `enumerate_pipeline_inputs`, `read_inputs_file`, `write_inputs_file`,
+  `format_inputs`, and the `InputEnumeration` / `InputEntry` records (each entry exposes
+  `index`, `dataset`, `rel`, `path` and `missing`). `run_pipeline` and
+  `iterate_derivative_pipeline` accept a precomputed `enumeration=`.
+  `get_all_files_across_datasets` / `get_all_files_from_pipeline_configuration` keep their
+  return shapes on top of it.
 
 - **`derivatives_subdir`** dataset field (optional): a relative subfolder of
   `derivatives_path` for the dataset (validated: no `..`, not absolute, not `code/` or

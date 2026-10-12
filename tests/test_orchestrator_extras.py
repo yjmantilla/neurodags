@@ -159,13 +159,14 @@ def test_iterate_pipeline_n_jobs_parallel(dummy_pipeline):
 
 
 # ---------------------------------------------------------------------------
-# iterate_derivative_pipeline — only_index with missing indices (warning path)
+# iterate_derivative_pipeline — only_index with unknown indices is an error (0.4.0)
 # ---------------------------------------------------------------------------
 
 
-def test_iterate_pipeline_only_index_missing_warns(dummy_pipeline):
+def test_iterate_pipeline_only_index_unknown_raises(dummy_pipeline):
     cfg = dummy_pipeline["config"]
-    iterate_derivative_pipeline(cfg, "BasicPrep", only_index=[9999], raise_on_error=False)
+    with pytest.raises(ValueError, match="unknown: 9999"):
+        iterate_derivative_pipeline(cfg, "BasicPrep", only_index=[9999], raise_on_error=False)
 
 
 # ---------------------------------------------------------------------------
@@ -296,17 +297,14 @@ def test_build_dataframe_include_nonexistent_derivative(dummy_pipeline):
 
 
 # ---------------------------------------------------------------------------
-# build_derivative_dataframe — only_index with missing index (warning path)
+# build_derivative_dataframe — only_index with unknown index is an error (0.4.0)
 # ---------------------------------------------------------------------------
 
 
-def test_build_dataframe_only_index_missing(dummy_pipeline):
+def test_build_dataframe_only_index_unknown_raises(dummy_pipeline):
     cfg = dummy_pipeline["config"]
-    iterate_derivative_pipeline(cfg, "BasicPrep", raise_on_error=True)
-    iterate_derivative_pipeline(cfg, "Spectrum", raise_on_error=True)
-
-    result = build_derivative_dataframe(cfg, only_index=[9999])
-    assert isinstance(result, pd.DataFrame)
+    with pytest.raises(ValueError, match="unknown: 9999"):
+        build_derivative_dataframe(cfg, only_index=[9999])
 
 
 # ---------------------------------------------------------------------------

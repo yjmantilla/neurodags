@@ -15,7 +15,12 @@ from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_config
 from neurodags.definitions import DatasetConfig
 from neurodags.derivatives import get_derivative, list_derivatives
 from neurodags.derivatives.pipeline import register_derivatives_from_dict
-from neurodags.iterators import get_all_files_from_pipeline_configuration
+from neurodags.iterators import (  # noqa: F401 - re-exported for compatibility
+    InputEntry,
+    InputEnumeration,
+    enumerate_inputs,
+    get_all_files_from_pipeline_configuration,
+)
 from neurodags.loaders import load_pipeline_configuration
 from neurodags.loggers import get_logger
 from neurodags.naming import ColumnCollisionError, error_column, validate_derivative_name
@@ -71,6 +76,26 @@ class _FileResult:
     error_message: str | None = None
     error_type: str | None = None
     traceback: str | None = None
+    # The entry of a frozen input list whose file no longer exists (spec §8.6).
+    missing_source: bool = False
+
+
+def _missing_source_result(entry: InputEntry, inputs_file: str | None, label: str) -> _FileResult:
+    """Per-file error record for a listed input that no longer exists (not processed)."""
+    return _FileResult(
+        index=entry.index,
+        dataset=entry.dataset,
+        file_path=entry.path,
+        derivative_label=label,
+        success=False,
+        stage="source",
+        error_message=(
+            f"missing-source: {entry.dataset}/{entry.rel} is listed in {inputs_file} but "
+            f"no longer exists ({entry.path}); not processed."
+        ),
+        error_type="MissingSourceError",
+        missing_source=True,
+    )
 
 
 def _sanitize_reference_base(path: str) -> str:
@@ -309,6 +334,8 @@ def iterate_derivative_pipeline(
     joblib_prefer: str | None = None,
     *,
     base_dir: str | os.PathLike | None = None,
+    inputs: str | os.PathLike | None = None,
+    enumeration: InputEnumeration | None = None,
 ) -> pd.DataFrame | None:
     """
     Iterate over all files specified in the pipeline configuration and call a given function on each file.
@@ -329,12 +356,15 @@ def iterate_derivative_pipeline(
         against the working directory itself and passes an absolute path; pass an absolute
         path here to avoid ambiguity.
     max_files_per_dataset : int, optional
-        Maximum number of files to process per dataset. If None, processes all files.
+        Maximum number of files to process per dataset: the first N in sorted order, applied
+        before indexing (so indices refer to the limited list). If None, processes all
+        files. Cannot be combined with ``inputs``.
     dry_run : bool, optional
         When True, evaluate the pipeline without executing nodes and return a dataframe describing
         the plan.
     only_index : int | list[int], optional
-        Restrict execution to a subset of files by index.
+        Restrict execution to a subset of files by index. A negative or unknown index raises
+        :class:`neurodags.iterators.IndexSelectionError` (a ``ValueError``).
     raise_on_error : bool, optional
         Re-raise the first failure instead of continuing.
     skip_errors : bool, optional
@@ -355,6 +385,15 @@ def iterate_derivative_pipeline(
         ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
         against that file's directory instead. Without it, relative dataset paths in a
         mapping are an error.
+    inputs : str | os.PathLike, optional
+        Frozen input list written by ``neurodags inputs`` (relative paths resolve against
+        the current working directory). It replaces discovery for selection and indexing;
+        listed files that no longer exist are reported as ``missing-source`` and not
+        processed. See :func:`neurodags.iterators.load_inputs`.
+    enumeration : neurodags.iterators.InputEnumeration, optional
+        An already computed enumeration (used by :func:`run_pipeline` so that all
+        derivatives share one). Cannot be combined with ``inputs`` or
+        ``max_files_per_dataset``.
 
     Returns
     -------
@@ -390,44 +429,24 @@ def iterate_derivative_pipeline(
     # derivatives_subdir and shared derivatives_path fail before any file is touched.
     resolve_dataset_paths(datasets_configs, mount_point)
 
-    files_per_dataset, all_files, common_roots = get_all_files_from_pipeline_configuration(
-        pipeline_configuration,
-        datasets_input=datasets_configuration,
-        max_files_per_dataset=None,  # gather all files, then filter locally
-        base_dir=base_dir,
-    )
+    # One enumeration per invocation (spec §8): run_pipeline passes its own down.
+    if enumeration is None:
+        enumeration = enumerate_inputs(
+            datasets_configs,
+            mount_point,
+            max_files_per_dataset=max_files_per_dataset,
+            inputs=inputs,
+        )
+    elif inputs is not None or max_files_per_dataset is not None:
+        raise ValueError(
+            "enumeration= cannot be combined with inputs= or max_files_per_dataset= "
+            "(they are already applied to the enumeration)."
+        )
+    common_roots = enumeration.common_roots
+    # Sorted, limited, indexed; only_index filters it (unknown indices raise).
+    selected_entries = enumeration.select(only_index)
 
     dry_run_collection: list[dict[str, Any]] = []
-    if only_index is not None:
-        index_filter = only_index if isinstance(only_index, list) else [only_index]
-        filtered_files = [item for item in all_files if item[0] in index_filter]
-        if len(filtered_files) != len(index_filter):
-            found = [item[0] for item in filtered_files]
-            missing = list(set(index_filter) - set(found))
-            log.warning(
-                "Some specified indices in only_index were not found in the files to process.",
-                requested_indices=index_filter,
-                found_indices=found,
-            )
-            log.warning("Missing indices will be ignored.", missing_indices=missing)
-            log.warning("Proceeding with available indices.")
-        all_files = filtered_files
-
-    if max_files_per_dataset is not None:
-        filtered_files = []
-        dataset_file_count = dict.fromkeys(files_per_dataset.keys(), 0)
-        for item in all_files:
-            dataset_name = item[1]
-            if dataset_file_count[dataset_name] < max_files_per_dataset:
-                filtered_files.append(item)
-                dataset_file_count[dataset_name] += 1
-        all_files = filtered_files
-        log.debug(
-            "iterate_call_pipeline: applied max_files_per_dataset filter",
-            max_files_per_dataset=max_files_per_dataset,
-            total_files=len(all_files),
-            per_dataset=dataset_file_count,
-        )
 
     derivative_entry = None
     node_callable: Callable | None = None
@@ -478,8 +497,17 @@ def iterate_derivative_pipeline(
     derivative_definitions_map = config_dict.get("DerivativeDefinitions", {}) or {}
 
     jobs: list[_FileJob] = []
+    missing_results: list[_FileResult] = []
     dataset_payloads: dict[str, dict] = {}
-    for index, dataset_name, file_path in all_files:
+    for input_entry in selected_entries:
+        index, dataset_name, file_path = input_entry.index, input_entry.dataset, input_entry.path
+        if input_entry.missing:
+            missing_results.append(
+                _missing_source_result(
+                    input_entry, enumeration.inputs_file, derivative_label or "<unknown>"
+                )
+            )
+            continue
         log.debug("Processing file", index=index, dataset=dataset_name, file_path=file_path)
         if dataset_name not in dataset_payloads:
             dataset_payloads[dataset_name] = _dataset_job_payload(
@@ -511,12 +539,14 @@ def iterate_derivative_pipeline(
         )
 
     log.info("Starting derivative processing", total_files=len(jobs))
-    if not jobs:
+    if not jobs and not missing_results:
         log.info("No files to process")
         return pd.DataFrame(dry_run_collection) if dry_run else None
 
     parallel_results: list[_FileResult]
-    if effective_n_jobs in (None, 1):
+    if not jobs:
+        parallel_results = []
+    elif effective_n_jobs in (None, 1):
         parallel_results = []
         for job in jobs:
             result = _process_file_job(job)
@@ -531,8 +561,22 @@ def iterate_derivative_pipeline(
         parallel_results = Parallel(**parallel_kwargs)(
             delayed(_process_file_job)(job) for job in jobs
         )
+    if missing_results:
+        parallel_results = sorted([*parallel_results, *missing_results], key=lambda r: r.index)
 
     for result in parallel_results:
+        if dry_run and result.missing_source:
+            # status shows these as "missing-source" at their original index.
+            dry_run_collection.append(
+                {
+                    "index": result.index,
+                    "dataset": result.dataset,
+                    "file_path": result.file_path,
+                    "derivative": result.derivative_label,
+                    "source_status": "missing-source",
+                    "plan": [],
+                }
+            )
         if result.success:
             log.info(
                 "Processed file successfully",
@@ -746,6 +790,8 @@ def run_pipeline(
     joblib_prefer: str | None = None,
     *,
     base_dir: str | os.PathLike | None = None,
+    inputs: str | os.PathLike | None = None,
+    enumeration: InputEnumeration | None = None,
 ) -> pd.DataFrame | None:
     """
     Execute multiple derivatives from a pipeline configuration in dependency order.
@@ -767,11 +813,14 @@ def run_pipeline(
         Derivatives are automatically sorted in topological order based on inter-derivative
         dependencies before execution.
     max_files_per_dataset : int, optional
-        Maximum number of files to process per dataset.
+        Maximum number of files to process per dataset: the first N in sorted order, applied
+        before indexing. Cannot be combined with ``inputs``.
     dry_run : bool, optional
         When True, evaluate the pipeline without executing nodes and return a dataframe.
     only_index : int | list[int], optional
-        Restrict execution to a subset of files by index.
+        Restrict execution to a subset of files by index. A negative or unknown index raises
+        :class:`neurodags.iterators.IndexSelectionError` (a ``ValueError``) before anything
+        is written.
     raise_on_error : bool, optional
         Re-raise the first failure instead of continuing.
     skip_errors : bool, optional
@@ -791,11 +840,20 @@ def run_pipeline(
         ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
         against that file's directory instead. Without it, relative dataset paths in a
         mapping are an error.
+    inputs : str | os.PathLike, optional
+        Frozen input list written by ``neurodags inputs`` (relative paths resolve against
+        the current working directory); replaces discovery for selection and indexing. See
+        :func:`iterate_derivative_pipeline`.
+    enumeration : neurodags.iterators.InputEnumeration, optional
+        An already computed enumeration to use instead of enumerating the inputs (the CLI
+        ``status`` command passes its own to report files not in an input list). Cannot be
+        combined with ``inputs`` or ``max_files_per_dataset``.
 
     Returns
     -------
     None | pandas.DataFrame
         Returns a combined dataframe with dry-run details when ``dry_run=True``; otherwise ``None``.
+        Inputs are enumerated once and shared by every derivative.
     """
     # Refuses a configuration without naming_version: 1 before anything else.
     config = load_pipeline_configuration(pipeline_configuration)
@@ -819,6 +877,21 @@ def run_pipeline(
         _ds_configs = None
     if _ds_configs is not None:
         resolve_dataset_paths(_ds_configs, _mount)
+        # One enumeration per invocation, shared by every derivative (spec §8). Done
+        # before the snapshot so a bad input list or index fails before any write.
+        if enumeration is None:
+            enumeration = enumerate_inputs(
+                _ds_configs,
+                _mount,
+                max_files_per_dataset=max_files_per_dataset,
+                inputs=inputs,
+            )
+        elif inputs is not None or max_files_per_dataset is not None:
+            raise ValueError(
+                "enumeration= cannot be combined with inputs= or max_files_per_dataset= "
+                "(they are already applied to the enumeration)."
+            )
+        enumeration.select(only_index)  # validate --only-index up front
 
     if (
         not dry_run
@@ -852,7 +925,9 @@ def run_pipeline(
             pipeline_configuration=pipeline_configuration,
             derivative=derivative,
             datasets_configuration=datasets_configuration,
-            max_files_per_dataset=max_files_per_dataset,
+            # Already applied to the shared enumeration; when the datasets could not be
+            # loaded above, iterate re-raises the loading error itself.
+            max_files_per_dataset=None if enumeration is not None else max_files_per_dataset,
             dry_run=dry_run,
             only_index=only_index,
             raise_on_error=raise_on_error,
@@ -861,6 +936,8 @@ def run_pipeline(
             joblib_backend=joblib_backend,
             joblib_prefer=joblib_prefer,
             base_dir=base_dir,
+            inputs=None if enumeration is not None else inputs,
+            enumeration=enumeration,
         )
         if dry_run and result is not None:
             dry_run_results.append(result)
@@ -882,6 +959,7 @@ def build_derivative_dataframe(
     raise_on_error: bool = False,
     n_jobs: int | None = None,
     base_dir: str | os.PathLike | None = None,
+    inputs: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
     """
     Assemble a dataframe by collecting derivative artifacts for every file in a pipeline configuration.
@@ -901,9 +979,11 @@ def build_derivative_dataframe(
     include_derivatives : list[str], optional
         Restrict collection to this explicit subset of derivative names.
     max_files_per_dataset : int, optional
-        Limit the number of files processed per dataset.
+        Limit the number of files processed per dataset (the first N in sorted order).
+        Cannot be combined with ``inputs``.
     only_index : int | list[int], optional
-        Restrict collection to specific indices (matching iterate_derivative_pipeline behaviour).
+        Restrict collection to specific indices (matching iterate_derivative_pipeline behaviour;
+        a negative or unknown index raises ``IndexSelectionError``, a ``ValueError``).
     output_format : {"wide", "long"}, optional
         Shape of the returned dataframe. ``"wide"`` retains one row per file with derivative columns,
         while ``"long"`` yields one row per collected derivative value without synthesising missing columns.
@@ -927,6 +1007,9 @@ def build_derivative_dataframe(
         ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
         against that file's directory instead. Without it, relative dataset paths in a
         mapping are an error.
+    inputs : str | os.PathLike, optional
+        Frozen input list written by ``neurodags inputs``; replaces discovery for selection
+        and indexing. Listed files that no longer exist (``missing-source``) get no row.
 
     Returns
     -------
@@ -1009,38 +1092,26 @@ def build_derivative_dataframe(
     # Preflight (#28): fail on unresolved ~/$VARS before any directory is touched.
     resolve_dataset_paths(datasets_configs, mount_point)
 
-    _, _, common_roots = get_all_files_from_pipeline_configuration(
-        pipeline_configuration,
-        datasets_input=datasets_configuration,
-        max_files_per_dataset=None,
-        base_dir=base_dir,
-    )
-
-    files_per_dataset, all_files, _ = get_all_files_from_pipeline_configuration(
-        pipeline_configuration,
-        datasets_input=datasets_configuration,
+    # One enumeration (spec §8); the layout roots come from the unlimited discovery.
+    enumeration = enumerate_inputs(
+        datasets_configs,
+        mount_point,
         max_files_per_dataset=max_files_per_dataset,
-        base_dir=base_dir,
+        inputs=inputs,
     )
+    common_roots = enumeration.common_roots
+    selected_entries = enumeration.select(only_index)
+    for missing_entry in (e for e in selected_entries if e.missing):
+        log.error(
+            "Missing source file listed in the input list; no dataframe row",
+            index=missing_entry.index,
+            dataset=missing_entry.dataset,
+            file_path=missing_entry.path,
+            inputs_file=enumeration.inputs_file,
+        )
+    all_files = [(e.index, e.dataset, e.path) for e in selected_entries if not e.missing]
 
-    log.debug(
-        "build_derivative_dataframe: enumerated files",
-        total_files=len(all_files),
-        per_dataset=files_per_dataset,
-    )
-
-    if only_index is not None:
-        index_filter = only_index if isinstance(only_index, list) else [only_index]
-        filtered = [item for item in all_files if item[0] in index_filter]
-        if len(filtered) != len(index_filter):
-            detected = [item[0] for item in filtered]
-            missing = list(set(index_filter) - set(detected))
-            log.warning(
-                "Some indices requested for dataframe collection were not found.",
-                requested=index_filter,
-                missing=missing,
-            )
-        all_files = filtered
+    log.debug("build_derivative_dataframe: enumerated files", total_files=len(all_files))
 
     if output_format not in {"wide", "long"}:
         raise ValueError(f"Unsupported output_format '{output_format}'. Expected 'wide' or 'long'.")

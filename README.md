@@ -136,8 +136,9 @@ Exit code `0` only when all derivatives are complete (no missing, no errored); `
 ### Source File Count
 
 ```bash
-neurodags count-inputs pipeline.yml                         # number of source (input) files the pipeline will process
-neurodags count-inputs pipeline.yml --derivative CleanedEEG # count for a specific derivative
+neurodags count-inputs pipeline.yml                         # number of input entries (size of the --only-index range)
+neurodags count-inputs pipeline.yml --inputs inputs.tsv    # number of entries in a frozen input list
+neurodags inputs pipeline.yml -o inputs.tsv                 # freeze the input list (index, dataset, path)
 ```
 
 ### Dataframe Assembly

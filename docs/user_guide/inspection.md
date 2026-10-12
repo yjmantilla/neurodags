@@ -159,12 +159,16 @@ Missing files:
     [idx 12] /data/sub-05/ses-01/sub-05_task-rest.vhdr
 ```
 
-The index is a position in the discovered input list (datasets in config order, files in
-discovery order). It identifies the same file only while the dataset configuration and the
-set of input files are unchanged — regenerate it right before resubmitting, don't store it.
-If an index cannot be determined it is shown as `[idx ?]`.
+The index is a position in the input list: datasets in config order, files sorted by their
+path below `source_root` (code-point order, so `sub-10` before `sub-2`). Without `--inputs`
+it identifies the same file only while the dataset configuration and the set of input files
+are unchanged — regenerate it right before resubmitting, don't store it. With a frozen list
+(`neurodags status pipeline.yml --inputs inputs.tsv`, see {doc}`hpc`) the indices are those
+of the list; the report then also says how many files on disk are not in the list, and
+lists listed files that no longer exist as `missing-source` (they are never part of
+`--format indices`). If an index cannot be determined it is shown as `[idx ?]`.
 
-**Exit codes:** `0` only when all derivatives are complete (no missing, no errored); `1` when any derivative is missing or has a `.error` marker. This makes `status` usable in shell scripts and CI dependency chains:
+**Exit codes:** `0` only when all derivatives are complete (no missing, no errored, no `missing-source` input); `1` when any derivative is missing or has a `.error` marker, or a listed input is `missing-source`. This makes `status` usable in shell scripts and CI dependency chains:
 
 ```bash
 # fail fast if anything is incomplete or errored
@@ -187,9 +191,16 @@ neurodags status pipeline.yml --format json
   "grand_total": {"total": 42, "done": 30, "skipped": 0, "missing": 10, "errored": 2},
   "complete": false,
   "missing_indices": [3, 7, 12, 15, 18, 21, 25, 30, 33, 40],
-  "errored_indices": [0, 9]
+  "errored_indices": [0, 9],
+  "inputs": null,
+  "missing_source_indices": [],
+  "not_in_list": 0
 }
 ```
+
+The per-derivative and grand-total counts also carry a `"missing-source"` key. `inputs` is the
+absolute path of the `--inputs` list (`null` without one); `missing_source_indices` and
+`not_in_list` are only non-empty / non-zero with `--inputs`.
 
 `missing_indices` / `errored_indices` are the sorted, de-duplicated file indices with at least
 one missing / errored derivative (across the selected derivatives; narrow with
@@ -214,7 +225,8 @@ neurodags status pipeline.yml --format json --include-files
   ]
 ```
 
-`status` is one of `done`, `skipped`, `missing`, `errored`, `no-save`, `unknown`. When no
+`status` is one of `done`, `skipped`, `missing`, `errored`, `no-save`, `unknown`, or
+`missing-source` (with `--inputs`: listed, but no longer on disk). When no
 input files are found, `--format json` still emits a valid document (zero counts, empty
 index lists, `"complete": true`).
 
@@ -230,7 +242,7 @@ neurodags status pipeline.yml --derivative Alpha --format indices
 ```
 
 The exit code keeps its meaning in every format: `1` whenever something is missing or
-errored, i.e. exactly when the list is non-empty. Under `set -e`, capturing it with `$(...)`
+errored (or, with `--inputs`, a listed input is `missing-source`). Under `set -e`, capturing it with `$(...)`
 would abort the script precisely when there is something to resubmit, so add `--exit-zero`:
 
 ```bash

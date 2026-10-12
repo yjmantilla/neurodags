@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from neurodags.cli import main, resolve_cli_datasets_path
+from neurodags.iterators import InputEnumeration
 
 
 def test_importing_cli_keeps_stdout_clean():
@@ -294,12 +295,16 @@ def test_view_launches_visualization_subprocess():
 # ---------------------------------------------------------------------------
 
 
-def test_count_prints_unique_file_count(dummy_pipeline, capsys):
+def test_count_prints_number_of_entries(dummy_pipeline, capsys):
+    from neurodags.iterators import InputEntry, InputEnumeration
+
     cfg = dummy_pipeline["config"]
-    fake_df = pd.DataFrame({"file_path": ["a", "a", "b"], "other": [1, 2, 3]})
+    fake = InputEnumeration(
+        entries=[InputEntry(0, "d", "a", "/r/a"), InputEntry(1, "d", "b", "/r/b")]
+    )
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.run_pipeline", return_value=fake_df),
+        patch("neurodags.cli._cli_enumeration", return_value=fake),
     ):
         assert main(["count-inputs", "pipeline.yml"]) == 0
     assert capsys.readouterr().out.strip() == "2"
@@ -327,10 +332,11 @@ def test_count_counts_dataset_entries_not_unique_paths(dummy_pipeline, tmp_path,
 
 
 def test_count_prints_zero_on_empty_result(dummy_pipeline, capsys):
+
     cfg = dummy_pipeline["config"]
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
+        patch("neurodags.cli._cli_enumeration", return_value=InputEnumeration(entries=[])),
     ):
         assert main(["count-inputs", "pipeline.yml"]) == 0
     assert capsys.readouterr().out.strip() == "0"
@@ -767,18 +773,22 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
         "complete",
         "missing_indices",
         "errored_indices",
+        "inputs",
+        "missing_source_indices",
+        "not_in_list",
     }
     assert data["missing_indices"] == [1, 4]
     assert data["errored_indices"] == [4, 9]
     assert all(type(i) is int for i in data["missing_indices"] + data["errored_indices"])
     for counts in data["derivatives"].values():
-        assert set(counts) == {"total", "done", "skipped", "missing", "errored"}
+        assert set(counts) == {"total", "done", "skipped", "missing", "errored", "missing-source"}
     assert data["derivatives"]["BasicPrep"] == {
         "total": 4,
         "done": 1,
         "skipped": 0,
         "missing": 2,
         "errored": 1,
+        "missing-source": 0,
     }
     assert data["n_files"] == 4
     assert "files" not in data
@@ -864,6 +874,7 @@ def test_status_empty_result_json_is_valid(dummy_pipeline, capsys):
         "skipped": 0,
         "missing": 0,
         "errored": 0,
+        "missing-source": 0,
     }
     assert data["complete"] is True
     assert data["missing_indices"] == []
@@ -973,6 +984,7 @@ def test_log_level_flag_passed_to_configure_logging(dummy_pipeline, capsys):
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
         patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
         patch("neurodags.cli.configure_logging") as mock_log,
+        patch("neurodags.cli._cli_enumeration", return_value=InputEnumeration(entries=[])),
     ):
         assert main(["--log-level", "WARNING", "count-inputs", "pipeline.yml"]) == 0
         mock_log.assert_called_once()
@@ -987,6 +999,7 @@ def test_log_file_flag_passed_to_configure_logging(dummy_pipeline, tmp_path):
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
         patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
         patch("neurodags.cli.configure_logging") as mock_log,
+        patch("neurodags.cli._cli_enumeration", return_value=InputEnumeration(entries=[])),
     ):
         assert main(["--log-file", log_path, "count-inputs", "pipeline.yml"]) == 0
         _, kwargs = mock_log.call_args
@@ -1134,11 +1147,22 @@ def test_datasets_path_missing_subprocess_has_no_traceback(tmp_path):
 def test_datasets_path_resolved_for_every_subcommand(tmp_path, monkeypatch, argv):
     _, alt = _write_nested_pipeline(tmp_path)
     monkeypatch.chdir(tmp_path)
+
+    seen: list = []
+
+    def fake_enumeration(args):
+        seen.append(args.datasets)
+        return InputEnumeration(entries=[])
+
     with (
         patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()) as rp,
         patch("neurodags.cli.build_derivative_dataframe", return_value=pd.DataFrame()) as bd,
+        patch("neurodags.cli._cli_enumeration", side_effect=fake_enumeration),
     ):
         main([argv[0], "p/x/pipeline.yml", "-d", "p/x/alt.yml", *argv[1:]])
+    if argv[0] == "count-inputs":  # counts the enumeration, no dry run
+        assert seen == [str(alt)]
+        return
     called = bd if argv[0] == "dataframe" else rp
     assert called.call_args.kwargs["datasets_configuration"] == str(alt)
 

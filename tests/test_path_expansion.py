@@ -170,6 +170,7 @@ def test_exclude_pattern_is_expanded(monkeypatch, tmp_path):
     datasets = {
         "d": DatasetConfig(
             name="d",
+            source_root=str(tmp_path),
             file_pattern="$ND_TEST_DATA/*.fif",
             exclude_pattern="$ND_TEST_DATA/bad_*.fif",
         )
@@ -183,6 +184,7 @@ def test_unset_exclude_pattern_variable_raises(monkeypatch, tmp_path):
     datasets = {
         "d": DatasetConfig(
             name="d",
+            source_root=str(tmp_path),
             file_pattern=str(tmp_path / "*.fif"),
             exclude_pattern="$ND_TEST_UNSET/bad_*.fif",
         )
