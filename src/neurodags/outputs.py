@@ -416,7 +416,8 @@ class UnitState:
     origin: str | None = None
     #: Why an existing ``.done`` is not valid (``None`` when valid or absent).
     problem: str | None = None
-    #: Files matching ``prefix.*`` that the manifest does not list (and are ignored).
+    #: For a done unit: files matching ``prefix.*`` that its manifest does not list (they
+    #: are ignored). Empty for other states.
     unlisted: tuple[str, ...] = ()
     error_path: str | None = None
     skip_path: str | None = None
@@ -452,7 +453,9 @@ def unit_state(prefix: str, name: str, *, scan: bool = True) -> UnitState:
     problem, resolved = _manifest_problem(manifest, prefix, name)
     files = _prefix_files(prefix) if scan else []
     listed = {os.path.normpath(p) for paths in resolved.values() for p in paths}
-    unlisted = tuple(p for p in files if os.path.normpath(p) not in listed)
+    unlisted = (
+        tuple(p for p in files if os.path.normpath(p) not in listed) if problem is None else ()
+    )
     common = {
         "prefix": prefix,
         "error_path": error_path if has_error else None,
