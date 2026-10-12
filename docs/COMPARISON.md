@@ -14,7 +14,7 @@ If your data comes in files and you process each file independently, NeuroDAGs o
 | **Philosophy** | Derivative-centric (Push) | File-centric (Pull) | Task-centric Dataflow |
 | **Config Style** | YAML + Python nodes | Python-based DSL | Pure Python API |
 | **Output Naming** | Automatic \`@Derivative\` | Manual Wildcards / \`bids()\` | Managed Caching (machine-readable) |
-| **BIDS Relation** | BIDS-Preserving (Flexible) | BIDS-Aware (Strict) | BIDS-Agnostic (Glue code needed) |
+| **BIDS Relation** | Input-naming-convention agnostic (input names kept; no BIDS validation; optional BIDS-aware `bids_parse` node) | BIDS-Aware (Strict) | BIDS-Agnostic (Glue code needed) |
 | **Aggregation** | Built-in \`dataframe\` | Manual "Reduce" Rules | Manual "Combiners" |
 | **Data Types** | MNE / xarray first-class; generic artifacts supported | Generic Files | Generic Python Objects |
 | **Cross-file Operations** | Not supported — each file is independent | Supported via reduce rules | Supported via combiners |
@@ -29,7 +29,7 @@ If your data comes in files and you process each file independently, NeuroDAGs o
 
 ### 1. Convention Over Configuration
 In general-purpose managers, you spend significant time managing file paths and wildcards (e.g., \`{subject}_{session}_{task}\`).
-**NeuroDAGs** uses a "Path-Preserving Prefix" strategy. It automatically appends \`@DerivativeName\` to the original filename. This ensures that your output directory structure perfectly mirrors your input, regardless of how many BIDS entities (run, acquisition, etc.) your data contains, without you ever writing a regex.
+**NeuroDAGs** uses an "append to the source name" strategy. It keeps the source file name, including its extension, and appends \`@<DerivativeName><artifact suffix>\` (e.g. \`sub-01_task-rest.vhdr@BandPower.nc\`), so you never write wildcards or a regex, however many entities (BIDS or otherwise) your file names contain. With a \`derivatives_path\`, outputs are placed at each file's path relative to the common root of the discovered files, so the layout mirrors the input tree below that root; the root depends on which files the dataset pattern matches (layout stability is tracked in [#50](https://github.com/yjmantilla/neurodags/issues/50)). NeuroDAGs does not validate or produce BIDS-Derivatives-compliant names; the optional \`bids_parse\` node extracts BIDS entities from paths when you need them. See [File Naming Conventions](user_guide/naming.md).
 
 ### 2. "Push" vs. "Pull" Logic
 Tools like **Snakemake** are "Pull-based": you define what *output* you want, and it works backward. This is powerful for heterogeneous pipelines but can be complex for irregular datasets.
@@ -51,7 +51,7 @@ Nodes are plain Python functions decorated with \`@register_node\`. They can be 
 
 - **Cross-file or group-level operations mid-pipeline**: NeuroDAGs processes each file independently — group ICA, normalization to a group mean, atlas registration using a subject-average template, or any operation that needs to read from multiple files cannot be expressed as a derivative. These require post-processing outside the framework. If cross-file operations are central to your pipeline, use Snakemake or Pydra.
 - **Cache invalidation on code change**: Caching is existence-based. NeuroDAGs does not detect when a node's implementation changed and silently reuses stale outputs. You must manually set `overwrite: true` or delete cached files after modifying node code. If hash-based invalidation matters, use Pydra.
-- **Strict BIDS-App compliance required**: Snakebids has native BIDS validation and output layout enforcement. NeuroDAGs preserves input paths but does not validate against the BIDS spec.
+- **Strict BIDS-App compliance required**: Snakebids has native BIDS validation and output layout enforcement. NeuroDAGs keeps input file names and appends its own suffix, but does not validate against the BIDS spec or produce BIDS-Derivatives-compliant outputs.
 - **Production-grade cluster scheduling**: `neurodags slurm-script` generates submission templates but does not integrate with cluster schedulers. Snakemake and Pydra have native SLURM/SGE/PBS profiles with automatic job monitoring, resubmission, and resource accounting.
 - **Full provenance tracking**: NeuroDAGs has no provenance graph — it cannot tell you which version of a node produced a given file. If audit trails matter, Pydra's hash-based caching or DVC are better fits.
 - **Non-file-based pipelines**: NeuroDAGs assumes each unit of work is an input file discoverable via a glob pattern. Database records, streaming data, and large-scale generic ETL do not fit this model.

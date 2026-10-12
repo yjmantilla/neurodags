@@ -9,6 +9,7 @@ usage
 tui
 concepts
 pipeline_yaml
+naming
 datasets_yaml
 custom_nodes
 parser_nodes

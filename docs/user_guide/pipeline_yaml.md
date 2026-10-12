@@ -49,7 +49,7 @@ Relative paths resolved from the pipeline YAML location. Each module is executed
 
 ## DerivativeDefinitions
 
-Each key is a derivative name (CamelCase by convention). The value is a derivative definition:
+Each key is a derivative name (CamelCase by convention, see [Derivative names](#derivative-names)). The value is a derivative definition:
 
 ```yaml
 DerivativeDefinitions:
@@ -63,6 +63,22 @@ DerivativeDefinitions:
       - id: 1
         ...
 ```
+
+(derivative-names)=
+
+### Derivative names
+
+Outputs are written as `<source>@<OnDiskName><artifact suffix>`. A name without `_` is used as
+is (`BandPower` → `@BandPower`, `psd-welch` → `@psd-welch`); a name with `_` is converted to
+CamelCase (`fit_w_l06` → `@FitWL06`, `band_power` → `@BandPower`), keeping the derivative name a
+single token without `_` (a separator in many naming conventions, including BIDS). Everything else — `DerivativeList`, reuse steps
+(`derivative: fit_w_l06.nc`), dataframe columns — uses the YAML name. `neurodags validate` shows
+each on-disk name that differs from its YAML name, and names that collide on disk (e.g.
+`band_power` and `BandPower`) or contain `.`, `@`, `/`, `\`, `*`, `?`, `[`, `]` are rejected
+before anything runs.
+
+See **[File Naming Conventions](naming.md)** for all naming rules: output files, marker files,
+references, the output layout, `&` in chained pipelines and dataframe column names.
 
 ### Derivative Flags
 
@@ -97,7 +113,7 @@ Each entry in `nodes` is a step with a unique `id`. Steps execute in topological
   derivative: CleanedEEG.fif
 ```
 
-- `derivative`: `<DerivativeName>.<ext>` — resolves the named derivative for the current file
+- `derivative`: `<DerivativeName>.<ext>` — resolves the named derivative for the current file; use the YAML name, not the on-disk name (see {ref}`Derivative references <naming-references>`)
 - Use `SourceFile` to load the raw input file
 
 If the upstream derivative is already cached on disk, the matching file is loaded. If the upstream derivative has not yet been written (it is being computed in the same run), the in-memory `NodeResult` is used directly — both paths produce identical results.

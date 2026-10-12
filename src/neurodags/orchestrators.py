@@ -20,7 +20,12 @@ from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
-from neurodags.utils import expand_path, get_path, resolve_dataset_paths
+from neurodags.utils import (
+    check_derivative_names,
+    expand_path,
+    get_path,
+    resolve_dataset_paths,
+)
 
 log = get_logger(__name__)
 
@@ -133,6 +138,22 @@ def _worker_source_paths(file_path: str, common_root: str | None) -> tuple[str, 
     """
     abs_root = os.path.abspath(common_root) if common_root is not None else None
     return os.path.abspath(file_path), abs_root
+
+
+def _check_derivative_names(config_dict: dict) -> None:
+    """Preflight: reject invalid or colliding derivative names (#42).
+
+    Every name in ``DerivativeDefinitions`` is checked, not only the run set:
+    dependencies are pulled in from outside the run set, and all derivatives of
+    a pipeline share one derivatives directory across runs, so a collision
+    between any two definitions corrupts cached outputs sooner or later. Pure
+    computation, so it runs before anything is written.
+    """
+    defs = config_dict.get("DerivativeDefinitions") or {}
+    mapping = check_derivative_names(defs)
+    renamed = {name: file_name for name, file_name in mapping.items() if name != file_name}
+    if renamed:
+        log.debug("Derivative on-disk names differ from YAML names", renamed=renamed)
 
 
 def _resolve_definition_paths(
@@ -352,6 +373,7 @@ def iterate_derivative_pipeline(
     config_dict = (
         load_configuration(pipeline_configuration) if is_path_like else pipeline_configuration
     )
+    _check_derivative_names(config_dict)
 
     definition_paths, base_dir, custom_node_paths = _resolve_definition_paths(
         config_dict, pipeline_configuration
@@ -775,6 +797,10 @@ def run_pipeline(
         else pipeline_configuration
     )
 
+    # Preflight (#42): colliding derivative on-disk names fail before anything is
+    # written, instead of silently sharing cached files.
+    _check_derivative_names(config)
+
     # Preflight: resolve ~/$VARS in every active dataset's path fields before
     # anything is written (code snapshot, derivative dirs), so an unset variable
     # fails loudly here instead of creating a literal "$VAR" directory or being
@@ -909,6 +935,7 @@ def build_derivative_dataframe(
             "No 'DerivativeDefinitions' found in the configuration. Returning empty dataframe."
         )
         return pd.DataFrame()
+    _check_derivative_names(config_dict)
 
     # Load custom node definitions so save=False derivatives using custom nodes work.
     # The absolute paths are also sent to the workers, which load them too (#36).

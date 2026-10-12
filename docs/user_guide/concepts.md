@@ -11,15 +11,15 @@ SourceFile → CleanedEEG → CrossSpectralDensity → PowerSpectrum → BandPow
 
 ## Derivative
 
-A **derivative** is a named, reusable computation result associated with an input file. Derivatives are stored on disk with a `@DerivativeName` suffix next to their source file:
+A **derivative** is a named, reusable computation result associated with an input file. Derivatives are stored on disk with a `@DerivativeName` suffix appended to their source file's name:
 
 ```
-sub-1.fif               → source
-sub-1@CleanedEEG.fif    → derivative
-sub-1@PowerSpectrum.nc  → derivative
+sub-1.fif                     → source
+sub-1.fif@CleanedEEG.fif      → derivative
+sub-1.fif@PowerSpectrum.nc    → derivative
 ```
 
-Derivatives mirror the input directory structure — NeuroDAGs is agnostic to how your data is organized.
+Derivatives mirror the input directory structure — NeuroDAGs is agnostic to how your data is organized. Derivative names containing `_` are written in CamelCase on disk (`power_spectrum` → `@PowerSpectrum`); see **[File Naming Conventions](naming.md)** for every naming rule and restriction.
 
 ### Chaining pipelines (neurodags output as source)
 
@@ -31,6 +31,8 @@ sub-1.fif&CleanedEEG.fif@PowerSpectrum.nc  → new derivative
 ```
 
 This means downstream tooling can always split on the single `@` to separate the source identity from the derivative name.
+
+Avoid `@` and `&` in raw source file names for the same reason (see {ref}`Output layout <naming-output-layout>`).
 
 ## Node
 

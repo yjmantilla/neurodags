@@ -3,7 +3,7 @@ import ntpath
 import os
 import posixpath
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
@@ -290,6 +290,16 @@ def _resolve_eval_strings(value: Any) -> Any:
 def snake_to_camel(snake_str):
     """Convert a snake_case string to CamelCase.
 
+    Used to turn a derivative name into the suffix of its on-disk files
+    (``<source>@<CamelName>.<ext>``). It keeps the derivative name a single token
+    without ``_``, which many file-naming conventions (including BIDS) use as a
+    separator. Names without ``_`` are returned unchanged (``-`` is left as is);
+    otherwise each ``_``-separated part is title-cased and joined
+    (``fit_w_l06`` -> ``FitWL06``). Changing this
+    rule would rename existing cached outputs, so it is kept stable; distinct
+    derivative names that map to the same token are rejected by
+    :func:`check_derivative_names` (#42).
+
     Parameters
     ----------
     snake_str : str
@@ -304,6 +314,103 @@ def snake_to_camel(snake_str):
         return snake_str  # no conversion needed
     components = snake_str.split("_")
     return "".join(x.title() for x in components)
+
+
+def derivative_file_names(derivative_names: Iterable[Any]) -> dict[str, str]:
+    """Map each derivative name to the name its on-disk files use (``@<name>``).
+
+    Parameters
+    ----------
+    derivative_names : iterable
+        Derivative names as written in ``DerivativeDefinitions``.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{yaml_name: on_disk_name}`` in input order, via :func:`snake_to_camel`.
+    """
+    return {str(name): snake_to_camel(str(name)) for name in derivative_names}
+
+
+# Characters a derivative name must not contain, and why (#42). Each one breaks
+# the ``<source>@<name><artifact suffix>`` layout or the existence-based cache:
+_FORBIDDEN_NAME_CHARS = {
+    ".": "separates the name from the artifact suffix ('derivative: Name.ext' splits at "
+    "the first '.', and the cache glob '@Name.*' would match another derivative's files)",
+    "@": "separates the source name from the derivative name (one '@' per file name)",
+    "/": "is a path separator",
+    "\\": "is a path separator",
+    "*": "is a glob wildcard used by the cache lookup",
+    "?": "is a glob wildcard used by the cache lookup",
+    "[": "is a glob character used by the cache lookup",
+    "]": "is a glob character used by the cache lookup",
+}
+_RESERVED_DERIVATIVE_NAMES = {"SourceFile": "'derivative: SourceFile' means the raw input file"}
+
+
+def check_derivative_names(derivative_names: Iterable[Any]) -> dict[str, str]:
+    """Validate derivative names against the on-disk naming rules.
+
+    Outputs are cached by existence of ``<source>@<on-disk name>.*``, so a name
+    that breaks that layout, or two names sharing an on-disk name, silently
+    reuse the wrong files (#42). Rejected:
+
+    - an empty name, the reserved name ``SourceFile``, and names containing
+      ``.``, ``@``, ``/``, ``\\``, ``*``, ``?``, ``[`` or ``]``;
+    - two names whose on-disk names (:func:`snake_to_camel`) are equal, or equal
+      up to case (the same file on case-insensitive filesystems), e.g.
+      ``band_power`` and ``BandPower`` (both ``@BandPower``).
+
+    Parameters
+    ----------
+    derivative_names : iterable
+        Derivative names as written in ``DerivativeDefinitions``.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{yaml_name: on_disk_name}`` (see :func:`derivative_file_names`).
+
+    Raises
+    ------
+    ValueError
+        Listing every offending name, with both YAML names and the shared
+        on-disk name for collisions.
+    """
+    mapping = derivative_file_names(derivative_names)
+    problems: list[str] = []
+    for name in mapping:
+        if not name:
+            problems.append("an empty derivative name is not allowed")
+        elif name in _RESERVED_DERIVATIVE_NAMES:
+            problems.append(f"{name!r} is reserved: {_RESERVED_DERIVATIVE_NAMES[name]}")
+        for char, reason in _FORBIDDEN_NAME_CHARS.items():
+            if char in name:
+                problems.append(f"{name!r} contains {char!r}, which {reason}")
+
+    by_file_name: dict[str, list[str]] = {}
+    for name, file_name in mapping.items():
+        by_file_name.setdefault(file_name.casefold(), []).append(name)
+    for names in by_file_name.values():
+        if len(names) > 1:
+            on_disk = sorted({mapping[n] for n in names})
+            shown = " / ".join(f"'@{f}'" for f in on_disk)
+            note = " (same file on case-insensitive filesystems)" if len(on_disk) > 1 else ""
+            problems.append(
+                " and ".join(repr(n) for n in names)
+                + f" collide on disk: files named {shown}{note}"
+            )
+
+    if problems:
+        raise ValueError(
+            "DerivativeDefinitions: invalid derivative names: "
+            + "; ".join(problems)
+            + ". Derivative outputs are named '<source>@<OnDiskName><artifact suffix>', where "
+            "the on-disk name is the YAML name converted with snake_to_camel "
+            "('_'-separated parts title-cased and joined); colliding names would read and "
+            "overwrite each other's cached outputs. Rename the derivative(s)."
+        )
+    return mapping
 
 
 def analyze_bids_filename(path: PathLike) -> dict[str, bool]:
