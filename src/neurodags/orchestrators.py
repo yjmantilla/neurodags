@@ -1127,6 +1127,8 @@ def _collect_dataframe_file(
                 source_path, dataset_config, common_root, mount_point
             )
             row: dict[str, Any] = {"index": index, "dataset": dataset_name, "file_path": file_path}
+            # Which derivative wrote each column, so cross-derivative collisions can be reported.
+            column_owner: dict[str, str] = dict.fromkeys(row, "<row metadata>")
             long_rows: list[dict] = []
             for derivative_name in selected_derivatives:
                 derivative_def = derivative_definitions.get(derivative_name, {}) or {}
@@ -1143,7 +1145,16 @@ def _collect_dataframe_file(
                             flatten_xarray_artifacts=not preserve_complex_values,
                         )
                         if derivative_values:
+                            collisions = sorted(set(derivative_values) & set(column_owner))
+                            if collisions:
+                                log.warning(
+                                    "Dataframe column collision: derivative produces columns "
+                                    "already present in the row; earlier values are overwritten",
+                                    columns=collisions,
+                                    previous_owners=sorted({column_owner[c] for c in collisions}),
+                                )
                             row.update(derivative_values)
+                            column_owner.update(dict.fromkeys(derivative_values, derivative_name))
                             if collect_long_rows:
                                 for column_name, value in derivative_values.items():
                                     long_rows.append(

@@ -105,6 +105,37 @@
   results (or failing per file) before. Rename the derivative(s). On-disk naming of all valid
   names is unchanged.
 
+- **Cached outputs were not found when a path contained `[`, `]`, `*` or `?`**: the cache
+  lookup globbed `<output prefix>.*` with the literal output path, so glob metacharacters in
+  the source file name or in **any** parent directory name (e.g. `study [2024]/sub-01.vhdr`)
+  were interpreted as a pattern. Affected users: anyone whose source files, dataset
+  directories or `derivatives_path` contain `[`, `]`, `*` or `?`. For them every derivative
+  was silently recomputed on every run, `neurodags status` / dry-run reported those outputs
+  as missing, `derivative: Name.ext` reuse steps recomputed the upstream derivative, and
+  `for_dataframe` derivatives were skipped during dataframe collection. A bracketed name
+  could also produce a wrong cache hit (`a[1].fif` matched the outputs of `a1.fif`). The
+  literal prefix is now escaped (only the trailing `.*` is a pattern) and only regular files
+  count as artifacts. Output paths are unchanged, so after upgrading existing outputs are
+  found again — no recompute needed. `file_pattern` / `exclude_pattern` are still user glob
+  patterns: a literal bracketed directory there must be escaped by the user (e.g.
+  `study [[]2024]/**/*.vhdr`, see `glob.escape`).
+- **Dataframe column collisions are now reported instead of silent**: when flattening an
+  xarray artifact, coordinate values are encoded into column names (`-`→`~`, `_`→`|`,
+  `@`→`$`, `,`→`.`), so distinct coordinates such as `a-b` and `a~b` map to the same column
+  and the earlier value was overwritten without notice. A warning
+  (`Dataframe column collision while flattening artifact ...`) now names the derivative,
+  artifact suffix, generated column suffix, and both original coordinate sets. Likewise, when
+  two derivatives produce the same column in a dataframe row, a warning
+  (`Dataframe column collision: derivative produces columns already present in the row ...`)
+  names the columns, the derivative being merged and the previous owner. Output (column
+  names, last value wins) is unchanged; the encoding itself will be revisited in 0.4.0.
+- **Mermaid diagrams with non-identifier derivative names** (e.g. `psd-welch`):
+  `pipeline_to_mermaid` / `neurodags dag` used raw derivative names as Mermaid node ids, which
+  produced invalid diagrams for names containing `-` or other punctuation. Such names now get
+  a sanitized id (non-word characters → `_`, de-duplicated with a numeric suffix if needed)
+  and keep the real name as the node label. Diagrams whose names are already valid ids are
+  unchanged.
+
 ### Documentation
 
 - The pipeline YAML guide has a new section on sharing node arguments across derivatives

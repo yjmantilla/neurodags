@@ -67,6 +67,28 @@ def _safe_label(text: str) -> str:
     return text.replace('"', "'")
 
 
+def _node_ids(names) -> dict[str, str]:
+    """Map each name to a valid, unique Mermaid node id.
+
+    Names made only of word characters are used verbatim; any other character
+    (e.g. ``-`` in ``psd-welch``) becomes ``_``, with a numeric suffix added if
+    two names sanitize to the same id.
+    """
+    ids: dict[str, str] = {}
+    used: set[str] = set()
+    for name in names:
+        if name in ids:
+            continue
+        base = re.sub(r"\W", "_", name)
+        node_id, n = base, 2
+        while node_id in used:
+            node_id = f"{base}_{n}"
+            n += 1
+        used.add(node_id)
+        ids[name] = node_id
+    return ids
+
+
 def derivative_to_mermaid(derivative_def: dict, derivative_name: str) -> str:
     """Generate a Mermaid graph string for a single derivative definition.
 
@@ -130,12 +152,14 @@ def pipeline_to_mermaid(pipeline_config: dict) -> str:
 
     lines = ["    %% Pipeline DAG", "    flowchart TD"]
 
+    # Valid names first so they keep their verbatim ids; sanitized ones de-duplicate around them.
+    node_ids = _node_ids(sorted(defs, key=lambda n: re.search(r"\W", n) is not None))
     for name in defs:
         label = _safe_label(name)
-        lines.append(f'      {name}["{label}"]')
+        lines.append(f'      {node_ids[name]}["{label}"]')
 
     for src, dst in dep_edges:
-        lines.append(f"      {src} --> {dst}")
+        lines.append(f"      {node_ids[src]} --> {node_ids[dst]}")
 
     return "\n".join(lines)
 
