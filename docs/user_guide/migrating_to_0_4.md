@@ -156,22 +156,38 @@ the next part's file name, so the parts cannot simply be renamed. For each such 
 changes, migrate:
 
 1. reads it with MNE (`read_raw_fif`, or `read_epochs` when it is not a raw file);
-2. saves it under the new name (creating its folder if needed, never overwriting an existing
-   file) with the same split size and the original data format (raw:
+2. saves it into a private staging folder,
+   `<derivatives_path>/.neurodags/staging/<transaction>/`, in the original data format (raw:
    `orig_format`; epochs: `single`, then `double` if `single` does not reproduce the data),
-   through `neurodags.writers.save_mne`, which reports every part written;
-3. reloads it and checks that the data are identical (`numpy.array_equal`) and that the
-   channel names and types, sampling rate, bad channels, measurement date and, for raw,
-   first sample, length and annotations (for epochs: events, event ids and times) match;
-4. only then deletes the old parts. The new parts are listed in the unit's `.done`.
+   through `neurodags.writers.save_mne`, which reports every part written. MNE's default split
+   size (2 GB) is used: the original split size is not stored in the files, and MNE reserves
+   room in every part, so a size guessed from the part lengths would multiply the parts. A
+   recording split into many small parts therefore usually becomes fewer, larger parts;
+3. reloads the staged copy and checks that the data are identical (`numpy.array_equal`) and
+   that the channel names and types, sampling rate, bad channels, measurement date and, for
+   raw, first sample, length and annotations (for epochs: events, event ids and times) match;
+   the size and SHA-256 of every staged part go to the journal;
+4. publishes each part under its new name with a hard link (`os.link`), which fails instead of
+   replacing a file that already exists there. Without hard links (some network or FAT
+   filesystems) the name is first claimed with an exclusive create;
+5. only then deletes the old parts. The new parts are listed in the unit's `.done`.
 
-If the check fails, the new files are removed, the old recording stays where it is, and the
-unit is listed after `--apply` as "left in place, to be recomputed". A recording whose file
-name does not change (only its folder) is moved part by part without rewriting (the parts
-refer to each other by base name only): every part and its destination are written to the
-journal before the first move, so an interrupted run rejoins the parts across both folders,
-and the recording is opened with MNE (all parts present and chained) before its `.done` is
-written. The whole recording is loaded into memory for a rewrite.
+If the check fails, the staged copy is removed, the old recording stays where it is, and the
+unit is listed after `--apply` as "left in place, to be recomputed". If a file appears at a new
+name (another program), the run stops without touching it or the old recording; the verified
+copy stays in staging and the next run publishes it once the name is free. A file at a new
+name counts as this migration's only when it is its staged file or matches the recorded size
+and SHA-256, never because an earlier run started the rewrite. The whole recording is loaded
+into memory for a rewrite.
+
+A recording whose file name does not change (only its folder) is moved part by part without
+rewriting (the parts refer to each other by base name only). Before the first move its
+headers are read (a recording that does not open is left in place) and the complete part
+list, destinations and data shape are written to the journal, once per recording, so any
+number of interrupted runs rejoin the parts across both folders. Before its `.done` is
+written the recording is loaded in full (every data buffer read): MNE must read exactly the
+listed parts, and the data shape must equal the one recorded before the move. A single FIF
+file that refers to a next part (its continuations are missing) is not certified either.
 
 ## Manifests for migrated outputs
 
@@ -184,7 +200,7 @@ for most derivatives) is complete for the unit. That set only decides completene
 - units missing an artifact of that set (a partial 0.3.x write);
 - units with an `.error` marker;
 - every unit of a derivative whose two most common sets tie;
-- split recordings that do not open with MNE after the move (a missing or broken part).
+- FIF recordings that do not load completely (a missing, truncated or broken part).
 
 Units with a `.skip` marker keep it (status `skipped`). `--no-synthesize` writes no
 manifests at all, so every migrated unit is recomputed.
@@ -310,7 +326,9 @@ Nothing is applied while any of these remains:
 | A derivative name is invalid in 0.4.0 (`.`, `@`, spaces, `Clean` + `Clean-1`, ...) | Rename it with `--map OLD=NEW`. |
 | Two derivatives share an on-disk token (`band_power` and `BandPower`) | Rename or remove one before migrating. |
 | `--map OLD=NEW` would give two derivatives the same name (`NEW` is already another definition, also ignoring case) | Choose another `NEW`; two definitions would otherwise collapse into one and one's outputs would be taken as the other's. |
-| Another `--apply` holds `<derivatives_path>/.neurodags/migrate.lock` | Wait for it to finish. If no migrate is running (it was killed), delete the lock file. A lock left by a dead process on the same host is taken over automatically. |
+| Another `--apply` holds `<derivatives_path>/.neurodags/migrate.lock` (the refusal shows its pid, host and start time) | Wait for it to finish. If no migrate is running on that tree (it was killed, or the machine restarted), delete the lock file and run again. A lock is never removed automatically. |
+| A file at the new name of a re-saved MNE recording is not this migration's verified copy | Move it away (the verified copy waits in `.neurodags/staging/`) and run again. |
+| The new name of an MNE split recording differs only in case and the filesystem ignores case | Choose a `--map` name that differs beyond case (re-saving in place would destroy the old recording). |
 | Two datasets share a `derivatives_path` without distinct `derivatives_subdir` | Add `derivatives_subdir` to the datasets in the 0.3.x file, then migrate (their outputs move into the subfolders). |
 | A `$VAR/...` dataset path expands to a relative path | Write it as an absolute path. |
 | A `.bak-0.3` backup already exists with other content | Move the old backup away. |
@@ -320,19 +338,28 @@ Nothing is applied while any of these remains:
 
 - The preview reads only; `--apply` re-checks every precondition (old files still there,
   targets still free, including every part name of a re-saved MNE recording, configuration
-  unchanged since the plan) before touching anything, and never overwrites a file it did not
-  write. A target that appears during the run stops it (run again to finish).
-- `--apply` holds a lock file, `migrate.lock` next to the journal, for its whole run: a second
-  `neurodags migrate --apply` on the same output tree is refused until the first finishes. It
-  serializes migrate runs only; do not run the pipeline on a tree while it is migrated.
-- Moves use `os.replace` (atomic, same filesystem). Every completed operation is appended to
+  unchanged since the plan) before touching anything. It never replaces an existing file:
+  moves are `os.link` then `os.unlink` (without hard links: an exclusive create of the new
+  name, then `os.replace` onto it), and MNE re-saves are staged and published the same way.
+  A file that appears at a target during the run stops it, untouched; run again to finish.
+- `--apply` holds a lock file, `migrate.lock` next to each tree's journal, for its whole run,
+  also when only configuration files change: a second `neurodags migrate --apply` on the same
+  output tree is refused until the first finishes. The lock is never taken over or removed
+  automatically; after a killed run, delete it by hand (the refusal names it). It serializes
+  migrate runs only; do not run the pipeline on a tree while it is migrated.
+- Every completed operation is appended to
   `<derivatives_path>/.neurodags/migrate-journal.json` (JSON Lines; for datasets without
-  `derivatives_path`, `.neurodags/` next to the pipeline). If a run is interrupted, run the
-  same command again: it scans the tree, continues the remaining moves, completes
-  half-moved units and uses the journal to finish (or redo) an interrupted MNE rewrite. Files
+  `derivatives_path`, `.neurodags/` next to the pipeline). If a run is interrupted, at any
+  point and any number of times, run the same command again: it scans the tree, continues
+  the remaining moves (a file left with both its old and its new name finishes its move),
+  completes half-moved units, rejoins split recordings from the journal and publishes or
+  redoes an interrupted MNE rewrite. Files
   already moved to a chained 0.4.0 name (`x@A.fif@B.nc`, which the 0.3.x parser rejects) are
   recognized as the planned target of their discovered source and join their unit, which then
   gets its `.done`.
+- An identical duplicate left in place is recorded in the journal with its size and SHA-256,
+  so it stays a duplicate after its kept copy was re-saved under the new name; if it changes
+  afterwards it is a conflict again.
 - Configuration files are written last, after every file move, with `.bak-0.3` backups: a
   separate datasets YAML first, then the pipeline (which declares `naming_version: 1`). An
   interrupted run therefore leaves either the 0.3.x pipeline (with the datasets YAML possibly

@@ -527,19 +527,19 @@ def test_chained_unit_moved_before_its_manifest_is_completed_on_resume(tmp_path,
 
     plan = _plan(pipe, tmp_path)
     assert len(plan.moves) == 2
-    real_replace = os.replace
+    real_replace = os.link
     calls = {"n": 0}
 
-    def flaky_replace(src, dst):
+    def flaky_replace(src, dst, **kw):
         calls["n"] += 1
         if calls["n"] == 2:
             raise OSError("disk went away")
-        return real_replace(src, dst)
+        return real_replace(src, dst, **kw)
 
-    monkeypatch.setattr(migrate.os, "replace", flaky_replace)
+    monkeypatch.setattr(migrate.os, "link", flaky_replace)
     with pytest.raises(OSError, match="disk went away"):
         apply_migration(plan)
-    monkeypatch.setattr(migrate.os, "replace", real_replace)
+    monkeypatch.setattr(migrate.os, "link", real_replace)
     # Half moved: one file at the new name, one at the 0.3.x name, no .done.
     names = sorted(p.name for p in folder.iterdir())
     assert len([n for n in names if n.startswith("x.vhdr@CleanPrep.fif@band_power.")]) == 1
@@ -668,7 +668,7 @@ def test_mne_split_recording_is_rewritten_and_verified(tmp_path):
     prefix = str(tmp_path / "derivatives" / f"{RELS[0]}@band_power")
     artifacts = manifest_artifacts(prefix, "band_power")
     assert artifacts is not None
-    assert len(artifacts[".fif"]) > 1
+    assert 1 <= len(artifacts[".fif"]) <= len(old_parts)
     assert artifacts[".fif"][0] == prefix + ".fif"
     assert result.rewritten[0]["new_parts"] == artifacts[".fif"]
     reloaded = mne.io.read_raw_fif(prefix + ".fif", preload=True, verbose="error")
@@ -697,38 +697,44 @@ def test_mne_rewrite_failure_leaves_unit_in_place(tmp_path, monkeypatch):
     assert "data differ" in result.recompute[0]["reason"]
 
 
-def test_mne_rewrite_resumes_after_verification(tmp_path):
-    """Interrupted after the new files were verified: the next run only deletes the old parts."""
-    pytest.importorskip("mne")
+def test_mne_rewrite_resumes_after_staging(tmp_path, monkeypatch):
+    """Interrupted while publishing the verified, staged copy: the next run publishes it
+    (never re-saving) and deletes the old parts."""
+    mne = pytest.importorskip("mne")
     pipe = _project(tmp_path)
     _sources(tmp_path / "raw", RELS[:1])
     old_main = tmp_path / "derivatives" / f"{RELS[0]}@BandPower.fif"
-    _, old_parts = _split_raw(old_main)
+    original, old_parts = _split_raw(old_main)
     prefix = str(tmp_path / "derivatives" / f"{RELS[0]}@band_power")
-    plan = _plan(pipe, tmp_path)
-    rewrite = plan.mne_rewrites[0]
-    new_parts, problem = migrate._rewrite_mne(rewrite)
-    assert problem is None
-    journal = tmp_path / "derivatives/.neurodags/migrate-journal.json"
-    journal.parent.mkdir(parents=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "op": "mne-verified",
-                "old_parts": old_parts,
-                "new": prefix + ".fif",
-                "new_parts": new_parts,
-            }
-        )
-        + "\n"
-    )
+    staging = tmp_path / "derivatives/.neurodags/staging"
+    real_link = os.link
+
+    def interrupt(src, dst, **kw):
+        if str(staging) in os.fspath(src):
+            raise KeyboardInterrupt("interrupted while publishing")
+        return real_link(src, dst, **kw)
+
+    monkeypatch.setattr(migrate.os, "link", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        apply_migration(_plan(pipe, tmp_path))
+    monkeypatch.setattr(migrate.os, "link", real_link)
+    assert all(os.path.exists(p) for p in old_parts)
+    assert not os.path.exists(prefix + ".fif")
 
     plan = _plan(pipe, tmp_path)
     assert plan.refusals == []
-    assert plan.mne_rewrites[0].finished_parts == new_parts
+    assert plan.mne_rewrites[0].staged is not None
+
+    def no_resave(*args, **kwargs):
+        raise AssertionError("the staged copy must be published, not re-saved")
+
+    monkeypatch.setattr(migrate, "_rewrite_mne", no_resave)
     apply_migration(plan)
     assert all(not os.path.exists(p) for p in old_parts)
-    assert manifest_artifacts(prefix, "band_power") == {".fif": new_parts}
+    assert unit_state(prefix, "band_power").state == "done"
+    reloaded = mne.io.read_raw_fif(prefix + ".fif", preload=True, verbose="error")
+    assert reloaded.n_times == original.n_times
+    assert not any(staging.iterdir())
 
 
 def test_split_recording_with_unchanged_name_is_moved_as_is(tmp_path):
@@ -760,21 +766,21 @@ def test_split_recording_with_unchanged_name_is_moved_as_is(tmp_path):
 def test_interrupted_apply_resumes(full_project, tmp_path, monkeypatch):
     pipe, _ = full_project
     plan = _plan(pipe, tmp_path)
-    real_replace = os.replace
+    real_replace = os.link
     calls = {"n": 0}
 
-    def flaky_replace(src, dst):
+    def flaky_replace(src, dst, **kw):
         if os.fspath(dst).endswith(".done"):  # manifest publication, not a move
-            return real_replace(src, dst)
+            return real_replace(src, dst, **kw)
         calls["n"] += 1
         if calls["n"] == 4:
             raise OSError("disk went away")
-        return real_replace(src, dst)
+        return real_replace(src, dst, **kw)
 
-    monkeypatch.setattr(migrate.os, "replace", flaky_replace)
+    monkeypatch.setattr(migrate.os, "link", flaky_replace)
     with pytest.raises(OSError, match="disk went away"):
         apply_migration(plan)
-    monkeypatch.setattr(migrate.os, "replace", real_replace)
+    monkeypatch.setattr(migrate.os, "link", real_replace)
 
     # Configuration untouched (written only after every move succeeded).
     assert (tmp_path / "pl.yml").read_text() == PIPELINE_TEXT
@@ -851,20 +857,28 @@ def test_unit_half_moved_by_an_interrupted_run_is_completed(tmp_path):
     assert set(state.artifacts) == {".nc", ".json"}
 
 
-def test_mne_rewrite_started_but_not_verified_is_redone(tmp_path):
+def test_mne_rewrite_started_but_not_staged_is_redone(tmp_path, monkeypatch):
+    """Interrupted while saving (journal mne-start only): the next run saves again."""
     pytest.importorskip("mne")
     pipe = _project(tmp_path)
     _sources(tmp_path / "raw", RELS[:1])
     old_main = tmp_path / "derivatives" / f"{RELS[0]}@BandPower.fif"
     _, old_parts = _split_raw(old_main)
     prefix = str(tmp_path / "derivatives" / f"{RELS[0]}@band_power")
-    Path(prefix + ".fif").write_text("half written")
-    assert _plan(pipe, tmp_path).refusals  # not ours (no journal): refused
+    from neurodags import writers
 
+    real_save = writers.save_mne
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("interrupted while saving")
+
+    monkeypatch.setattr(writers, "save_mne", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        apply_migration(_plan(pipe, tmp_path))
+    monkeypatch.setattr(writers, "save_mne", real_save)
     journal = tmp_path / "derivatives/.neurodags/migrate-journal.json"
-    journal.parent.mkdir(parents=True)
-    entry = {"op": "mne-start", "old_parts": old_parts, "new": prefix + ".fif"}
-    journal.write_text(json.dumps(entry) + "\n")
+    assert "mne-start" in [e["op"] for e in read_journal(str(journal))]
+
     plan = _plan(pipe, tmp_path)
     assert plan.refusals == []
     apply_migration(plan)
@@ -1298,12 +1312,86 @@ def test_apply_refuses_while_another_apply_holds_the_lock(full_project, tmp_path
     assert not lock.exists()  # released
 
 
-def test_stale_lock_of_a_dead_process_is_taken_over(full_project, tmp_path):
+def test_lock_of_a_dead_process_is_not_taken_over(full_project, tmp_path):
+    """F4: a lock is never removed automatically; the refusal names its holder."""
     pipe, _ = full_project
     lock = tmp_path / "derivatives/.neurodags" / migrate.LOCK_NAME
     lock.parent.mkdir(parents=True)
-    lock.write_text(json.dumps({"pid": 2**22 + 12345, "host": migrate._hostname()}))
-    apply_migration(_plan(pipe, tmp_path))
+    holder = {"pid": 2**22 + 12345, "host": migrate._hostname(), "time": "2026-10-12T00:00:00Z"}
+    lock.write_text(json.dumps(holder))
+    with pytest.raises(MigrationRefused) as info:
+        apply_migration(_plan(pipe, tmp_path))
+    message = str(info.value)
+    assert str(holder["pid"]) in message
+    assert holder["time"] in message
+    assert "delete that file" in message
+    assert json.loads(lock.read_text()) == holder
+
+
+def test_release_never_removes_another_runs_lock(tmp_path):
+    """F4: a run releases only the lock it created (same token)."""
+    lock = migrate._acquire_lock(str(tmp_path))
+    other = {"pid": 1, "host": "elsewhere", "token": "not-ours"}
+    Path(lock[0]).write_text(json.dumps(other))
+    migrate._release_lock(lock)
+    assert json.loads(Path(lock[0]).read_text()) == other
+
+
+def _contend(directory, barrier, queue, finished):
+    barrier.wait()
+    try:
+        migrate._acquire_lock(directory)
+    except MigrationRefused:
+        queue.put("refused")
+        return
+    queue.put("acquired")
+    finished.wait(30)  # hold the lock until the other contender has tried
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fork-based contention test")
+@pytest.mark.parametrize("stale", [False, True])
+def test_two_contending_runs_never_both_hold_the_lock(tmp_path, stale):
+    """F4: two processes racing for one tree's lock: at most one acquires it; a lock left
+    by a dead process is never taken over (both are refused)."""
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("fork")
+    for attempt in range(10):
+        directory = tmp_path / f"t{attempt}"
+        if stale:
+            directory.mkdir()
+            dead = {"pid": 2**22 + 12345, "host": migrate._hostname()}
+            (directory / migrate.LOCK_NAME).write_text(json.dumps(dead))
+        barrier, queue, finished = ctx.Barrier(2), ctx.Queue(), ctx.Event()
+        procs = [
+            ctx.Process(target=_contend, args=(str(directory), barrier, queue, finished))
+            for _ in "ab"
+        ]
+        for proc in procs:
+            proc.start()
+        results = sorted(queue.get(timeout=30) for _ in procs)
+        finished.set()
+        for proc in procs:
+            proc.join(timeout=30)
+        assert results == (["refused", "refused"] if stale else ["acquired", "refused"])
+
+
+def test_configuration_only_apply_takes_the_tree_lock(tmp_path):
+    """F7: an apply that only rewrites the configuration still respects a held lock."""
+    pipe = _mini_project(tmp_path)
+    text = pipe.read_text()
+    lock = tmp_path / "out/.neurodags" / migrate.LOCK_NAME
+    lock.parent.mkdir(parents=True)
+    lock.write_text(json.dumps({"pid": os.getpid(), "host": migrate._hostname()}))
+    plan = _plan(pipe, tmp_path)
+    assert plan.config_changes
+    assert not plan.moves
+    with pytest.raises(MigrationRefused, match="holds the lock"):
+        apply_migration(plan)
+    assert pipe.read_text() == text
+    lock.unlink()
+    apply_migration(plan)
+    assert "naming_version: 1" in pipe.read_text()
     assert not lock.exists()
 
 
@@ -1348,7 +1436,7 @@ def test_compressed_split_recording_is_rewritten_as_one_artifact(tmp_path):
     state = unit_state(prefix, "clean_raw")
     assert state.state == "done"
     assert list(state.artifacts) == [".fif.gz"]
-    assert len(state.artifacts[".fif.gz"]) > 1
+    assert 1 <= len(state.artifacts[".fif.gz"]) <= len(parts)
     assert _reload_n_times(prefix + ".fif.gz") == n_times
     assert not any(os.path.exists(p) for p in parts)
     assert not _plan(pipe, tmp_path).has_work
@@ -1374,12 +1462,12 @@ def test_compressed_split_rewrite_interrupted_while_deleting_old_parts(tmp_path,
     resumed = _plan(pipe, tmp_path)
     assert resumed.refusals == []
     assert resumed.to_dict()["unrecognized"] == []
-    assert [r.finished_parts is not None for r in resumed.mne_rewrites] == [True]
+    assert [r.staged is not None for r in resumed.mne_rewrites] == [True]
     apply_migration(resumed)
     prefix = str(tmp_path / "out/sub/x.txt@clean_raw")
     state = unit_state(prefix, "clean_raw")
     assert state.state == "done"
-    assert len(state.artifacts[".fif.gz"]) > 1
+    assert len(state.artifacts[".fif.gz"]) >= 1
     _reload_n_times(prefix + ".fif.gz")
     assert not any(os.path.exists(p) for p in parts)
 
@@ -1401,53 +1489,332 @@ def test_compressed_split_recording_with_unchanged_name_is_moved_whole(tmp_path)
     _reload_n_times(prefix + ".fif.gz")
 
 
-@pytest.mark.parametrize("moved_before_crash", [1, 2, 3])
-def test_interrupted_folder_only_split_move_resumes_with_every_part(
-    tmp_path, monkeypatch, moved_before_crash
-):
-    """M4: interrupted at any part boundary, resume rejoins the parts across both folders."""
-    pipe = _mini_project(tmp_path)
-    parts = _split_any(tmp_path / "out/x.txt@Clean.fif")
-    assert len(parts) > moved_before_crash
-    n_times = _reload_n_times(parts[0])
+class _Crash(BaseException):
+    """Injected interruption (like KeyboardInterrupt: not caught as an Exception)."""
+
+
+def _crash_at(monkeypatch, root: Path, at: int | None) -> dict[str, int]:
+    """Interrupt the *at*-th filesystem step under *root* (``os.link``, ``os.unlink``,
+    ``os.replace``, MNE ``save``), right after performing it; ``at=0`` before the first.
+
+    The steps are the real ones: the injected crash only stops the run between them.
+    """
+    from neurodags import writers
+
+    calls = {"n": 0}
+    real = {name: getattr(os, name) for name in ("link", "unlink", "replace")}
+    real_save = writers.save_mne
+
+    def step(perform, path):
+        if at is None or migrate.LOCK_NAME in os.fspath(path):
+            return perform()
+        if str(root) not in os.fspath(path):
+            return perform()
+        if at == 0:
+            raise _Crash("before the first step")
+        out = perform()
+        calls["n"] += 1
+        if calls["n"] == at:
+            raise _Crash(f"after step {at}")
+        return out
+
+    def wrap(name):
+        def wrapped(src, *args, **kwargs):
+            return step(lambda: real[name](src, *args, **kwargs), src)
+
+        return wrapped
+
+    for name in real:
+        monkeypatch.setattr(migrate.os, name, wrap(name))
+    monkeypatch.setattr(
+        writers, "save_mne", lambda obj, path, **kw: step(lambda: real_save(obj, path, **kw), path)
+    )
+    return calls
+
+
+def _run_interrupted(monkeypatch, pipe, tmp_path, crash_points):
+    """Plan and apply once per crash point (each interrupted there), then once cleanly.
+
+    Returns, per crash point, whether the run was really interrupted.
+    """
+    crashed = []
+    for at in crash_points:
+        plan = _plan(pipe, tmp_path)
+        assert plan.refusals == []
+        _crash_at(monkeypatch, tmp_path / "out", at)
+        try:
+            apply_migration(plan)
+            crashed.append(False)
+        except _Crash:
+            crashed.append(True)
+        finally:
+            monkeypatch.undo()
+        assert not (tmp_path / "out/.neurodags" / migrate.LOCK_NAME).exists()
     plan = _plan(pipe, tmp_path)
-    real_replace = os.replace
-    moved: list[str] = []
+    assert plan.refusals == []
+    assert plan.to_dict()["unrecognized"] == []
+    apply_migration(plan)
+    return crashed
 
-    def interrupt(src, dst):
-        if os.fspath(src) in parts:
-            if len(moved) == moved_before_crash:
-                raise OSError("interrupted between parts")
-            moved.append(os.fspath(src))
-        return real_replace(src, dst)
 
-    monkeypatch.setattr(migrate.os, "replace", interrupt)
-    with pytest.raises(OSError, match="interrupted between parts"):
-        apply_migration(plan)
-    monkeypatch.setattr(migrate.os, "replace", real_replace)
+@pytest.fixture(scope="module")
+def small_split(tmp_path_factory):
+    """A real three-part MNE split recording (copied into each test)."""
+    mne = pytest.importorskip("mne")
+    np = pytest.importorskip("numpy")
+    folder = tmp_path_factory.mktemp("split")
+    raw = mne.io.RawArray(
+        np.random.default_rng(1).standard_normal((4, 150_000)) * 1e-5,
+        mne.create_info(4, 1000.0, "eeg"),
+        verbose="error",
+    )
+    saved: dict[str, list[str]] = {}
 
-    resumed = _plan(pipe, tmp_path)
-    assert resumed.refusals == []
-    assert resumed.to_dict()["unrecognized"] == []
-    apply_migration(resumed)
-    prefix = str(tmp_path / "out/sub/x.txt@Clean")
-    state = unit_state(prefix, "Clean")
+    def parts_named(basename: str) -> list[str]:
+        # The parts embed each other's names: saved once per name, then copied.
+        if basename not in saved:
+            (folder / basename).mkdir()
+            written = raw.save(
+                folder / basename / basename, split_size="2MB", overwrite=True, verbose="error"
+            )
+            saved[basename] = [str(p) for p in written]
+            assert len(saved[basename]) == 3
+        return saved[basename]
+
+    # The samples as stored (single precision), read back from one saved copy.
+    reference = mne.io.read_raw_fif(parts_named("ref.fif")[0], preload=True, verbose="error")
+    return parts_named, reference.get_data()
+
+
+def _place_split(small_split, target: Path) -> list[str]:
+    import shutil
+
+    parts_named, _ = small_split
+    target.parent.mkdir(parents=True, exist_ok=True)
+    out = []
+    for part in parts_named(target.name):
+        shutil.copyfile(part, target.parent / os.path.basename(part))
+        out.append(str(target.parent / os.path.basename(part)))
+    return out
+
+
+def _assert_recording(small_split, prefix: str, name: str, n_parts: int | None = None):
+    import numpy as np
+
+    mne = pytest.importorskip("mne")
+    state = unit_state(prefix, name)
     assert state.state == "done"
-    assert len(state.artifacts[".fif"]) == len(parts)
-    assert _reload_n_times(prefix + ".fif") == n_times
-    assert not any(os.path.exists(p) for p in parts)
+    if n_parts is not None:
+        assert len(state.artifacts[".fif"]) == n_parts
+    reloaded = mne.io.read_raw_fif(prefix + ".fif", preload=True, verbose="error")
+    assert {os.fspath(f) for f in reloaded.filenames} == set(state.artifacts[".fif"])
+    assert np.array_equal(reloaded.get_data(), small_split[1])
+
+
+# 3 parts: link + unlink each, the manifest, the configuration (+ backup copy): ~9 steps.
+_STEPS = list(range(0, 10))
+
+
+@pytest.mark.parametrize("first", _STEPS)
+@pytest.mark.parametrize("second", [0, 1, 2, 3, 5])
+def test_folder_only_split_move_survives_two_interruptions(
+    small_split, tmp_path, monkeypatch, first, second
+):
+    """M4/F1: interrupted at any step, then again at any step of the resumed run: the third
+    run certifies the whole recording (every part, every sample) or nothing."""
+    pipe = _mini_project(tmp_path)
+    old = _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
+    crashed = _run_interrupted(monkeypatch, pipe, tmp_path, [first, second])
+    assert crashed[0] or first > 6  # 3 x (link, unlink) and the manifest come first
+    _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@Clean"), "Clean", 3)
+    assert not any(os.path.exists(p) for p in old)
     assert not _plan(pipe, tmp_path).has_work
 
 
-def test_folder_only_split_move_that_does_not_reload_gets_no_manifest(tmp_path):
-    """M4: a moved split recording is reloaded before its .done is written."""
+@pytest.mark.parametrize("first", list(range(0, 8)))
+@pytest.mark.parametrize("second", [0, 1, 2, 4])
+def test_mne_rewrite_survives_two_interruptions(small_split, tmp_path, monkeypatch, first, second):
+    """F1/F3: an MNE re-save interrupted at any step (save, publication, old-part
+    deletion, manifest, configuration), twice in a row, converges to one verified copy."""
+    pipe = _mini_project(tmp_path, "clean_raw")
+    old = _place_split(small_split, tmp_path / "out/sub/x.txt@CleanRaw.fif")
+    crashed = _run_interrupted(monkeypatch, pipe, tmp_path, [first, second])
+    assert crashed[0]  # save, link, unlinks, manifest: at least 8 steps
+    _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@clean_raw"), "clean_raw")
+    assert not any(os.path.exists(p) for p in old)
+    assert not list((tmp_path / "out/.neurodags/staging").glob("*/*"))
+    assert not _plan(pipe, tmp_path).has_work
+
+
+def test_split_with_missing_continuations_gets_no_manifest(small_split, tmp_path):
+    """F2: a main part whose continuations are gone is not a complete recording."""
+    pipe = _mini_project(tmp_path)
+    old = _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
+    for part in old[1:]:
+        os.unlink(part)
+    result = apply_migration(_plan(pipe, tmp_path))
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state != "done"
+    assert len(result.recompute) == 1
+
+
+def test_split_with_truncated_data_buffer_gets_no_manifest(small_split, tmp_path):
+    """F2: headers intact, last data buffer cut in half: loading the data fails, no .done."""
+    pytest.importorskip("mne")
+    from mne._fiff.constants import FIFF
+    from mne._fiff.open import fiff_open
+
+    pipe = _mini_project(tmp_path)
+    old = _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
+    fid, _, directory = fiff_open(Path(old[-1]))
+    fid.close()
+    last = [d for d in directory if d.kind == FIFF.FIFF_DATA_BUFFER][-1]
+    with open(old[-1], "r+b") as handle:
+        handle.truncate(last.pos + 16 + last.size // 2)
+    plan = _plan(pipe, tmp_path)
+    result = apply_migration(plan)
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state != "done"
+    assert len(result.recompute) == 1
+
+
+def test_folder_only_split_move_that_does_not_open_is_left_in_place(tmp_path):
+    """M4: a split recording whose headers do not open is not moved (recomputed)."""
     pipe = _mini_project(tmp_path)
     parts = _split_any(tmp_path / "out/x.txt@Clean.fif")
     Path(parts[-1]).write_bytes(b"truncated")
     result = apply_migration(_plan(pipe, tmp_path))
-    prefix = str(tmp_path / "out/sub/x.txt@Clean")
-    assert unit_state(prefix, "Clean").state == "incomplete"
+    assert all(os.path.exists(p) for p in parts)
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state == "missing"
     assert len(result.recompute) == 1
+
+
+def test_target_created_at_mne_file_open_is_not_overwritten(small_split, tmp_path, monkeypatch):
+    """F3: a file created at the destination while MNE writes is never overwritten; the old
+    recording stays and the verified copy is kept in staging until the name is free."""
+    import mne.io.base
+
+    pipe = _mini_project(tmp_path, "clean_raw")
+    old = _place_split(small_split, tmp_path / "out/sub/x.txt@CleanRaw.fif")
+    plan = _plan(pipe, tmp_path)
+    target = Path(plan.mne_rewrites[0].new_path)
+    real_open = mne.io.base.start_and_end_file
+
+    def racing_open(path, *args, **kwargs):
+        if not target.exists():
+            target.write_bytes(b"INDEPENDENT RECORDING")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(mne.io.base, "start_and_end_file", racing_open)
+    with pytest.raises(migrate.MigrationError, match="not overwritten"):
+        apply_migration(plan)
+    monkeypatch.undo()
+    assert target.read_bytes() == b"INDEPENDENT RECORDING"
+    assert all(os.path.exists(p) for p in old)
+    assert not (tmp_path / "out/.neurodags" / migrate.LOCK_NAME).exists()
+
+    again = _plan(pipe, tmp_path)
+    assert any("is not the verified new recording" in r for r in again.refusals)
+    target.unlink()
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.refusals == []
+    apply_migration(resumed)
+    _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@clean_raw"), "clean_raw")
+
+
+def test_interrupted_start_grants_no_ownership_of_the_target(small_split, tmp_path, monkeypatch):
+    """F3: after an interruption before anything was written, a file that then appears at
+    the target is someone else's: refused, never overwritten."""
+    import mne.io.base
+
+    pipe = _mini_project(tmp_path, "clean_raw")
+    old = _place_split(small_split, tmp_path / "out/sub/x.txt@CleanRaw.fif")
+    plan = _plan(pipe, tmp_path)
+    target = Path(plan.mne_rewrites[0].new_path)
+
+    def interrupted_open(*args, **kwargs):
+        raise KeyboardInterrupt("interrupted at the file-open boundary")
+
+    monkeypatch.setattr(mne.io.base, "start_and_end_file", interrupted_open)
+    with pytest.raises(KeyboardInterrupt):
+        apply_migration(plan)
+    monkeypatch.undo()
+    target.write_bytes(b"UNRELATED")
+
+    again = _plan(pipe, tmp_path)
+    assert again.refusals  # never taken as this migration's partial output
+    with pytest.raises(MigrationRefused):
+        apply_migration(again)
+    assert target.read_bytes() == b"UNRELATED"
+    assert all(os.path.exists(p) for p in old)
+
+
+def test_case_only_alias_of_a_split_recording_is_refused_clearly(small_split, tmp_path):
+    """F8: a target that is the old file itself (case-insensitive filesystem; simulated
+    with a hard link) is refused with an explanation, never written in place."""
+    pipe = _mini_project(tmp_path, "clean_raw")
+    old = _place_split(small_split, tmp_path / "out/sub/x.txt@CleanRaw.fif")
+    os.link(old[0], tmp_path / "out/sub/x.txt@clean_raw.fif")
+    plan = _plan(pipe, tmp_path)
+    assert any("differs only in case" in r for r in plan.refusals)
+
+
+def test_highly_compressible_gzip_split_migrates_with_few_parts(tmp_path):
+    """F5: a valid seven-part gzip recording migrates; parts do not multiply."""
+    mne = pytest.importorskip("mne")
+    np = pytest.importorskip("numpy")
+    pipe = _mini_project(tmp_path, "clean_raw")
+    path = tmp_path / "out/sub/x.txt@CleanRaw.fif.gz"
+    path.parent.mkdir(parents=True)
+    raw = mne.io.RawArray(
+        np.zeros((4, 400_000)), mne.create_info(4, 1000.0, "eeg"), verbose="error"
+    )
+    parts = raw.save(path, split_size="2MB", overwrite=True, verbose="error")
+    assert len(parts) == 7
+    result = apply_migration(_plan(pipe, tmp_path))
+    assert result.recompute == []
+    state = unit_state(str(tmp_path / "out/sub/x.txt@clean_raw"), "clean_raw")
+    assert state.state == "done"
+    assert 1 <= len(state.artifacts[".fif.gz"]) <= len(parts)
+    assert _reload_n_times(str(tmp_path / "out/sub/x.txt@clean_raw.fif.gz")) == 400_000
+
+
+@pytest.mark.parametrize("ext", [".fif", ".fif.gz"])
+@pytest.mark.parametrize("crash_before_config", [False, True])
+def test_identical_split_duplicate_rerun_after_rewrite_is_a_no_op(
+    tmp_path, monkeypatch, ext, crash_before_config
+):
+    """F6: a byte-identical pilot copy of a split recording stays a duplicate after its
+    keeper was re-saved under the new name (other bytes)."""
+    import shutil
+
+    pipe = _mini_project(tmp_path, "clean_raw")
+    parts = _split_any(tmp_path / f"out/x.txt@CleanRaw{ext}")
+    (tmp_path / "out/sub").mkdir()
+    for part in parts:
+        shutil.copyfile(part, tmp_path / "out/sub" / os.path.basename(part))
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    assert len(plan.units("duplicate")) == 1
+    if crash_before_config:
+
+        def crash(change):
+            raise OSError("crash before the configuration")
+
+        monkeypatch.setattr(migrate, "_write_config", crash)
+        with pytest.raises(OSError, match="crash before the configuration"):
+            apply_migration(plan)
+        monkeypatch.undo()
+        resumed = _plan(pipe, tmp_path)
+        assert resumed.refusals == []
+        apply_migration(resumed)
+    else:
+        apply_migration(plan)
+    again = _plan(pipe, tmp_path)
+    assert again.refusals == []
+    assert not again.has_work
+    assert all(os.path.exists(p) for p in parts)  # duplicate left in place
+    # A duplicate changed since it was compared is no longer one.
+    Path(parts[-1]).write_bytes(Path(parts[-1]).read_bytes()[:-10])
+    assert any("different content" in r for r in _plan(pipe, tmp_path).refusals)
 
 
 def test_unit_with_extra_artifacts_keeps_them_in_its_manifest(tmp_path):

@@ -288,12 +288,15 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `a_b` and `a|b`, produced the same column; the new encoding is reversible.
 - `datasets_psycho.yml`'s `fir` `file_pattern` was a bare directory and is now a `**/*.vhdr`
   glob.
-- `neurodags migrate` (pre-release fixes): `--apply` never overwrites an MNE target created
-  after the preview and holds `<derivatives_path>/.neurodags/migrate.lock`; `--map A=B` onto
-  another definition is refused; compressed split recordings (`.fif.gz`, `.fif-N.gz`) stay one
-  artifact; an interrupted folder-only split move resumes with every part, and moved splits
-  are reloaded before their `.done`; a unit's `.done` lists all its artifacts; a split
-  rewrite into a new folder works; re-running after keeping an identical duplicate is a no-op.
+- `neurodags migrate` (pre-release fixes): `--apply` never replaces an existing file (moves
+  and staged, verified MNE re-saves are published with `os.link`) and holds
+  `<derivatives_path>/.neurodags/migrate.lock`, never taken over automatically, also for
+  configuration-only runs; `--map A=B` onto another definition is refused; compressed split
+  recordings (`.fif.gz`, `.fif-N.gz`) stay one artifact and re-saves use MNE's default split
+  size; interrupted split moves resume after any number of interruptions, and FIF recordings
+  are loaded in full before their `.done`; a unit's `.done` lists all its artifacts; a split
+  rewrite into a new folder works; re-running after keeping an identical duplicate (also a
+  split recording whose kept copy was re-saved) is a no-op.
 
 ## 0.3.6 — 2026-10-12
 
