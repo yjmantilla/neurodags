@@ -2131,3 +2131,105 @@ def test_damaged_journal_interior_is_a_clear_error(full_project, tmp_path):
     journal.write_bytes(b'{"op":"start"}\n{"op":"mo\xff\n{"op":"end"}\n')
     with pytest.raises(migrate.MigrationError, match="damaged at line 2"):
         _plan(pipe, tmp_path)
+
+
+def _cut_journal_after(journal: Path, op: str) -> None:
+    """Keep the journal up to the first *op* record, without its newline (an append that
+    stopped right after the record's last byte)."""
+    lines = journal.read_bytes().split(b"\n")
+    index = next(i for i, line in enumerate(lines) if line and json.loads(line)["op"] == op)
+    journal.write_bytes(b"\n".join(lines[: index + 1]))
+
+
+def test_unterminated_complete_journal_record_is_kept(full_project, tmp_path):
+    """N1: a complete last record without its newline is read, and kept by the repair."""
+    pipe, _ = full_project
+    journal = tmp_path / "derivatives/.neurodags/migrate-journal.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"op":"start"}\n{"op":"end"}')
+    assert [e["op"] for e in read_journal(str(journal))] == ["start", "end"]
+    apply_migration(_plan(pipe, tmp_path))
+    ops = [e["op"] for e in read_journal(str(journal))]
+    assert ops[:3] == ["start", "end", "start"]
+    assert journal.read_bytes().endswith(b"\n")
+
+
+def test_unterminated_mne_staged_record_survives_two_interruptions(
+    small_split, tmp_path, monkeypatch
+):
+    """N1: the ownership record of a staged rewrite, written without its newline, is kept
+    when the resumed run appends; a second interruption while deleting old parts still
+    resumes."""
+    pipe = _mini_project(tmp_path, "clean_raw")
+    old = _place_split(small_split, tmp_path / "out/sub/x.txt@CleanRaw.fif")
+    journal = tmp_path / "out/.neurodags/migrate-journal.json"
+
+    def crash(*args, **kwargs):
+        raise _Crash("before publication")
+
+    monkeypatch.setattr(migrate, "_publish_copy", crash)
+    with pytest.raises(_Crash):
+        apply_migration(_plan(pipe, tmp_path))
+    monkeypatch.undo()
+    _cut_journal_after(journal, "mne-staged")
+
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.refusals == []
+    assert read_journal(str(journal))[-1]["op"] == "mne-staged"
+    assert resumed.mne_rewrites[0].staged is not None
+    real_unlink = os.unlink
+
+    def interrupt(path, *args, **kwargs):
+        out = real_unlink(path, *args, **kwargs)
+        if os.fspath(path) in old:
+            raise _Crash("after deleting one old part")
+        return out
+
+    monkeypatch.setattr(migrate.os, "unlink", interrupt)
+    with pytest.raises(_Crash):
+        apply_migration(resumed)
+    monkeypatch.undo()
+    assert sum(os.path.exists(p) for p in old) == len(old) - 1
+    assert "mne-staged" in [e["op"] for e in read_journal(str(journal))]
+
+    again = _plan(pipe, tmp_path)
+    assert again.refusals == []
+    apply_migration(again)
+    _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@clean_raw"), "clean_raw")
+    assert not any(os.path.exists(p) for p in old)
+    assert not _plan(pipe, tmp_path).has_work
+
+
+def test_unterminated_split_move_start_survives_two_interruptions(
+    small_split, tmp_path, monkeypatch
+):
+    """N1: the same for a folder-only split move whose split-move-start record lost its
+    newline: the part list survives the resumed run and a second interruption."""
+    pipe = _mini_project(tmp_path)
+    old = _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
+    journal = tmp_path / "out/.neurodags/migrate-journal.json"
+    real_move = migrate._publish_move
+
+    def interrupt_after_one(old_path, new_path):
+        real_move(old_path, new_path)
+        raise _Crash("after one part")
+
+    monkeypatch.setattr(migrate, "_publish_move", interrupt_after_one)
+    with pytest.raises(_Crash):
+        apply_migration(_plan(pipe, tmp_path))
+    _cut_journal_after(journal, "split-move-start")
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.refusals == []
+    assert read_journal(str(journal))[-1]["op"] == "split-move-start"
+    with pytest.raises(_Crash):
+        apply_migration(resumed)
+    monkeypatch.undo()
+    assert [e["op"] for e in read_journal(str(journal))].count("split-move-start") >= 1
+
+    again = _plan(pipe, tmp_path)
+    assert again.refusals == []
+    assert again.to_dict()["unrecognized"] == []
+    apply_migration(again)
+    _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@Clean"), "Clean", 3)
+    assert not any(os.path.exists(p) for p in old)
+    assert not _plan(pipe, tmp_path).has_work

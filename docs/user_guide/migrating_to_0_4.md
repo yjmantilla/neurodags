@@ -362,7 +362,8 @@ Nothing is applied while any of these remains:
 - Every completed operation is appended to
   `<derivatives_path>/.neurodags/migrate-journal.json` (JSON Lines; for datasets without
   `derivatives_path`, `.neurodags/` next to the pipeline). An append cut short by an
-  interruption (the journal's last line) is ignored and removed before the next append. If
+  interruption (the journal's last line) is ignored and removed before the next append; a
+  complete last record that only lost its newline is kept (the newline is added). If
   a run is interrupted (an exception, Ctrl-C or a killed process; power loss is not
   tested), at any point and any number of times, run the same command again: it scans the tree, continues
   the remaining moves (a file left with both its old and its new name finishes its move),

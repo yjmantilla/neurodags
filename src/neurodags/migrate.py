@@ -2454,19 +2454,38 @@ class ApplyResult:
 
 
 def _drop_torn_tail(path: str) -> None:
-    """Cut an incomplete last line (an interrupted append) before appending (under the lock).
+    """Repair an unterminated last line before appending (under the lock).
 
-    Otherwise the next record would be glued onto it and the damaged line would no longer
-    be the last one.
+    The same rule as :func:`read_journal`: a last line that decodes as a complete record
+    was accepted by the plan (it may be the ownership record of a transaction being
+    resumed), so it is kept and only its newline is added; an undecodable one (an append
+    cut short) is cut. Otherwise the next record would be glued onto it. Durable (fsync)
+    before anything else is written or published.
     """
     try:
         with open(path, "r+b") as handle:
             data = handle.read()
             if not data or data.endswith(b"\n"):
                 return
-            handle.truncate(data.rfind(b"\n") + 1)
+            start = data.rfind(b"\n") + 1
+            if _decodes(data[start:]):
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+            else:
+                handle.truncate(start)
+            handle.flush()
+            os.fsync(handle.fileno())
     except FileNotFoundError:
         return
+
+
+def _decodes(raw: bytes) -> bool:
+    """*raw* is one complete JSON record (the rule :func:`read_journal` applies)."""
+    try:
+        json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return False
+    return True
 
 
 class _Journal:
