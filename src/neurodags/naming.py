@@ -588,8 +588,12 @@ def validate_artifact_suffixes(suffixes: Iterable[Any]) -> None:
     Raises
     ------
     NamingError
-        Listing every invalid suffix (see :func:`validate_artifact_suffix`) and every group
-        of suffixes that differ only in case (``.fif`` and ``.FIF``).
+        Listing every invalid suffix (see :func:`validate_artifact_suffix`), every group
+        of suffixes that differ only in case (``.fif`` and ``.FIF``), and every pair where
+        one suffix is another with ``-<digits>`` inserted before the final extension
+        (``.EO.fif`` and ``.EO-1.fif``, compared ignoring case): MNE writes the split parts
+        of ``<prefix>.EO.fif`` as ``<prefix>.EO-1.fif``, ..., so the second artifact would
+        overwrite a part of the first.
     """
     problems: list[str] = []
     by_folded: dict[str, list[str]] = {}
@@ -607,6 +611,19 @@ def validate_artifact_suffixes(suffixes: Iterable[Any]) -> None:
                 "Artifact suffixes differ only in case: "
                 + ", ".join(repr(s) for s in group)
                 + ". They would collide on case-insensitive filesystems."
+            )
+    for folded, group in by_folded.items():
+        stem, ext = folded.rsplit(".", 1)
+        match = _SPLIT_TAIL_RE.fullmatch(stem)
+        if match is None:
+            continue
+        for base in by_folded.get(f"{match.group(1)}.{ext}", []):
+            base_stem, base_ext = base.rsplit(".", 1)
+            problems.append(
+                f"Artifact suffixes {base!r} and {group[0]!r} are both used: MNE writes the "
+                f"split parts of a large '<prefix>{base}' recording as "
+                f"'<prefix>{base_stem}-1.{base_ext}', ..., so {group[0]!r} would overwrite "
+                "one of them. Rename one of them."
             )
     if problems:
         raise NamingError("\n".join(problems))

@@ -43,7 +43,8 @@ The dry-run plan shows each step, whether its output is cached, and where it wou
 
 ## Failure Behavior
 
-When a node fails during execution:
+When a node fails during execution (or anything else inside the unit: a derivative it depends
+on, preparing a node's arguments, selecting a referenced artifact, writing an artifact):
 
 1. The error is logged with full traceback, derivative name, step id, and file path.
 2. A `.error` marker file is written at the expected output location (e.g. `sub-01_task-rest_eeg.vhdr@MyDerivative.error`).  Any `.done` of the unit is removed, so the unit is `errored`, never `done`. Its content is a human-readable summary of the failure — useful for post-hoc inspection without digging through logs.
@@ -136,6 +137,12 @@ Files that match an output prefix but are not listed in its valid `.done` manife
 the table prints how many there are and `--include-files` lists them per unit (`unlisted`). See
 {ref}`Completion manifest <naming-done-manifest>`.
 
+Hidden staging folders (`.<output prefix>.tmp~<token>/`) belong to a job writing a unit right
+now, or were left by a killed one. They never change a unit's state or the exit code; the
+table prints how many exist with a cleanup hint, and JSON reports `staging_dirs` (and, with
+`--include-files`, the folders per unit). See
+{ref}`Atomic publication <naming-atomic-publication>`.
+
 **Flags:**
 
 ```bash
@@ -210,6 +217,7 @@ neurodags status pipeline.yml --format json
   "incomplete_indices": [5],
   "errored_indices": [0, 9],
   "unlisted_files": 0,
+  "staging_dirs": 0,
   "inputs": null,
   "missing_source_indices": [],
   "not_in_list": 0
@@ -239,10 +247,10 @@ neurodags status pipeline.yml --format json --include-files
     {"index": 0, "dataset": "my_dataset", "file_path": "/data/sub-01/ses-01/sub-01_task-rest.vhdr",
      "derivative": "Alpha", "status": "errored", "label": "errored",
      "error_path": "/derivatives/sub-01/ses-01/sub-01_task-rest.vhdr@Alpha.error",
-     "unlisted": []},
+     "unlisted": [], "staging_dirs": []},
     {"index": 1, "dataset": "my_dataset", "file_path": "/data/sub-02/ses-01/sub-02_task-rest.vhdr",
      "derivative": "Alpha", "status": "done", "label": "done (migrated)", "error_path": null,
-     "unlisted": []}
+     "unlisted": [], "staging_dirs": []}
   ]
 ```
 

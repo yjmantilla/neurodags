@@ -347,6 +347,21 @@ Things to keep in mind:
   `skip_errors=False` retries files with a `.error` marker), e.g. `retry_array.sh` = `run_array.sh`
   minus the `skip_errors=True` line. Partial outputs left by a failed or killed task have no
   `.done` manifest, so the retry recomputes them without any cleanup.
+- **Killed tasks never block retries.** Artifacts are written in a hidden staging folder and
+  moved into place only when complete (see
+  {ref}`Atomic publication <naming-atomic-publication>`), so a task killed by a time limit,
+  preemption or `scancel` (`SIGTERM` or `SIGKILL`) leaves no partial file at an output name and
+  no `.done`; the retry recomputes the unit. It may leave its staging folder
+  (`.<output prefix>.tmp~<token>/`), which nothing reads; `neurodags status` counts them.
+  Delete them when no job is writing to the tree, e.g.
+  `find <derivatives_path> -name '.*.tmp~*' -prune -mmin +1440 -exec rm -rf {} +`.
+- **Never run two tasks on the same unit at once, and never overwrite a unit another task is
+  reading.** This is not supported (see {ref}`Concurrency <naming-concurrency>`): interleaved
+  publications can mix files of two runs (detected afterwards by the `.done` fingerprints, so
+  the unit is recomputed), and a reader can mix old and new data without any error. Cancel a
+  task before requeueing it, run dependencies before their consumers (per-file pattern or
+  chained arrays), and do not let two derivatives of one file compute the same uncached
+  intermediate in parallel.
 - **Flat-array task IDs are not file indices.** In the flat pattern
   `SLURM_ARRAY_TASK_ID = file_index * N_DERIVATIVES + derivative_index`, so never pass status
   indices straight to `run_array_per_deriv.sh`. Convert them per derivative, using the
@@ -399,8 +414,8 @@ run_pipeline(config, inputs="inputs.tsv", only_index=index, skip_errors=True)
 | Cluster paths differ from local | Set `mount_point: hpc` in `pipeline.yml`; give `source_root`, `file_pattern` and `derivatives_path` an `hpc:` entry each (`neurodags validate` prints the resolved values for the active mount) |
 | Relative dataset paths | Since 0.4.0 they are resolved against the datasets YAML's directory, not the job's working directory; a config passed as a dict needs `base_dir=` (the generated `slurm-script` templates pass it) |
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
-| Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed |
-| Outputs computed on another mount | Copy the derivatives tree as is: manifests list files relative to their folder, so the copy verifies on the new mount as long as the paths below `source_root` are the same |
+| Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed; nothing needs to be unlocked or cleaned first |
+| Outputs computed on another mount | Copy the derivatives tree as is with `rsync -a` or `cp -a`: manifests list files relative to their folder and record their size and modification time, so the copy verifies on the new mount as long as the paths below `source_root` are the same (a plain `cp` changes mtimes and the units are recomputed) |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
 | `--only-index` errors | An unknown or negative index is an error (exit `2`), never ignored: size the array from `count-inputs --inputs inputs.tsv`, and pass the same `--inputs` list to `status` and the workers |
 | Upgrading from 0.3.x | File indices changed once (sorted discovery) and the templates changed (frozen input list, `load_pipeline_configuration`, `base_dir=`): regenerate the scripts with `neurodags slurm-script` and run `neurodags migrate` once per output tree (see {doc}`migrating_to_0_4`) |

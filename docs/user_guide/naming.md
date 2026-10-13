@@ -26,8 +26,8 @@ unless you convert the tree with `neurodags migrate` (see {doc}`migrating_to_0_4
 | Use names matching `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`: `BandPower`, `band_power`, `psd-welch`, `Fit_alpha-0p5_w-6`. | Use `.`, `@`, `&`, `/`, `\`, glob characters, spaces, `,`, `:`, non-ASCII, a leading digit or `-`, or the name `SourceFile` — rejected (see [Derivative names](#naming-derivative-names)). |
 | Quote YAML keys that YAML would read as something else: `"Yes":`, `"1_000":`. | Write `Yes:`, `On:`, `1_000:`, `0x1F:`, `~:` as derivative names — YAML loads them as booleans, numbers or null; rejected with "quote the key". |
 | Use the YAML name everywhere: files, `derivative: band_power.nc`, `DerivativeList`, `--derivative`, dataframe columns, `find -name '*@band_power*'`. | Define names that differ only in case (`Clean` / `clean`) or a name plus a split-like tail (`Clean` / `Clean-1`) — rejected. |
-| Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO_baseline.fif`). | Use keys without a leading `.`, with spaces, ending in `.done`/`.error`/`.skip`, or two keys differing only in case — the unit fails with `.error` and nothing is written. |
-| Make custom artifact writers return every file they write (see [Writer contract](#naming-writer-contract)). | Write extra files from a writer without reporting them — they are not part of the unit and the manifest ignores them. |
+| Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO_baseline.fif`). | Use keys without a leading `.`, with spaces, ending in `.done`/`.error`/`.skip`, two keys differing only in case, or a key plus the same key with `-<digits>` before its extension (`.EO.fif` / `.EO-1.fif`) — the unit fails with `.error` and nothing is written. |
+| Make custom artifact writers return every file they write (see [Writer contract](#naming-writer-contract)). | Write extra files from a writer without reporting them (they are discarded), or anywhere but next to (or below) the path the writer is given — the unit fails. |
 | Set `source_root` to the root folder of the dataset's sources; outputs mirror the tree below it. | Rely on the set of matched files to decide output folders — it never does since 0.4.0. |
 | Split dataframe column names with `neurodags.naming.parse_column` (see [Dataframe column names](#naming-dataframe-columns)). | Split columns by hand on `_` or `-` — dimension names and values are percent-encoded. |
 | Treat `<derivatives_path>/code/` and `<derivatives_path>/.neurodags/` as reserved. | Store your own files there — `neurodags run` rewrites its snapshot in `code/`, and discovery never returns files from either folder. |
@@ -53,10 +53,16 @@ Every saved artifact of a *unit* (one source file × one derivative) is written 
 - **`<name>`** is the derivative name exactly as written in `DerivativeDefinitions`.
 - **`<artifact suffix>`** is the key of each artifact the last node returns, appended verbatim:
   `.fif`, `.nc`, `.json`, `.report.html`, `.EO_baseline.fif`, `.fif.gz`. It must match
-  `^(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$`, its last segment must not be `done`, `error` or `skip`
-  (any case), and two suffixes of one result must not differ only in case. Suffixes are checked
-  **before the first writer runs**: an invalid key fails the unit with an `.error` marker and
-  writes nothing.
+  `^(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$`, its last segment must not be `done`, `error` or
+  `skip` (any case), and two suffixes of one result must not differ only in case. Nor may one
+  suffix be another with `-<digits>` inserted before the final extension (`.EO.fif` and
+  `.EO-1.fif`, compared ignoring case): MNE writes the split parts of a large
+  `<prefix>.EO.fif` as `<prefix>.EO-1.fif`, `<prefix>.EO-2.fif`, ..., which the second artifact
+  would overwrite (the artifact-level analogue of the `Clean` / `Clean-1` name rule). Suffixes
+  are checked **before the first writer runs**: an invalid key fails the unit with an `.error`
+  marker and writes nothing. As a second line of defence, a writer is not run when an earlier
+  artifact of the unit already reported its target, and two artifacts reporting the same file
+  fail the unit before anything reaches the final names (no `.done`).
 
 (naming-done-manifest)=
 
@@ -67,7 +73,7 @@ Three marker files share the unit's prefix; a unit has at most one of them:
 | File | Written when | Effect |
 |------|--------------|--------|
 | `<reference_base>@<name>.done` | every artifact was written | JSON manifest listing the unit's files. The unit is **done** (cached) while it is valid. |
-| `<reference_base>@<name>.error` | a node of the derivative raised, or an artifact could not be written | Contains the error. The unit is retried on the next run unless `--skip-errors` / `skip_errors=True`. |
+| `<reference_base>@<name>.error` | anything inside the unit failed: a node, a derivative it depends on, preparing a node's arguments, selecting a referenced artifact, or writing an artifact | Contains the error. The unit is retried on the next run unless `--skip-errors` / `skip_errors=True`. |
 | `<reference_base>@<name>.skip` | a node raised `SkipDerivative` (not applicable to this file) | The unit (and units depending on it) is skipped until the marker is deleted or `overwrite: true`. |
 
 The manifest:
@@ -80,6 +86,7 @@ The manifest:
   "source": {"dataset": "study", "rel": "sub-01/eeg/sub-01_task-rest_eeg.vhdr"},
   "artifacts": {".nc": ["sub-01_task-rest_eeg.vhdr@Fit_alpha-0p5_w-6.nc"]},
   "companions": [],
+  "fingerprints": {"sub-01_task-rest_eeg.vhdr@Fit_alpha-0p5_w-6.nc": [52144, 1791799200123456789]},
   "written": "2026-10-12T10:00:00Z",
   "origin": "run"
 }
@@ -88,21 +95,90 @@ The manifest:
 - `artifacts` maps each suffix to the files it consists of: usually one, every part for an MNE
   split recording (`X.fif`, `X-1.fif`, ...). File names are relative to the manifest's folder, so
   a tree moved or copied to another mount (local ↔ HPC) still verifies.
+- `fingerprints` records `[size, mtime_ns]` of every listed file as this run wrote it (taken
+  from the staged file before it was moved into place). Copy derivative trees with tools that
+  keep modification times (`rsync -a`, `cp -a`): a plain `cp` gives the copies new mtimes, so
+  their units no longer verify and are recomputed.
 - `source.rel` is the source path relative to `source_root` with its original spelling
   (including any `@`).
 
 **A unit is done** (a cache hit) when its `.done` parses, its `naming_version` and `derivative`
-match, and every file it lists exists. Files that match the prefix but are not listed are
+match, every file it lists exists and, when the manifest has `fingerprints`, every file still
+has the recorded size and a modification time within one second of the recorded one (so
+filesystems that keep whole seconds and `rsync -a` / `cp -a` copies verify). A file changed
+after publication (replaced by another process, edited, copied without its mtime) makes the
+unit `incomplete` ("modified after publication") and it is recomputed. Manifests without
+`fingerprints` (written before 0.4.0 was released) are checked by existence only. Files that
+match the prefix but are not listed are
 ignored (and reported by `neurodags status`). There is no other cache check: a file named like
 an output but without a valid manifest is not trusted.
 
-**Write order.** On (re)compute NeuroDAGs validates the suffixes, deletes the old `.done`, runs
-every writer, then publishes the new `.done` atomically (a temporary file in the same folder
-renamed with `os.replace`) and removes any `.error`/`.skip`. Writing an `.error` or `.skip`
-removes the other markers, including `.done`. A crash or a failing writer therefore never leaves a
-`.done` for a half-written unit; the next run recomputes it.
+**Write order.** On (re)compute NeuroDAGs deletes the old `.done` and any old `.skip` (before
+computing anything, including the derivatives it depends on), validates the suffixes, runs
+every writer inside a staging folder, moves the files into place, then publishes the new
+`.done` atomically (a temporary file in the same folder renamed with `os.replace`) and removes
+any `.error`. Writing an `.error` or `.skip` removes the other markers, including `.done`. A
+crash, a failing writer or a failing dependency therefore never leaves a `.done` for a
+half-written or failed recompute; the next run recomputes it.
 
-`save: false` derivatives write neither outputs nor markers and are never a cache hit.
+`save: false` derivatives write neither outputs nor markers and are never a cache hit, also
+when another derivative references them: an old manifest left from when the derivative was
+saved is not read.
+
+(naming-atomic-publication)=
+
+### Atomic publication
+
+Writers never write at the final file names. For each (re)computation of a unit, NeuroDAGs
+creates a hidden staging folder next to the outputs,
+`.<reference_base basename>@<name>.tmp~<token>/`, and calls every artifact writer with the
+final basename inside it (`.../.sub-01.vhdr@Clean.tmp~3f9c.../sub-01.vhdr@Clean.fif`). When all
+writers have finished, every reported file is moved to the same relative path in the output
+folder with `os.replace` (atomic within one filesystem, including NFS): continuation files
+(MNE split parts `X-1.fif`, ...) first, each main file last. MNE links split parts by file
+name, so moved parts stay linked. Only then is `.done` written. The staging folder is removed
+afterwards, and also when a writer fails.
+
+Consequences:
+
+- No file under an output name is ever partially written: a process killed at any point (an
+  exception, Ctrl-C, `SIGTERM`, `kill -9`, a scheduler timeout) leaves no `.done` over
+  half-written files and nothing that blocks the next run.
+- Each file of a unit and its fingerprint are checked against the `.done`, so a unit whose
+  files were replaced or mixed after publication is not `done` (see above).
+- Writers must write inside the folder of the path they are given, under names that start
+  with the unit's prefix (see [Writer contract](#naming-writer-contract)). A writer that
+  reports a file elsewhere fails the unit, and files a writer writes without reporting them
+  are discarded with the staging folder.
+
+(naming-concurrency)=
+
+**Not supported: two jobs on one unit at the same time.** Publication is per file, not per
+unit, and readers do not hold a snapshot. Therefore:
+
+- **Do not run two jobs that compute the same unit at once** (a requeued task while the
+  original still runs, overlapping arrays, two derivatives computing the same uncached
+  intermediate in parallel). Interleaved publications can leave a unit's files from two runs,
+  even the parts of one split recording; the fingerprints then make the unit `incomplete` and
+  it is recomputed, but which run's results you got is undefined until then.
+- **Do not overwrite a unit while another job reads it.** A reader holds file names, not a
+  snapshot: a lazily loaded MNE recording (`preload=False`) can read new samples with old
+  metadata, and a dataframe collection can mix columns from the old and the new results.
+  Nothing detects that in the reader's output.
+
+Run dependencies before their consumers (the per-file pattern or chained arrays in {doc}`hpc`)
+and finish or cancel jobs before overwriting units they use.
+
+A process killed before it could clean up leaves its staging folder behind. Staging folders are
+ignored by discovery, `status`, dataframe collection, `migrate` and the 0.3.x output check;
+their names never parse as outputs (`~` is not allowed in a suffix). They are **never deleted
+automatically**, because a live one may belong to a job still running. `neurodags status`
+reports how many exist (JSON: `staging_dirs`, per file with `--include-files`). Delete them when
+no job is writing to the output tree, for example those older than a day:
+
+```bash
+find <derivatives_path> -name '.*.tmp~*' -prune -mmin +1440 -exec rm -rf {} +
+```
 
 (naming-unit-states)=
 
@@ -128,10 +204,35 @@ recomputed. See {doc}`inspection` for the `status` output and exit codes.
 
 ### Writer contract
 
-`Artifact.writer(path)` receives the artifact path (`<prefix><suffix>`) and returns the list of
-files it wrote, or `None` meaning exactly `path`. Every reported file must exist afterwards
-(otherwise the unit fails with `.error`), and must be in the same folder as `path` or below it.
-The manifest is built from these reports, never from a directory listing.
+`Artifact.writer(path)` receives the artifact path and returns the list of files it wrote, or
+`None` meaning exactly `path`. Every reported file must exist afterwards (otherwise the unit
+fails with `.error`), and must be in the same folder as `path` or below it. The manifest is
+built from these reports, never from a directory listing.
+
+`path` has the final basename (`<reference_base basename>@<name><suffix>`) but lies in the
+unit's staging folder, not in the output folder (see
+[Atomic publication](#naming-atomic-publication)). Derive every other file name from `path`
+by appending to it (`path + ".json"`, `os.path.join(path + ".figs", "plot.png")`), never from
+the output folder or `reference_base`. Reported files are moved to the same relative place in
+the output folder, and each must belong to the unit: the first component of its path
+(relative to the output folder) must be the unit's prefix `<reference_base basename>@<name>`
+followed by `.` (or an MNE split tail `-1`, `-2`, ...), or be exactly the prefix used as a
+folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, which every
+unit of the folder would share, fails the unit before anything is replaced. A reported file
+outside the staging folder also fails the unit, and unreported files are discarded. Writers
+that ignore `path` and write somewhere fixed cannot be published atomically and are not
+supported.
+
+```python
+from pathlib import Path
+
+def writer(path):
+    figs = Path(path + ".figs")  # x.vhdr@Clean.fif.figs/: owned by this unit
+    figs.mkdir()
+    report.save(path)
+    plot.savefig(figs / "psd.png")
+    return [path, str(figs / "psd.png")]
+```
 
 MNE splits recordings larger than `split_size` (2 GB by default) into `X.fif`, `X-1.fif`,
 `X-2.fif`, ...; the first part names the next, so the parts belong together. The built-in

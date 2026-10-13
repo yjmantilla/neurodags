@@ -204,7 +204,14 @@ for most derivatives) is complete for the unit. That set only decides completene
 - units with an `.error` marker;
 - every unit of a derivative whose two most common sets tie;
 - FIF artifacts (single or split) that do not load completely with MNE (a missing,
-  truncated or broken file).
+  truncated or broken file);
+- when the configuration already declares `naming_version: 1`, units whose files already
+  have their 0.4.0 names and that this migration did not move itself (its journal): they may
+  be an interrupted `neurodags run` with some artifacts new and some old. Recompute them with
+  `neurodags run`.
+
+A synthesized `.done` records the size and modification time of each file as found
+(`fingerprints`), like a run's.
 
 Units with a `.skip` marker keep it (status `skipped`). `--no-synthesize` writes no
 manifests at all, so every migrated unit is recomputed.

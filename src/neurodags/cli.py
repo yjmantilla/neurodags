@@ -481,6 +481,12 @@ def _status_unlisted(plan: list) -> list[str]:
     return list(final.get("unlisted") or []) if final else []
 
 
+def _status_temps(plan: list) -> list[str]:
+    """Staging folders of the unit (a running job's, or left by a killed one)."""
+    final = _status_final(plan)
+    return list(final.get("temps") or []) if final else []
+
+
 def _status_error_path(plan: list) -> str | None:
     if not isinstance(plan, list):
         return None
@@ -536,6 +542,7 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
                 "migrated": migrated,
                 "error_path": _status_error_path(plan),
                 "unlisted": [] if missing_source else _status_unlisted(plan),
+                "staging_dirs": [] if missing_source else _status_temps(plan),
                 "planning_error": None if planning_error is None else str(planning_error),
             }
         )
@@ -625,6 +632,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     )
     planning_error_message = _planning_error_message(rows)
     n_unlisted = sum(len(r["unlisted"]) for r in rows)
+    n_staging = sum(len(r["staging_dirs"]) for r in rows)
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
     missing_source_indices = _status_indices(rows, ("missing-source",))
     n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
@@ -658,6 +666,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "incomplete_indices": _status_indices(rows, ("incomplete",)),
             "errored_indices": _status_indices(rows, ("errored",)),
             "unlisted_files": n_unlisted,
+            "staging_dirs": n_staging,
             "inputs": inputs_file,
             "missing_source_indices": missing_source_indices,
             "not_in_list": n_not_in_list,
@@ -674,6 +683,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "label": r["label"],
                     "error_path": r["error_path"],
                     "unlisted": r["unlisted"],
+                    "staging_dirs": r["staging_dirs"],
                     "planning_error": r["planning_error"],
                 }
                 for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
@@ -755,6 +765,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(
             f"\n{n_unlisted} file(s) match an output prefix but are not listed in its .done "
             "manifest; they are ignored (see --format json --include-files)."
+        )
+    if n_staging:
+        print(
+            f"\n{n_staging} staging folder(s) ('.<output prefix>.tmp~<token>') exist: a job is "
+            "writing those units right now, or one was killed while writing them. They are "
+            "ignored and never cleaned up automatically; once no job is running, delete "
+            "them, e.g. find <derivatives_path> -name '.*.tmp~*' -prune -exec rm -rf {} + "
+            "(see --format json --include-files)."
         )
     _print_input_list_report()
 

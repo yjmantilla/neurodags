@@ -84,6 +84,7 @@ from neurodags.naming import NamingError, error_column, format_column, parse_out
 from neurodags.outputs import (
     build_manifest,
     dataset_derivatives_base,
+    is_staging_name,
     output_prefix,
     output_reference_base,
     unit_state,
@@ -809,6 +810,7 @@ def _scan_tree(root: str, *, recursive: bool, exclude: Iterable[str] = ()) -> It
             for d in dirnames
             if d != ".neurodags"
             and os.path.normcase(os.path.normpath(os.path.join(dirpath, d))) not in excluded
+            and not is_staging_name(d)  # a run's staging folder, never outputs to migrate
         )
         for name in sorted(filenames):
             if "@" in name and not name.startswith("."):
@@ -2025,7 +2027,41 @@ def _add_move(plan: MigrationPlan, unit: Unit, old: str, new: str, all_old: set[
     unit.moves.append((old, new))
 
 
+def _journal_new_paths(entry: Mapping[str, Any]) -> list[str]:
+    """Paths at their new names that a journal entry says this migration produced.
+
+    ``move`` (``new``), ``mne-staged`` (``parts`` ``[name, size, sha256]`` next to ``new``),
+    ``mne-done`` (``new_parts``) and ``split-move-start`` (``parts`` ``[old, new]``).
+    """
+    op = entry.get("op")
+    out: list[Any] = []
+    if op == "move":
+        out = [entry.get("new")]
+    elif op == "mne-done":
+        out = list(entry.get("new_parts") or [])
+    elif op == "mne-staged" and isinstance(entry.get("new"), str):
+        folder = os.path.dirname(entry["new"])
+        out = [
+            os.path.join(folder, p[0])
+            for p in entry.get("parts") or []
+            if isinstance(p, list) and p and isinstance(p[0], str)
+        ]
+    elif op == "split-move-start":
+        out = [p[1] for p in entry.get("parts") or [] if isinstance(p, list) and len(p) == 2]
+    return [p for p in out if isinstance(p, str)]
+
+
 def _plan_manifests(plan: MigrationPlan) -> None:
+    # With a configuration already at naming_version 1, files at their 0.4.0 names without a
+    # .done may be an interrupted `neurodags run` (some artifacts new, some old): never
+    # certify those. Only units with 0.3.x-named files (moved now) or files an interrupted
+    # `migrate --apply` itself moved (its journal) can still be legacy output.
+    journaled: set[str] | None = None
+    if plan.mode == "tree-only":
+        journaled = set()
+        for journal in {t.journal for t in plan.trees}:
+            for entry in read_journal(journal):
+                journaled.update(os.path.normpath(p) for p in _journal_new_paths(entry))
     for unit in _primaries(plan):
         artifacts, markers = _group_view(unit)
         unit.manifest_suffixes = None
@@ -2042,6 +2078,20 @@ def _plan_manifests(plan: MigrationPlan) -> None:
             continue
         if "skip" in markers:
             continue  # .skip is its own state
+        if journaled is not None and not all(
+            member.status == "move"
+            or all(
+                os.path.normpath(p) in journaled
+                for paths in member.artifacts.values()
+                for p in paths
+            )
+            for member in unit.members or [unit]
+        ):
+            unit.manifest_reason = (
+                "incomplete — files at their 0.4.0 names without a .done (an interrupted "
+                "'neurodags run'?); recompute with neurodags run"
+            )
+            continue
         info = plan.artifact_sets.get(unit.derivative)
         known = info.get("known") if info else None
         if not known:

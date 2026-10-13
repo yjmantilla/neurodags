@@ -114,9 +114,13 @@ def test_manifest_format(tmp_path):
         "source",
         "artifacts",
         "companions",
+        "fingerprints",
         "written",
         "origin",
     ]
+    main_file = done.parent / "x0.txt@Fit_alpha-0p5_w-6.message.txt"
+    st = main_file.stat()
+    assert manifest["fingerprints"] == {main_file.name: [st.st_size, st.st_mtime_ns]}
     assert manifest["manifest_version"] == 1
     assert manifest["naming_version"] == 1
     assert manifest["derivative"] == "Fit_alpha-0p5_w-6"
@@ -332,7 +336,7 @@ def _test_two_artifacts(fail_second: bool = False) -> NodeResult:
     )
 
 
-def test_partial_multi_artifact_write_is_incomplete_and_recomputed(tmp_path):
+def test_interrupted_multi_artifact_write_publishes_nothing_and_is_recomputed(tmp_path):
     _inputs(tmp_path / "raw", ["sub-01/x0.txt"])
     crashing = _project(tmp_path, {"Two": _chain("_test_two_artifacts", {"fail_second": True})})
     with pytest.raises(KeyboardInterrupt):
@@ -340,13 +344,15 @@ def test_partial_multi_artifact_write_is_incomplete_and_recomputed(tmp_path):
 
     out = tmp_path / "out" / "sub-01"
     prefix = str(out / "x0.txt@Two")
-    assert sorted(p.name for p in out.iterdir()) == ["x0.txt@Two.a.txt"]
-    assert unit_state(prefix, "Two").state == "incomplete"
+    # The first artifact was written in the staging folder only, which the interrupted run
+    # removed on its way out: nothing partial reaches the final names.
+    assert sorted(p.name for p in out.iterdir()) == []
+    assert unit_state(prefix, "Two").state == "missing"
     assert main(["status", str(crashing), "--format", "json"]) == 1
 
     fixed = _project(tmp_path, {"Two": _chain("_test_two_artifacts", {"fail_second": False})})
     plan = run_pipeline(str(fixed), dry_run=True)
-    assert _final(plan, "Two", "x0.txt")["state"] == "incomplete"
+    assert _final(plan, "Two", "x0.txt")["state"] == "missing"
     run_pipeline(str(fixed), raise_on_error=True)
     assert unit_state(prefix, "Two").state == "done"
     assert sorted(p.name for p in out.iterdir()) == [

@@ -781,8 +781,40 @@ class TestStatusSync:
         with patch("neurodags.orchestrators.run_pipeline", return_value=pd.DataFrame()):
             rows, grand, errored = _status_sync("p.yml", None, None)
         assert rows == []
-        assert grand == {"total": 0, "done": 0, "incomplete": 0, "missing": 0, "errored": 0}
+        assert grand == {
+            "total": 0,
+            "done": 0,
+            "skipped": 0,
+            "incomplete": 0,
+            "missing": 0,
+            "errored": 0,
+            "no-save": 0,
+            "unknown": 0,
+        }
         assert errored == []
+
+    def test_skipped_and_no_save_units_are_counted(self):
+        fake_df = pd.DataFrame(
+            [
+                {
+                    "derivative": "StepA",
+                    "file_path": "a.vhdr",
+                    "plan": [{"kind": "derivative_output", "state": "skipped"}],
+                },
+                {
+                    "derivative": "StepA",
+                    "file_path": "b.vhdr",
+                    "plan": [{"kind": "derivative_output", "will_save": False}],
+                },
+            ]
+        )
+        with patch("neurodags.orchestrators.run_pipeline", return_value=fake_df):
+            rows, grand, _ = _status_sync("p.yml", None, None)
+        assert grand["total"] == 2
+        assert grand["skipped"] == 1
+        assert grand["no-save"] == 1
+        assert sum(v for k, v in grand.items() if k != "total") == grand["total"]
+        assert rows[0]["skipped"] == 1
 
     def test_classifies_done_missing_errored(self):
         fake_df = pd.DataFrame(
@@ -806,7 +838,16 @@ class TestStatusSync:
         )
         with patch("neurodags.orchestrators.run_pipeline", return_value=fake_df):
             _rows, grand, errored = _status_sync("p.yml", None, None)
-        assert grand == {"total": 3, "done": 1, "incomplete": 0, "missing": 1, "errored": 1}
+        assert grand == {
+            "total": 3,
+            "done": 1,
+            "skipped": 0,
+            "incomplete": 0,
+            "missing": 1,
+            "errored": 1,
+            "no-save": 0,
+            "unknown": 0,
+        }
         assert len(errored) == 1
         assert errored[0] == ("StepA", "c.vhdr", "c.error")
 

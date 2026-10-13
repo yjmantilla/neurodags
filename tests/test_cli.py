@@ -775,6 +775,7 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
         "incomplete_indices",
         "errored_indices",
         "unlisted_files",
+        "staging_dirs",
         "inputs",
         "missing_source_indices",
         "not_in_list",
@@ -832,6 +833,7 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "label",
         "error_path",
         "unlisted",
+        "staging_dirs",
         "planning_error",
     }
     rec = next(f for f in files if f["index"] == 4 and f["derivative"] == "Spectrum")
@@ -844,6 +846,7 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "label": "errored",
         "error_path": "/o/e.e",
         "unlisted": [],
+        "staging_dirs": [],
         "planning_error": None,
     }
     assert files[0]["error_path"] is None

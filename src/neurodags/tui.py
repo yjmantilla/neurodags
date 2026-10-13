@@ -635,30 +635,17 @@ class NeuroDagsApp(App):
             self.notify("No files found.", severity="warning")
             return
 
-        table.add_columns("Derivative", "Total", "Done", "Incomplete", "Missing", "Errored")
+        table.add_columns("Derivative", "Total", *(k.capitalize() for k in _STATUS_KEYS))
         for r in rows:
-            table.add_row(
-                r["derivative"],
-                str(r["total"]),
-                str(r["done"]),
-                str(r["incomplete"]),
-                str(r["missing"]),
-                str(r["errored"]),
-            )
+            table.add_row(r["derivative"], str(r["total"]), *(str(r[k]) for k in _STATUS_KEYS))
         table.add_row(
-            "[bold]Total[/bold]",
-            str(grand["total"]),
-            str(grand["done"]),
-            str(grand["incomplete"]),
-            str(grand["missing"]),
-            str(grand["errored"]),
+            "[bold]Total[/bold]", str(grand["total"]), *(str(grand[k]) for k in _STATUS_KEYS)
         )
 
         files_label = grand["total"] // max(len(rows), 1) if rows else 0
         summary.update(
             f"files: {files_label}  |  "
-            f"done: {grand['done']}  incomplete: {grand['incomplete']}  "
-            f"missing: {grand['missing']}  errored: {grand['errored']}"
+            + "  ".join(f"{k}: {grand[k]}" for k in _STATUS_KEYS if grand[k] or k != "unknown")
         )
 
         if errored_files:
@@ -736,6 +723,14 @@ def _parse_int(s: str) -> int | None:
         return None
 
 
+#: Status buckets shown by the TUI (the states of ``neurodags.cli._status_classify``).
+_STATUS_KEYS = ("done", "skipped", "incomplete", "missing", "errored", "no-save", "unknown")
+
+
+def _status_counts() -> dict[str, int]:
+    return {"total": 0, **dict.fromkeys(_STATUS_KEYS, 0)}
+
+
 def _parse_derivative_filter(value: str) -> list[str] | None:
     """Derivative names from the DataFrame filter: whitespace-separated (spec §9).
 
@@ -761,7 +756,7 @@ def _status_sync(
     )
 
     if result is None or result.empty:
-        return [], {"total": 0, "done": 0, "incomplete": 0, "missing": 0, "errored": 0}, []
+        return [], _status_counts(), []
 
     rows_by_deriv: dict[str, dict] = {}
     errored_files: list[tuple[str, str, str | None]] = []
@@ -775,17 +770,11 @@ def _status_sync(
         fpath = str(row.get("file_path", ""))
 
         if deriv not in rows_by_deriv:
-            rows_by_deriv[deriv] = {
-                "derivative": deriv,
-                "total": 0,
-                "done": 0,
-                "incomplete": 0,
-                "missing": 0,
-                "errored": 0,
-            }
-        rows_by_deriv[deriv]["total"] += 1
-        if status in rows_by_deriv[deriv]:
-            rows_by_deriv[deriv][status] += 1
+            rows_by_deriv[deriv] = {"derivative": deriv, **_status_counts()}
+        counts = rows_by_deriv[deriv]
+        counts["total"] += 1
+        # Every unit lands in exactly one bucket, so the columns add up to the total.
+        counts[status if status in _STATUS_KEYS else "unknown"] += 1
 
         if planning_error is not None:
             errored_files.append((deriv, fpath, f"planning error: {planning_error}"))
@@ -793,7 +782,7 @@ def _status_sync(
             errored_files.append((deriv, fpath, _status_error_path(plan)))
 
     rows = sorted(rows_by_deriv.values(), key=lambda r: r["derivative"])
-    grand: dict[str, int] = {"total": 0, "done": 0, "incomplete": 0, "missing": 0, "errored": 0}
+    grand = _status_counts()
     for r in rows:
         for k in grand:
             grand[k] += r[k]
