@@ -76,6 +76,16 @@ def _neuromag_entry_for(path: str) -> str | None:
     FIF file — this also handles gzipped splits, which mne names
     ``name.fif-1.gz`` with entry ``name.fif.gz``.
     """
+    part = neuromag_split_part(path)
+    return part[0] if part is not None else None
+
+
+def neuromag_split_part(path: str) -> tuple[str, int] | None:
+    """``(entry, index)`` when ``path`` is a neuromag ``-N`` split continuation, else ``None``.
+
+    ``name-2.fif`` -> ``("name.fif", 2)``; ``name.fif-1.gz`` -> ``("name.fif.gz", 1)``.
+    Shared with :mod:`neurodags.migrate`, which groups split parts the same way.
+    """
     root, ext = os.path.splitext(path)
     m = _NEUROMAG_TAIL_RE.match(root)
     if m is None or int(m.group("idx")) < 1:
@@ -83,7 +93,17 @@ def _neuromag_entry_for(path: str) -> str | None:
     entry = m.group("base") + ext
     if not _is_fif(entry):
         return None
-    return entry
+    return entry, int(m.group("idx"))
+
+
+def neuromag_split_name(entry: str, index: int) -> str:
+    """Name MNE gives part *index* (``>= 1``) of the split recording *entry*.
+
+    ``name.fif`` -> ``name-<index>.fif``; ``name.fif.gz`` -> ``name.fif-<index>.gz``
+    (the inverse of :func:`neuromag_split_part`).
+    """
+    root, ext = os.path.splitext(entry)
+    return f"{root}-{index}{ext}"
 
 
 def find_split_continuations(files: list[str]) -> set[str]:

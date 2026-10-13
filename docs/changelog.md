@@ -288,6 +288,12 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `a_b` and `a|b`, produced the same column; the new encoding is reversible.
 - `datasets_psycho.yml`'s `fir` `file_pattern` was a bare directory and is now a `**/*.vhdr`
   glob.
+- `neurodags migrate` (pre-release fixes): `--apply` never overwrites an MNE target created
+  after the preview and holds `<derivatives_path>/.neurodags/migrate.lock`; `--map A=B` onto
+  another definition is refused; compressed split recordings (`.fif.gz`, `.fif-N.gz`) stay one
+  artifact; an interrupted folder-only split move resumes with every part, and moved splits
+  are reloaded before their `.done`; a unit's `.done` lists all its artifacts; a split
+  rewrite into a new folder works; re-running after keeping an identical duplicate is a no-op.
 
 ## 0.3.6 — 2026-10-12
 

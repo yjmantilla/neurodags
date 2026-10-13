@@ -105,13 +105,13 @@ neurodags migrate pipeline.yml [-d datasets.yml] [--mount NAME]
 | `source_root` | The suggested value per dataset and mount: the fixed part of `file_pattern` before the first wildcard. Confirm it, or pass `--source-root DATASET=PATH` (all mounts) / `--source-root DATASET:MOUNT=PATH`. The value is written verbatim, so a relative path is relative to the YAML. |
 | `on-disk names` | The 0.3.x CamelCase token and the 0.4.0 name of every derivative whose spelling changes. Names without `_` are unchanged. |
 | `moves` | Every planned `old → new` file move, relative to the output tree. |
-| `MNE split recordings` | Recordings saved in several parts (`X.fif`, `X-1.fif`, ...) whose name changes; they are re-saved with MNE (see below). |
+| `MNE split recordings` | Recordings saved in several parts (`X.fif`, `X-1.fif`, ..., or compressed `X.fif.gz`, `X.fif-1.gz`, ...) whose name changes; they are re-saved with MNE (see below). |
 | `orphans` | 0.3.x outputs whose source no longer exists (or is no longer matched by `file_pattern`). Left in place; delete them when you are sure. |
 | `unresolved` | 0.3.x outputs of a chained pipeline (`x.vhdr&CleanPrep.fif@Feature.nc`) whose upstream source (`x.vhdr@CleanPrep.fif`) is not discovered. **Refused**, so they are not silently recomputed (see [Chained pipelines](#chained-pipelines)). |
 | `ambiguous` | Outputs that several current sources could own. **Refused.** |
 | `duplicates` | Old outputs identical to an existing new file. Left in place; delete them when happy. |
 | `unrecognized` | Files with `@` that do not belong to this pipeline's derivatives (another pipeline's outputs, notes, ...). Left alone. |
-| `Artifact sets` | Per derivative, the most common set of artifact suffixes among its units and how many units have each set. A unit gets a `.done` only when it has the whole set. |
+| `Artifact sets` | Per derivative, the most common set of artifact suffixes among its units and how many units have each set. A unit gets a `.done` only when it has the whole set; its `.done` then lists every artifact it has (also extra ones). |
 | `Chained pipelines` | Dataset patterns and other YAML files in the same folder that refer to old output names. Edit them by hand. |
 | `REFUSED` | Why nothing will be applied (see [Refusals](#refusals)). |
 
@@ -129,7 +129,7 @@ time (a single-subject pilot run wrote everything at the top of the tree). Migra
 recomputes that root: it **scans** each `derivatives_path` (skipping `code/` and
 `.neurodags/`) for file names containing `@` and parses them with the 0.3.x rules (the token
 after `@` is the CamelCase spelling of a YAML name, longest first, followed by `.`, an MNE
-split tail `-<n>.fif`, or `.error`/`.skip`). An old output is matched to the current source
+split tail `-<n>.fif` / `.fif-<n>.gz`, or `.error`/`.skip`). An old output is matched to the current source
 whose 0.4.0 output folder **ends with** the old folder and whose base name, spelled the 0.3.x
 way (every `@` written as `&`), equals the old source part. Every historical 0.3.x root lies at
 or below `source_root`, so this works for full runs, pilot runs, `max_files_per_dataset` runs
@@ -150,12 +150,14 @@ change.
 
 ## MNE split recordings
 
-MNE writes large recordings as `X.fif`, `X-1.fif`, ... and the first part stores the next
-part's file name, so the parts cannot simply be renamed. For each such recording whose name
+MNE writes large recordings as `X.fif`, `X-1.fif`, ... (compressed: `X.fif.gz`,
+`X.fif-1.gz`, ..., recognized with the same rule as input discovery) and the first part stores
+the next part's file name, so the parts cannot simply be renamed. For each such recording whose name
 changes, migrate:
 
 1. reads it with MNE (`read_raw_fif`, or `read_epochs` when it is not a raw file);
-2. saves it under the new name with the same split size and the original data format (raw:
+2. saves it under the new name (creating its folder if needed, never overwriting an existing
+   file) with the same split size and the original data format (raw:
    `orig_format`; epochs: `single`, then `double` if `single` does not reproduce the data),
    through `neurodags.writers.save_mne`, which reports every part written;
 3. reloads it and checks that the data are identical (`numpy.array_equal`) and that the
@@ -166,18 +168,23 @@ changes, migrate:
 If the check fails, the new files are removed, the old recording stays where it is, and the
 unit is listed after `--apply` as "left in place, to be recomputed". A recording whose file
 name does not change (only its folder) is moved part by part without rewriting (the parts
-refer to each other by base name only). The whole recording is loaded into memory.
+refer to each other by base name only): every part and its destination are written to the
+journal before the first move, so an interrupted run rejoins the parts across both folders,
+and the recording is opened with MNE (all parts present and chained) before its `.done` is
+written. The whole recording is loaded into memory for a rewrite.
 
 ## Manifests for migrated outputs
 
 0.3.x records no list of artifacts per unit, so a migrated unit gets a `.done` only when its
 **artifact set is known**: the derivative's most common suffix set in the tree (one suffix
-for most derivatives) is complete for the unit. Not certified (no `.done`, status
+for most derivatives) is complete for the unit. That set only decides completeness: the
+`.done` lists every artifact of the unit, including extra ones other units lack. Not certified (no `.done`, status
 `incomplete` or `errored`, recomputed by the next run):
 
 - units missing an artifact of that set (a partial 0.3.x write);
 - units with an `.error` marker;
-- every unit of a derivative whose two most common sets tie.
+- every unit of a derivative whose two most common sets tie;
+- split recordings that do not open with MNE after the move (a missing or broken part).
 
 Units with a `.skip` marker keep it (status `skipped`). `--no-synthesize` writes no
 manifests at all, so every migrated unit is recomputed.
@@ -206,7 +213,8 @@ own folder as the root, so it wrote the outputs **flat**, directly under `deriva
 looked for the outputs in the **nested** folder (`<derivatives_path>/sub-01/ses-1/eeg/...`),
 found nothing there and computed the subject again. Both copies belong to the same source,
 so both map to the same 0.4.0 outputs. When the two copies are byte-identical migrate keeps
-the deeper one and lists the other as a duplicate; usually they are not, because the files
+the deeper one and lists the other as a duplicate (left in place; re-running migrate is then a
+no-op, the kept copy's new `.done` does not count as different content); usually they are not, because the files
 embed run-specific data (timestamps in MNE reports and JSON sidecars, file ids and
 measurement metadata in FIF files, NetCDF history attributes). Migrate cannot know which copy
 you want, so it refuses.
@@ -301,6 +309,8 @@ Nothing is applied while any of these remains:
 | No `source_root` can be suggested (the pattern starts at a filesystem root, `/*/...`) | Pass `--source-root DATASET=PATH`. |
 | A derivative name is invalid in 0.4.0 (`.`, `@`, spaces, `Clean` + `Clean-1`, ...) | Rename it with `--map OLD=NEW`. |
 | Two derivatives share an on-disk token (`band_power` and `BandPower`) | Rename or remove one before migrating. |
+| `--map OLD=NEW` would give two derivatives the same name (`NEW` is already another definition, also ignoring case) | Choose another `NEW`; two definitions would otherwise collapse into one and one's outputs would be taken as the other's. |
+| Another `--apply` holds `<derivatives_path>/.neurodags/migrate.lock` | Wait for it to finish. If no migrate is running (it was killed), delete the lock file. A lock left by a dead process on the same host is taken over automatically. |
 | Two datasets share a `derivatives_path` without distinct `derivatives_subdir` | Add `derivatives_subdir` to the datasets in the 0.3.x file, then migrate (their outputs move into the subfolders). |
 | A `$VAR/...` dataset path expands to a relative path | Write it as an absolute path. |
 | A `.bak-0.3` backup already exists with other content | Move the old backup away. |
@@ -309,7 +319,12 @@ Nothing is applied while any of these remains:
 ## Safety and resuming
 
 - The preview reads only; `--apply` re-checks every precondition (old files still there,
-  targets still free, configuration unchanged since the plan) before touching anything.
+  targets still free, including every part name of a re-saved MNE recording, configuration
+  unchanged since the plan) before touching anything, and never overwrites a file it did not
+  write. A target that appears during the run stops it (run again to finish).
+- `--apply` holds a lock file, `migrate.lock` next to the journal, for its whole run: a second
+  `neurodags migrate --apply` on the same output tree is refused until the first finishes. It
+  serializes migrate runs only; do not run the pipeline on a tree while it is migrated.
 - Moves use `os.replace` (atomic, same filesystem). Every completed operation is appended to
   `<derivatives_path>/.neurodags/migrate-journal.json` (JSON Lines; for datasets without
   `derivatives_path`, `.neurodags/` next to the pipeline). If a run is interrupted, run the
