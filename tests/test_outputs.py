@@ -18,6 +18,7 @@ from neurodags.iterators import discover_inputs
 from neurodags.nodes import register_node
 from neurodags.orchestrators import build_derivative_dataframe, run_pipeline
 from neurodags.outputs import (
+    LegacyOutputsError,
     build_manifest,
     manifest_artifacts,
     output_prefix,
@@ -680,44 +681,124 @@ def test_status_ignores_downstream_outputs_in_the_same_folder(tmp_path, capsys):
     )
 
 
+def _legacy_output(path: Path, text: str = "0.3.x output") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 def test_unmigrated_ampersand_outputs_stop_with_a_pointer_to_migrate(tmp_path, capsys):
-    """Outputs at the pre-0.4.0 '&' prefix and none at the verbatim one: loud, no recompute."""
+    """0.3.x outputs of a chained source ('&' spelling, no .done): loud, no recompute."""
     _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif"])
     pipe = _project(tmp_path, {"Fit": _chain()}, dataset=CHAINED)
-    legacy = tmp_path / "out" / "sub-01" / "x0.txt&Clean.fif@Fit.message.txt"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text("0.3.x output")
+    legacy = _legacy_output(tmp_path / "out" / "sub-01" / "x0.txt&Clean.fif@Fit.message.txt")
 
-    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
+    with pytest.raises(LegacyOutputsError, match="neurodags migrate") as excinfo:
         run_pipeline(str(pipe))
+    assert str(legacy) in str(excinfo.value)
+    assert isinstance(excinfo.value, DatasetConfigError)
     assert _files(tmp_path / "out") == ["sub-01/x0.txt&Clean.fif@Fit.message.txt"]
     assert main(["dry-run", str(pipe)]) == 2
     assert "neurodags migrate" in capsys.readouterr().err
     assert main(["status", str(pipe)]) == 2
     assert "neurodags migrate" in capsys.readouterr().err
-    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
+    with pytest.raises(LegacyOutputsError):
         build_derivative_dataframe(str(pipe))
 
-    # The 0.3.x on-disk token of a snake_case name is checked too.
+    # The 0.3.x on-disk token of a snake_case name is recognized too.
     pipe = _project(tmp_path, {"fit_x": _chain()}, dataset=CHAINED)
     legacy.rename(legacy.parent / "x0.txt&Clean.fif@FitX.message.txt")
-    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
-        run_pipeline(str(pipe))
+    with pytest.raises(LegacyOutputsError):
+        run_pipeline(str(pipe), dry_run=True)
 
-    # Once something exists at the verbatim prefix, the guard is quiet.
+
+def test_downstream_output_does_not_hide_an_unmigrated_parent(tmp_path):
+    """A canonical downstream file (x@Clean.fif@Fit.message.txt@Power.nc) or a folder
+    starting with the new prefix is not the parent unit's output: still loud."""
+    _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif"])
     pipe = _project(tmp_path, {"Fit": _chain()}, dataset=CHAINED)
-    (legacy.parent / "x0.txt&Clean.fif@Fit.message.txt").write_text("0.3.x output")
-    (legacy.parent / "x0.txt@Clean.fif@Fit.message.txt").write_text("partial")
+    folder = tmp_path / "out" / "sub-01"
+    _legacy_output(folder / "x0.txt&Clean.fif@Fit.message.txt")
+    _legacy_output(folder / "x0.txt@Clean.fif@Fit.message.txt@Power.nc", "downstream")
+    _legacy_output(folder / "x0.txt@Clean.fif@Fit.message.txt@Power.done", "{}")
+    (folder / "x0.txt@Clean.fif@Fit.dir").mkdir()
+    assert unit_state(str(folder / "x0.txt@Clean.fif@Fit"), "Fit").state == "missing"
+    with pytest.raises(LegacyOutputsError):
+        run_pipeline(str(pipe), dry_run=True)
+
+
+@pytest.mark.parametrize("where", ["pilot-flat", "subdir-added", "upstream-renamed"])
+def test_legacy_outputs_at_other_historical_locations_are_refused(tmp_path, where):
+    """The guard scans the whole output tree, not only the unit's current folder."""
+    dataset = dict(CHAINED)
+    source = "sub-01/x0.txt@Clean.fif"
+    legacy = tmp_path / "out" / "sub-01" / "x0.txt&Clean.fif@Fit.message.txt"
+    if where == "pilot-flat":
+        legacy = tmp_path / "out" / "x0.txt&Clean.fif@Fit.message.txt"
+    elif where == "subdir-added":
+        dataset["derivatives_subdir"] = "stage2"
+    else:  # the upstream name changed and the pattern was edited accordingly
+        source = "sub-01/x0.txt@clean.fif"
+        dataset["file_pattern"] = "raw/**/*@clean.fif"
+    _inputs(tmp_path / "raw", [source])
+    _legacy_output(legacy)
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=dataset)
+    with pytest.raises(LegacyOutputsError) as excinfo:
+        run_pipeline(str(pipe), dry_run=True)
+    assert str(legacy) in str(excinfo.value)
+
+
+def test_real_ampersand_source_is_not_legacy_whatever_is_selected(tmp_path):
+    """A 0.4.0 unit of a real 'a&b.txt' source stays valid when discovery is narrowed to
+    the 'a@b.txt' source (ownership comes from the .done / the source file, not from the
+    current selection)."""
+    _inputs(tmp_path / "raw", ["sub-01/a&b.txt", "sub-01/a@b.txt"])
+    dataset = {**CHAINED, "file_pattern": "raw/**/*&b.txt"}
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=dataset)
     run_pipeline(str(pipe), raise_on_error=True)
-    assert unit_state(str(legacy.parent / "x0.txt@Clean.fif@Fit"), "Fit").state == "done"
+    out = tmp_path / "out" / "sub-01"
+    assert (out / "a&b.txt@Fit.done").exists()
+    before = {p.name: p.stat().st_mtime_ns for p in out.iterdir()}
+
+    dataset["file_pattern"] = "raw/**/*@b.txt"
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=dataset)
+    run_pipeline(str(pipe), raise_on_error=True)
+    assert unit_state(str(out / "a@b.txt@Fit"), "Fit").state == "done"
+    assert {n: (out / n).stat().st_mtime_ns for n in before} == before
+
+    # Even without its .done (an interrupted 0.4.0 write), the real source owns it.
+    (out / "a&b.txt@Fit.done").unlink()
+    run_pipeline(str(pipe), dry_run=True)
 
 
-def test_legacy_guard_ignores_real_ampersand_sources(tmp_path):
-    from neurodags.outputs import check_legacy_chained_outputs
+def test_migrated_unit_claims_its_leftover_copies_but_not_other_folders(tmp_path):
+    _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif", "sub-02/x0.txt@Clean.fif"])
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=CHAINED)
+    run_pipeline(str(pipe), raise_on_error=True)  # both units done (0.4.0 names)
+    # A pilot-era flat copy left by migrate as a duplicate: claimed by the migrated unit.
+    _legacy_output(tmp_path / "out" / "x0.txt&Clean.fif@Fit.message.txt")
+    # Unrelated files: another pipeline's name, a non-output name.
+    _legacy_output(tmp_path / "out" / "sub-01" / "x0.txt&Clean.fif@Other.nc")
+    _legacy_output(tmp_path / "out" / "sub-01" / "notes&todo.txt")
+    run_pipeline(str(pipe), dry_run=True)
 
-    (tmp_path / "a&b.vhdr@Fit.nc").write_text("output of the real a&b.vhdr")
-    bases = [str(tmp_path / "a@b.vhdr"), str(tmp_path / "a&b.vhdr")]
-    check_legacy_chained_outputs(bases, ["Fit"])  # owned by the '&' source: no error
-    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
-        check_legacy_chained_outputs(bases[:1], ["Fit"])
-    check_legacy_chained_outputs(bases[:1], [])  # no derivatives: nothing to check
+    # A legacy copy in a folder whose unit has no .done is not claimed by another folder.
+    (tmp_path / "out" / "sub-02" / "x0.txt@Clean.fif@Fit.done").unlink()
+    stale = _legacy_output(tmp_path / "out" / "sub-02" / "x0.txt&Clean.fif@Fit.message.txt")
+    with pytest.raises(LegacyOutputsError) as excinfo:
+        run_pipeline(str(pipe), dry_run=True)
+    message = str(excinfo.value)
+    assert str(stale) in message
+    assert "move them out of the output tree" in message
+
+
+def test_legacy_outputs_next_to_sources_are_refused(tmp_path):
+    _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif"])
+    dataset = {k: v for k, v in CHAINED.items() if k != "derivatives_path"}
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=dataset)
+    legacy = _legacy_output(tmp_path / "raw" / "sub-01" / "x0.txt&Clean.fif@Fit.message.txt")
+    with pytest.raises(LegacyOutputsError):
+        run_pipeline(str(pipe), dry_run=True)
+    legacy.unlink()
+    run_pipeline(str(pipe), raise_on_error=True)
+    assert unit_state(str(tmp_path / "raw/sub-01/x0.txt@Clean.fif@Fit"), "Fit").state == "done"

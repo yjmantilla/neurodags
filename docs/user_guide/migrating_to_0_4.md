@@ -264,7 +264,11 @@ depends on the upstream file names. 0.3.x wrote every `@` of such a source as `&
 (`x.vhdr&CleanPrep.fif@Feature.nc`); 0.4.0 keeps the source name verbatim
 (`x.vhdr@CleanPrep.fif@Feature.nc`), and migrate renames these outputs too. Until they are
 migrated, `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to
-`neurodags migrate` instead of recomputing them. Scripts that split chained file names on the
+`neurodags migrate` instead of recomputing them: they scan each `derivatives_path` (and, for
+datasets without one, the folders of the discovered sources) for files named like an output of
+the pipeline's derivatives whose source part contains `&` and that no `.done` claims. The error
+lists the files; if they are not neurodags 0.3.x outputs, or are obsolete, move them out of the
+tree. Scripts that split chained file names on the
 first `@` must split on the last one (`rsplit("@", 1)`), and a broad pattern such as
 `*@CleanPrep*` now also matches downstream outputs in the same tree: anchor it on the artifact
 suffix (`*@clean_prep.fif`).
@@ -314,8 +318,11 @@ Nothing is applied while any of these remains:
   already moved to a chained 0.4.0 name (`x@A.fif@B.nc`, which the 0.3.x parser rejects) are
   recognized as the planned target of their discovered source and join their unit, which then
   gets its `.done`.
-- Configuration files are written last with `.bak-0.3` backups, so an interrupted run keeps
-  the 0.3.x configuration and can simply be re-run.
+- Configuration files are written last, after every file move, with `.bak-0.3` backups: a
+  separate datasets YAML first, then the pipeline (which declares `naming_version: 1`). An
+  interrupted run therefore leaves either the 0.3.x pipeline (with the datasets YAML possibly
+  already migrated, which a re-run accepts as is) or a finished migration; run the same command
+  again, with the same options (`--map`, ...), to complete it.
 - A datasets YAML shared by several pipelines is migrated with the first one; later
   migrations see that every dataset has a `source_root`, take its paths as 0.4.0 paths and
   leave it unchanged.

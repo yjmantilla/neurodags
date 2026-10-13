@@ -469,6 +469,51 @@ def test_unresolved_chained_outputs_are_refused(tmp_path, capsys):
     assert "unresolved" in out
 
 
+def test_chained_dataset_with_zero_discovered_sources_is_refused(tmp_path, capsys):
+    """After an upstream rename every chained source can vanish at once: the output tree
+    is still scanned, its chained outputs are unresolved and nothing is applied."""
+    pipe = _project(tmp_path, datasets=CHAINED_DATASETS)
+    (tmp_path / "upstream").mkdir()  # pattern matches nothing
+    gone = [str(tmp_path / "upstream/sub-01/x.vhdr@CleanPrep.fif")]
+    up = str(tmp_path / "upstream")
+    legacy = _legacy_tree(tmp_path / "derivatives", gone, {"band_power": [".nc"]}, root=up)
+
+    plan = _plan(pipe, tmp_path)
+    assert [u.status for u in plan.units()] == ["unresolved"]
+    assert plan.to_dict()["unresolved"] == [str(legacy[0])]
+    assert any("chained pipeline match no discovered source" in r for r in plan.refusals)
+    with pytest.raises(MigrationRefused):
+        apply_migration(plan)
+    out = _refused_cli(pipe, tmp_path, capsys)  # YAML and outputs byte-identical
+    assert "unresolved" in out
+    assert "naming_version" not in (tmp_path / "pl.yml").read_text()
+
+
+def test_outputs_next_to_undiscovered_sources_are_reported(tmp_path, capsys):
+    """Datasets without derivatives_path: folders with no discovered source are scanned
+    too, so a chained output there is unresolved instead of silently left behind."""
+    datasets = CHAINED_DATASETS.replace("  derivatives_path: derivatives\n", "")
+    pipe = _project(tmp_path, datasets=datasets)
+    kept = _sources(tmp_path / "upstream", ["sub-01/x.vhdr@CleanPrep.fif"])
+    Path(f"{tmp_path}/upstream/sub-01/x.vhdr&CleanPrep.fif@BandPower.nc").write_text("x")
+    stale = tmp_path / "upstream/sub-02/y.vhdr&CleanPrep.fif@BandPower.nc"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("y")
+
+    plan = _plan(pipe, tmp_path)
+    assert sorted(u.status for u in plan.units()) == ["move", "unresolved"]
+    assert [os.path.basename(n) for _, n in plan.moves] == ["x.vhdr@CleanPrep.fif@band_power.nc"]
+    assert plan.to_dict()["unresolved"] == [str(stale)]
+    _refused_cli(pipe, tmp_path, capsys)
+
+    stale.unlink()  # recompute it on purpose
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    apply_migration(plan)
+    assert unit_state(f"{kept[0]}@band_power", "band_power").state == "done"
+    assert not _plan(pipe, tmp_path).has_work
+
+
 def test_chained_unit_moved_before_its_manifest_is_completed_on_resume(tmp_path, monkeypatch):
     """Crash after a move but before .done: the moved file has the 0.4.0 name (two '@',
     rejected by the 0.3.x parser); it is recognized as a planned target and the unit
@@ -747,6 +792,47 @@ def test_interrupted_apply_resumes(full_project, tmp_path, monkeypatch):
             assert unit_state(prefix, name).state == "done"
     assert "naming_version: 1" in (tmp_path / "pl.yml").read_text()
     assert not _plan(pipe, tmp_path).has_work
+
+
+@pytest.mark.parametrize("renames", [[], ["band_power=BandPower"]])
+def test_interrupted_between_configuration_files_resumes(
+    full_project, tmp_path, monkeypatch, renames
+):
+    """The datasets YAML is published before the pipeline (which declares naming_version);
+    a crash in between is completed by running the same command again."""
+    pipe, _ = full_project
+    plan = _plan(pipe, tmp_path, renames=renames)
+    real_write = migrate._write_config
+    order = []
+
+    def crash_on_pipeline(change):
+        order.append(change.role)
+        if change.role != "datasets":
+            raise OSError("crash before the pipeline is written")
+        real_write(change)
+
+    monkeypatch.setattr(migrate, "_write_config", crash_on_pipeline)
+    with pytest.raises(OSError, match="crash before the pipeline"):
+        apply_migration(plan)
+    monkeypatch.setattr(migrate, "_write_config", real_write)
+    assert order == ["datasets", "pipeline"]
+    assert "source_root" in (tmp_path / "ds.yml").read_text()
+    assert (tmp_path / "pl.yml").read_text() == PIPELINE_TEXT
+
+    resumed = _plan(pipe, tmp_path, renames=renames)
+    assert resumed.refusals == []
+    assert [c.role for c in resumed.config_changes] == ["pipeline"]
+    apply_migration(resumed)
+    config = load_pipeline_configuration(str(pipe))
+    assert config["naming_version"] == 1
+    new_name = "BandPower" if renames else "band_power"
+    assert new_name in config["DerivativeDefinitions"]
+    for rel in RELS:
+        prefix = str(tmp_path / "derivatives" / f"{rel}@{new_name}")
+        assert unit_state(prefix, new_name).state == "done"
+    again = _plan(pipe, tmp_path, renames=renames)
+    assert again.refusals == []
+    assert not again.has_work
 
 
 def test_unit_half_moved_by_an_interrupted_run_is_completed(tmp_path):

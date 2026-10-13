@@ -10,7 +10,8 @@ One pass converts both the configuration and the existing output tree:
   Files are edited in place (comments and ordering kept) through YAML node positions; when
   that is not possible the file is re-serialized and the preview says comments are lost.
   Backups ``<file>.bak-0.3`` are kept. Configuration files are written last, after every file
-  move succeeded.
+  move succeeded: a separate datasets YAML first, then the pipeline that declares
+  ``naming_version: 1`` (a re-run after a crash in between accepts the migrated datasets).
 - **Outputs** (spec 10.3). The new layout is enumerated (discovery with the new config,
   :func:`neurodags.outputs.output_reference_base`); the existing trees are *scanned* (never
   recomputed from the 0.3.x roots, which depended on which files were discovered). An old
@@ -229,6 +230,10 @@ class TreePlan:
     journal: str
     units: list[Unit] = field(default_factory=list)
     unrecognized: list[str] = field(default_factory=list)
+    #: Scan below ``root`` recursively (default: only for ``derivatives`` trees).
+    recursive: bool | None = None
+    #: Folders another tree of the plan already scans (skipped here).
+    skip_dirs: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -1249,6 +1254,20 @@ def _plan_trees(
         if not cfg.skip:
             raw = resolve_dataset_field(cfg, "derivatives_path", mount)
             derivatives_paths[name] = os.path.normpath(raw) if raw else None
+    # Every active dataset's output tree is scanned, even with zero discovered sources
+    # (e.g. a chained pattern that no longer matches): its 0.3.x outputs must still be
+    # reported (orphan / unresolved), never silently left behind.
+    for name, root in derivatives_paths.items():
+        if root:
+            key = os.path.abspath(root)
+            tree = trees.setdefault(
+                key,
+                TreePlan(key, "derivatives", [], os.path.join(key, ".neurodags", JOURNAL_NAME)),
+            )
+            if name not in tree.datasets:
+                tree.datasets.append(name)
+            by_tree.setdefault(key, {})
+            by_base.setdefault(key, {})
     for entry in entries:
         cfg = configs[entry.dataset]
         base = os.path.abspath(
@@ -1271,6 +1290,25 @@ def _plan_trees(
             candidate
         )
         by_base.setdefault(key, {}).setdefault(os.path.normcase(base), []).append(candidate)
+    # Datasets writing next to their sources: also scan the rest of source_root, so
+    # outputs in folders without a discovered source are reported too.
+    covered = {os.path.normcase(k) for k, t in trees.items() if t.kind == "sources"}
+    for name, root in derivatives_paths.items():
+        if root:
+            continue
+        source_root = resolve_dataset_field(configs[name], "source_root", mount)
+        if not source_root:
+            continue
+        rest_root = os.path.abspath(source_root)
+        key = "\0rest\0" + rest_root
+        tree = trees.setdefault(
+            key, TreePlan(rest_root, "sources", [], pipeline_journal, recursive=True)
+        )
+        tree.skip_dirs |= covered
+        if name not in tree.datasets:
+            tree.datasets.append(name)
+        by_tree.setdefault(key, {})
+        by_base.setdefault(key, {})
 
     tokens = sorted(plan.tokens, key=len, reverse=True)
     names = set(plan.tokens.values())
@@ -1279,13 +1317,18 @@ def _plan_trees(
         index = by_tree[key]
         bases = by_base[key]
         units: dict[tuple[str, str, str, bool], Unit] = {}
-        scans: list[tuple[str, bool]] = [(tree.root, tree.kind == "derivatives")]
+        recursive_scan = tree.kind == "derivatives" if tree.recursive is None else tree.recursive
+        scans: list[tuple[str, bool]] = [(tree.root, recursive_scan)]
         if tree.kind == "derivatives":
             scans.append((os.path.dirname(tree.root), False))
-        nested = [r for r in derivative_roots if r != key and r.startswith(key + os.sep)]
+        nested = [
+            r for r in derivative_roots if r != tree.root and r.startswith(tree.root + os.sep)
+        ]
         for scan_root, recursive in scans:
             single_form = scan_root != tree.root
             for path in _scan_tree(scan_root, recursive=recursive, exclude=nested):
+                if tree.skip_dirs and os.path.normcase(os.path.dirname(path)) in tree.skip_dirs:
+                    continue
                 basename = os.path.basename(path)
                 if single_form and not basename.startswith(os.path.basename(tree.root) + "@"):
                     continue
@@ -1326,6 +1369,8 @@ def _plan_trees(
             _group_split_parts(unit, tree)
             _match_unit(unit, tree, index, upstream, bases)
         tree.units = [u for u in units.values() if u.artifacts or u.markers]
+        if tree.recursive and not tree.units:
+            continue  # nothing left behind next to undiscovered sources
         plan.trees.append(tree)
     _resume_from_journals(plan)
 
@@ -2325,7 +2370,10 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
                 _apply_unit(unit, journal, result)
         finally:
             journal.close()
-    for change in plan.config_changes:
+    # A separate datasets YAML first, the pipeline (which declares naming_version: 1)
+    # last: interrupted in between, the datasets already have source_root, which a
+    # re-run in legacy mode accepts as 0.4.0 paths, so the same command completes.
+    for change in sorted(plan.config_changes, key=lambda c: c.role == "pipeline"):
         _write_config(change)
         result.configs.append(change.path)
     return result

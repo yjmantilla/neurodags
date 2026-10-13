@@ -61,8 +61,11 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   first `@` get the wrong source for chained names. A broad chained pattern such as
   `*@CleanedEEG*` now also matches downstream outputs in the same tree; anchor it on the
   artifact suffix (`*@CleanedEEG.fif`). `neurodags migrate` renames 0.3.x `&` outputs; until
-  then `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to it when a
-  unit's files exist only at the old `&` prefix. `status` no longer counts a downstream
+  then `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to it when
+  the output tree holds a file named like an output of one of the pipeline's derivatives whose
+  source part contains `&` and that no `.done` claims (0.3.x never wrote `.done`) and no real
+  source of that spelling owns (one scan of each
+  output tree per command). `status` no longer counts a downstream
   unit's files (`x@Clean.fif@Power.nc`) as unlisted or incomplete files of the upstream unit
   `x@Clean`.
 - **Output folders are computed from `source_root`** (#50):
@@ -177,7 +180,9 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   verbatim 0.4.0 names and folders (`x.vhdr&A.fif@B.nc` becomes `x.vhdr@A.fif@B.nc`);
   `.error`/`.skip` markers move with their unit; orphans are left in place, but chained
   outputs whose upstream source is not discovered are refused (*unresolved*) rather than
-  recomputed. MNE split
+  recomputed, also when the dataset discovers no source at all. A separate datasets YAML is
+  written before the pipeline YAML, so a run interrupted between the two completes when
+  re-run. MNE split
   recordings are re-saved with MNE under the new name and verified before the old parts are
   deleted. Units whose artifact set is known get a `.done` with `"origin": "migrate"`.
   Ambiguous mappings, occupied targets, two old copies of one unit with different content

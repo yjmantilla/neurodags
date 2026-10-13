@@ -133,7 +133,7 @@ def _absolute(path: Any) -> Any:
 
 
 def _reference_bases(
-    entries: list[InputEntry],
+    enumeration: InputEnumeration,
     datasets_configs: Mapping[str, Any],
     mount_point: Any,
     names: Iterable[str] = (),
@@ -144,8 +144,10 @@ def _reference_bases(
     ``source_root``, never from the discovered set). Nothing is written. Raises
     :class:`neurodags.utils.DatasetConfigError` when two sources map to the same outputs,
     or when outputs of the derivatives *names* are still in the pre-0.4.0 ``&`` layout
-    (:func:`neurodags.outputs.check_legacy_chained_outputs`).
+    (:func:`neurodags.outputs.check_legacy_chained_outputs`; scanned once per
+    enumeration, which every derivative of one invocation shares).
     """
+    entries = enumeration.entries
     bases = {
         entry.index: entry_reference_base(entry, datasets_configs[entry.dataset], mount_point)
         for entry in entries
@@ -153,7 +155,10 @@ def _reference_bases(
     check_output_collisions(
         (f"{entry.dataset}: {entry.rel}", bases[entry.index]) for entry in entries
     )
-    check_legacy_chained_outputs(bases.values(), names)
+    names = list(names)
+    if names and not enumeration.legacy_checked:
+        check_legacy_chained_outputs(datasets_configs, mount_point, names, entries)
+        enumeration.legacy_checked = True
     return bases
 
 
@@ -403,7 +408,7 @@ def iterate_derivative_pipeline(
         )
     # Output locations from source_root (spec 4.1); collisions fail before any write.
     reference_bases = _reference_bases(
-        enumeration.entries,
+        enumeration,
         datasets_configs,
         mount_point,
         list(config_dict.get("DerivativeDefinitions") or {}),
@@ -858,7 +863,7 @@ def run_pipeline(
         enumeration.select(only_index)  # validate --only-index up front
         # Output collisions (spec 4.3) fail before the snapshot writes anything.
         _reference_bases(
-            enumeration.entries,
+            enumeration,
             _ds_configs,
             _mount,
             list(config.get("DerivativeDefinitions") or {}),
@@ -1066,7 +1071,7 @@ def build_derivative_dataframe(
         inputs=inputs,
     )
     reference_bases = _reference_bases(
-        enumeration.entries, datasets_configs, mount_point, list(derivative_definitions)
+        enumeration, datasets_configs, mount_point, list(derivative_definitions)
     )
     selected_entries = enumeration.select(only_index)
     for missing_entry in (e for e in selected_entries if e.missing):

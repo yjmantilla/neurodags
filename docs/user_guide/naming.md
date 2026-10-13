@@ -277,7 +277,9 @@ prefix = outdir / (base + "@" + name)
   `@` (`x.vhdr@clean_prep.fif@Entropy.json`); the last one is the separator. `a@b.vhdr` and
   `a&b.vhdr` in one folder are two distinct units. Before 0.4.0 every `@` of the source basename
   was written as `&`; `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to
-  `neurodags migrate` when a unit's files exist only at that old `&` prefix.
+  `neurodags migrate` when the output tree holds a file named like an output of one of the pipeline's derivatives whose
+  source part contains `&` and that no `.done` claims (0.3.x never wrote `.done`) and no real
+  source of that spelling owns.
 - **Collisions are refused before running**: two sources mapping to the same reference base
   (datasets sharing an output tree, or names differing only in case on a case-insensitive
   filesystem) stop `run`, `dry-run`, `status` and `dataframe` with an error naming both.
