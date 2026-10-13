@@ -43,7 +43,7 @@ The TUI is organized into several tabs, each focused on a specific part of the N
 ### 1. Config Tab
 This is where you load your pipeline configuration.
 - **Pipeline YAML path**: Enter the path to your `pipeline.yml`.
-- **Datasets YAML path (optional override)**: Enter the path to an independent `datasets.yml`. If provided, this overrides any `datasets` definition found inside the pipeline configuration.
+- **Datasets YAML path (optional override)**: Enter the path to an independent `datasets.yml`. If provided, this overrides any `datasets` definition found inside the pipeline configuration. A relative path is resolved against the directory the TUI was started from (the same rule as `-d` on the command line, not the pipeline YAML's directory); the summary lists the datasets of that file, and every tab uses that same file.
 - **Load**: Click to load the configuration. Once loaded, a summary of datasets and derivatives will be displayed.
 
 
@@ -67,7 +67,7 @@ Execute the pipeline to compute derivatives.
 
 ### 5. DataFrame Tab
 Assemble computation results into ML-ready DataFrames.
-- **derivatives**: Comma-separated list of derivatives to include (leave blank for all).
+- **derivatives**: Derivatives to include, separated by spaces (for example `Alpha Beta`; leave blank for all). Commas are still accepted as separators (`Alpha,Beta`), the pre-0.4.0 syntax.
 - **format**: Choose between `wide` or `long` format.
 - **max files/dataset**: Limit the number of files.
 - **Assemble**: Build the DataFrame and display a preview in the table.
@@ -75,7 +75,7 @@ Assemble computation results into ML-ready DataFrames.
 ### 6. Status Tab
 Check per-derivative processing status for the loaded pipeline (the TUI equivalent of the `neurodags status` command).
 - **Select derivative**: Choose a derivative to inspect, or leave on `All (DerivativeList)`.
-- **Refresh**: Scan outputs and populate the table with *done* / *incomplete* / *missing* / *errored* counts per derivative, plus a summary line and any error paths. The states are those of {ref}`Unit states <naming-unit-states>`; use `neurodags status` for the `skipped` and `(migrated)` counts.
+- **Refresh**: Scan outputs and populate the table with *done* / *incomplete* / *missing* / *errored* counts per derivative, plus a summary line and any error paths. The states are those of {ref}`Unit states <naming-unit-states>`; use `neurodags status` for the `skipped` and `(migrated)` counts. A unit whose plan could not be computed (a configuration error) is counted as *errored* and listed with its planning error.
 
 ### 7. NC Viewer Tab
 Launch the interactive Dash explorer for results.

@@ -944,3 +944,62 @@ def test_argument_preparation_failure_marks_overwritten_parent_error(tmp_path):
     state = unit_state(prefix, "RtArgs")
     assert state.state == "error"
     assert "step id=1 node='rt_value'" in Path(prefix + ".error").read_text()
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ({"op": "move", "old": "/o/a@A.txt", "new": "/n/a@A.txt"}, ["/n/a@A.txt"]),
+        ({"op": "mne-done", "new_parts": ["/n/a@A.fif", "/n/a@A-1.fif"]}, None),
+        (
+            {"op": "mne-staged", "new": "/n/a@A.fif", "parts": [["a@A.fif", 3, "x"]]},
+            ["/n/a@A.fif"],
+        ),
+        (
+            {"op": "split-move-start", "parts": [["/o/a@A.fif", "/n/a@A.fif"]]},
+            ["/n/a@A.fif"],
+        ),
+        ({"op": "mne-start", "new": "/n/a@A.fif"}, []),  # nothing published yet
+        ({"op": "manifest", "path": "/n/a@A.done"}, []),
+    ],
+)
+def test_migrate_reads_its_own_journal_records(entry, expected):
+    from neurodags.migrate import _journal_new_paths
+
+    want = entry.get("new_parts") if expected is None else expected
+    assert _journal_new_paths(entry) == want
+
+
+def test_recording_container_source_publishes_next_to_its_prefix(tmp_path, monkeypatch):
+    """A ``.ds`` directory input: the unit prefix is still a file prefix next to it."""
+    import yaml
+
+    from neurodags.orchestrators import run_pipeline
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "raw" / "sub-01_meg.ds").mkdir(parents=True)
+    (tmp_path / "raw" / "sub-01_meg.ds" / "sub-01_meg.meg4").write_text("m")
+    ds = {"name": "d", "source_root": "raw", "file_pattern": "raw/*.ds"}
+    ds["derivatives_path"] = "out"
+    (tmp_path / "ds.yml").write_text(yaml.safe_dump({"d": ds}))
+    pipeline = tmp_path / "pl.yml"
+    pipeline.write_text(
+        yaml.safe_dump(
+            {
+                "naming_version": 1,
+                "datasets": "ds.yml",
+                "DerivativeDefinitions": {"Val": _single("rt_value", value="v")},
+                "DerivativeList": ["Val"],
+            }
+        )
+    )
+    run_pipeline(str(pipeline), raise_on_error=True)
+    prefix = str(tmp_path / "out" / "sub-01_meg.ds") + "@Val"
+    state = unit_state(prefix, "Val")
+    assert state.state == "done"
+    assert state.temps == ()
+    assert Path(prefix + ".txt").read_text() == "v"
+    assert sorted(p.name for p in (tmp_path / "out").iterdir() if p.name != "code") == [
+        "sub-01_meg.ds@Val.done",
+        "sub-01_meg.ds@Val.txt",
+    ]
