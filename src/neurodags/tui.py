@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import subprocess
 import sys
 import webbrowser
@@ -185,7 +186,7 @@ class _DataFrameTab(Vertical):
         """Compose child widgets."""
         with Horizontal(classes="row"):
             yield Input(
-                placeholder="derivatives: comma-separated (blank=all)",
+                placeholder="derivatives: space-separated (blank=all)",
                 id="df-derivatives",
             )
             yield Select(
@@ -330,32 +331,30 @@ class NeuroDagsApp(App):
                 self._load_config(path)
 
     def _load_config(self, path: str, datasets_path: str | None = None) -> None:
-        from neurodags.loaders import load_configuration, load_pipeline_configuration
+        from neurodags.cli import resolve_cli_datasets_path
+        from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+        from neurodags.loaders import load_pipeline_configuration
 
         status = self.query_one("#config-status", Static)
         summary = self.query_one("#config-summary", Static)
         try:
-            self._config = load_pipeline_configuration(path)
+            config = load_pipeline_configuration(path)
+            # A datasets override typed here is a path typed by the user, resolved like
+            # the CLI's -d (against the current working directory) and kept absolute, so
+            # the summary and every later run/dry-run/status/dataframe use the same file.
+            datasets_path = resolve_cli_datasets_path(datasets_path) if datasets_path else None
+            if datasets_path is None and config.get("datasets") is None:
+                datasets: list[str] = []
+            else:
+                # The loader execution uses, so the summary shows what will run.
+                loaded, _ = get_datasets_and_mount_point_from_pipeline_configuration(
+                    path, datasets_input=datasets_path
+                )
+                datasets = list(loaded)
+            self._config = config
             self._config_path = path
             self._datasets_path = datasets_path
             self._derivatives = list(self._config.get("DerivativeDefinitions", {}).keys())
-            if datasets_path:
-                datasets_config = load_configuration(datasets_path)
-            else:
-                datasets_val = self._config.get("Datasets") or self._config.get("datasets")
-                if isinstance(datasets_val, str):
-                    ds_path = Path(datasets_val)
-                    if not ds_path.is_absolute():
-                        ds_path = Path(path).resolve().parent / ds_path
-                    datasets_config = load_configuration(str(ds_path))
-                else:
-                    datasets_config = self._config
-            datasets_dict = (
-                datasets_config.get("Datasets")
-                or datasets_config.get("datasets")
-                or datasets_config
-            )
-            datasets = list((datasets_dict or {}).keys())
 
             status_lines = [f"[green]Loaded:[/green] {escape_markup(path)}"]
             if datasets_path:
@@ -464,7 +463,15 @@ class NeuroDagsApp(App):
         table.add_columns(*[str(c) for c in result.columns])
         for _, row in result.iterrows():
             table.add_row(*[str(v) for v in row])
-        self.notify(f"Dry run complete: {len(result)} rows.")
+        n_failed = int(result["planning_error"].notna().sum()) if "planning_error" in result else 0
+        if n_failed:
+            self.notify(
+                f"Dry run: {n_failed} of {len(result)} unit(s) could not be planned "
+                "(see the planning_error column).",
+                severity="error",
+            )
+        else:
+            self.notify(f"Dry run complete: {len(result)} rows.")
 
     # ------------------------------------------------------------------
     # Run pipeline
@@ -518,7 +525,7 @@ class NeuroDagsApp(App):
             self.notify("Load config first.", severity="error")
             return
         derivs_raw = self.query_one("#df-derivatives", Input).value.strip()
-        include = [d.strip() for d in derivs_raw.split(",") if d.strip()] or None
+        include = _parse_derivative_filter(derivs_raw)
         fmt_sel = self.query_one("#df-format", Select)
         fmt: str = str(fmt_sel.value) if not fmt_sel.is_blank() else "wide"
         max_files = _parse_int(self.query_one("#df-max-files", Input).value)
@@ -729,12 +736,21 @@ def _parse_int(s: str) -> int | None:
         return None
 
 
+def _parse_derivative_filter(value: str) -> list[str] | None:
+    """Derivative names from the DataFrame filter: whitespace-separated (spec §9).
+
+    Commas are accepted as separators too (the 0.3.x syntax; a name cannot contain one).
+    ``None`` (all derivatives) when nothing is entered.
+    """
+    return [name for name in re.split(r"[\s,]+", value) if name] or None
+
+
 def _status_sync(
     config: str | None,
     datasets_config: str | None,
     derivatives: list[str] | None,
 ) -> tuple[list[dict], dict, list[tuple[str, str, str | None]]]:
-    from neurodags.cli import _status_classify, _status_error_path
+    from neurodags.cli import _status_classify, _status_error_path, _status_scalar
     from neurodags.orchestrators import run_pipeline
 
     result = run_pipeline(
@@ -752,7 +768,9 @@ def _status_sync(
 
     for _, row in result.iterrows():
         plan = row.get("plan", [])
-        status = _status_classify(plan)
+        planning_error = _status_scalar(row.get("planning_error"))
+        # A unit the dry run could not plan is shown as errored (never as absent).
+        status = "errored" if planning_error is not None else _status_classify(plan)
         deriv = str(row.get("derivative", "unknown"))
         fpath = str(row.get("file_path", ""))
 
@@ -769,7 +787,9 @@ def _status_sync(
         if status in rows_by_deriv[deriv]:
             rows_by_deriv[deriv][status] += 1
 
-        if status == "errored":
+        if planning_error is not None:
+            errored_files.append((deriv, fpath, f"planning error: {planning_error}"))
+        elif status == "errored":
             errored_files.append((deriv, fpath, _status_error_path(plan)))
 
     rows = sorted(rows_by_deriv.values(), key=lambda r: r["derivative"])
