@@ -28,6 +28,14 @@ A unit is done when ``<prefix>.done`` is a valid manifest: it parses, its
 :func:`manifest_artifacts`). The manifest is written last and atomically, from the paths
 the artifact writers reported (:func:`writer_paths`), never from a glob. Files that match
 the prefix but have no valid manifest make the unit ``incomplete``.
+
+Unit lock
+---------
+A process (re)computing a unit first creates ``<prefix>.lock`` exclusively
+(:func:`acquire_unit_lock`, ``O_CREAT | O_EXCL``) and removes it after publishing the
+``.done`` or the ``.error``/``.skip`` marker. A second process finding the lock does not
+touch the unit (:class:`UnitLockedError`). A lock left behind by a killed process is never
+broken automatically: ``status`` reports the unit as ``locked`` until the file is deleted.
 """
 
 from __future__ import annotations
@@ -36,7 +44,9 @@ import glob
 import json
 import os
 import re
+import socket
 import tempfile
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -52,9 +62,13 @@ __all__ = [
     "MANIFEST_VERSION",
     "NAMING_VERSION",
     "LegacyOutputsError",
+    "UnitLock",
+    "UnitLockedError",
     "UnitState",
     "UnitStatus",
+    "acquire_unit_lock",
     "build_manifest",
+    "check_artifact_ownership",
     "check_legacy_chained_outputs",
     "check_output_collisions",
     "dataset_derivatives_base",
@@ -76,10 +90,13 @@ MANIFEST_VERSION = 1
 #: Naming/layout version the manifests certify (same number as ``naming_version`` in YAML).
 NAMING_VERSION = 1
 
+#: Completion markers; a unit carries at most one of them.
 _MARKERS = ("done", "error", "skip")
+#: The per-unit write lock (``<prefix>.lock``); not a completion marker.
+_LOCK = "lock"
 _SPLIT_NAME_RE = re.compile(r"(.+)-([0-9]+)")
 
-UnitStatus = Literal["done", "error", "skipped", "incomplete", "missing"]
+UnitStatus = Literal["done", "error", "skipped", "incomplete", "missing", "locked"]
 
 
 # ---------------------------------------------------------------------------
@@ -163,9 +180,11 @@ def output_prefix(reference_base: str | os.PathLike, name: str) -> str:
 
 
 def marker_path(prefix: str, marker: str) -> str:
-    """Return ``prefix + "." + marker`` for ``done``, ``error`` or ``skip``."""
-    if marker not in _MARKERS:
-        raise ValueError(f"unknown marker {marker!r}; expected one of {', '.join(_MARKERS)}")
+    """Return ``prefix + "." + marker`` for ``done``, ``error``, ``skip`` or ``lock``."""
+    if marker not in (*_MARKERS, _LOCK):
+        raise ValueError(
+            f"unknown marker {marker!r}; expected one of {', '.join((*_MARKERS, _LOCK))}"
+        )
     return f"{prefix}.{marker}"
 
 
@@ -338,6 +357,8 @@ def check_legacy_chained_outputs(
             key = (parsed.source_part.replace("@", "&"), name)
             done_dirs.setdefault(key, []).append(dirpath)
             continue
+        if parsed.marker == _LOCK:
+            continue  # 0.3.x never wrote unit locks
         if "&" in parsed.source_part and os.path.isfile(path):
             suspects.append((dirpath, parsed.source_part, path, name))
 
@@ -437,6 +458,151 @@ def writer_paths(target: str, returned: Any) -> list[str]:
             "exactly the target path."
         )
     return paths
+
+
+def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
+    """Refuse a file claimed by two artifacts of one unit.
+
+    Two artifacts reporting the same file (for example ``.EO.fif``, whose MNE split part is
+    ``<prefix>.EO-1.fif``, and an artifact ``.EO-1.fif``) mean one overwrote the other, so
+    the unit must not be certified done.
+
+    Parameters
+    ----------
+    written : mapping of suffix to paths
+        The files each artifact reported (or is about to write).
+
+    Raises
+    ------
+    RuntimeError
+        Naming every file claimed by more than one artifact.
+    """
+    owners: dict[str, list[str]] = {}
+    for suffix, paths in written.items():
+        for path in paths:
+            key = os.path.normcase(os.path.abspath(os.fspath(path)))
+            group = owners.setdefault(key, [])
+            if suffix not in group:
+                group.append(suffix)
+    conflicts = [
+        f"{os.path.basename(key)} (artifacts {', '.join(repr(s) for s in suffixes)})"
+        for key, suffixes in owners.items()
+        if len(suffixes) > 1
+    ]
+    if conflicts:
+        raise RuntimeError(
+            "two artifacts of one unit write the same file, so one would overwrite the "
+            f"other: {'; '.join(conflicts)}. Rename an artifact suffix (an MNE recording "
+            "'<prefix>.X.fif' may also write '<prefix>.X-1.fif', ...)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unit lock
+# ---------------------------------------------------------------------------
+
+
+class UnitLockedError(RuntimeError):
+    """Another process holds the unit's ``.lock``; this process did not touch the unit."""
+
+    def __init__(self, prefix: str, lock_path: str, holder: str):
+        self.prefix = prefix
+        self.lock_path = lock_path
+        self.holder = holder
+        super().__init__(
+            f"unit {os.path.basename(prefix)!r} is locked by another process ({holder}); "
+            "it was not computed by this run. If no job is running for it any more (for "
+            "example the holder was killed), delete the lock file and rerun: "
+            f"{lock_path}"
+        )
+
+
+@dataclass
+class UnitLock:
+    """A held ``<prefix>.lock``; :meth:`release` removes it if it is still ours."""
+
+    path: str
+    token: str
+    released: bool = False
+
+    def release(self) -> None:
+        """Delete the lock file unless someone replaced it (e.g. after a manual delete)."""
+        if self.released:
+            return
+        self.released = True
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                info = json.load(handle)
+        except FileNotFoundError:
+            log.warning("Unit lock vanished before release", path=self.path)
+            return
+        except (OSError, ValueError):
+            info = None
+        if not isinstance(info, dict) or info.get("token") != self.token:
+            log.warning("Unit lock was replaced by another process; leaving it", path=self.path)
+            return
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+
+def _lock_holder(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            info = json.load(handle)
+    except (OSError, ValueError):
+        return "holder unknown: unreadable lock file"
+    if not isinstance(info, dict):
+        return "holder unknown"
+    return f"pid {info.get('pid')} on host {info.get('host')}, since {info.get('started')}"
+
+
+def acquire_unit_lock(prefix: str, name: str) -> UnitLock:
+    """Create ``<prefix>.lock`` exclusively, or raise :class:`UnitLockedError`.
+
+    The file is created with ``O_CREAT | O_EXCL`` (atomic on local filesystems and on NFSv3
+    or later) and holds the pid, host and start time of the owner. A lock is never broken
+    automatically: a holder that died (``kill -9``, a scheduler timeout) leaves it in place,
+    and ``status`` reports the unit as ``locked`` until it is deleted.
+
+    Parameters
+    ----------
+    prefix : str
+        The unit's prefix (:func:`output_prefix`); its folder must exist.
+    name : str
+        Derivative name, recorded in the lock file.
+
+    Raises
+    ------
+    UnitLockedError
+        When the lock file already exists.
+    """
+    path = marker_path(prefix, _LOCK)
+    token = uuid.uuid4().hex
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        raise UnitLockedError(prefix, path, _lock_holder(path)) from None
+    info = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "derivative": name,
+        "token": token,
+    }
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(info, handle)
+            handle.write("\n")
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    log.debug("Acquired unit lock", path=path)
+    return UnitLock(path, token)
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +780,8 @@ class UnitState:
     unlisted: tuple[str, ...] = ()
     error_path: str | None = None
     skip_path: str | None = None
+    #: ``<prefix>.lock`` when it exists (a run is writing the unit, or one was killed).
+    lock_path: str | None = None
 
 
 def _prefix_files(prefix: str) -> list[str]:
@@ -623,7 +791,7 @@ def _prefix_files(prefix: str) -> list[str]:
     # Outputs of a downstream unit whose source is this unit's artifact (for prefix
     # ``x@Clean``: ``x@Clean.fif@Power.nc``) also match the glob; they parse at their last
     # ``@`` to another unit and are not this unit's files.
-    marker_names = {marker_path(prefix, m) for m in _MARKERS}
+    marker_names = {marker_path(prefix, m) for m in (*_MARKERS, _LOCK)}
     own = len(os.path.basename(prefix))
     return [
         p
@@ -641,10 +809,12 @@ def _is_descendant_output(basename: str, prefix_len: int) -> bool:
 
 
 def unit_state(prefix: str, name: str, *, scan: bool = True) -> UnitState:
-    """Classify one unit (spec 6.2): ``skipped``, ``done``, ``error``, ``incomplete``, ``missing``.
+    """Classify one unit (spec 6.2): ``skipped``, ``done``, ``locked``, ``error``, ...
 
     Precedence follows what a run does: a ``.skip`` marker wins (the unit is not
-    recomputed), then a valid ``.done``, then ``.error``. Without any of those, files
+    recomputed), then a valid ``.done`` (a cache hit needs no lock), then a ``.lock``
+    (another process is writing the unit, or one died holding it: a run refuses to touch
+    it), then ``.error``. Without any of those, files
     matching the prefix (or an invalid ``.done``) make it ``incomplete``; otherwise it is
     ``missing``. With *scan* False the directory is not globbed (``unlisted`` stays empty
     and leftover files without a manifest count as ``missing``).
@@ -653,6 +823,8 @@ def unit_state(prefix: str, name: str, *, scan: bool = True) -> UnitState:
     error_path = marker_path(prefix, "error")
     has_skip = os.path.exists(skip_path)
     has_error = os.path.exists(error_path)
+    lock_path = marker_path(prefix, _LOCK)
+    has_lock = os.path.exists(lock_path)
     manifest = read_manifest(prefix)
     done_exists = os.path.exists(marker_path(prefix, "done"))
     problem, resolved = _manifest_problem(manifest, prefix, name)
@@ -667,11 +839,14 @@ def unit_state(prefix: str, name: str, *, scan: bool = True) -> UnitState:
         "skip_path": skip_path if has_skip else None,
         "unlisted": unlisted,
         "problem": problem if done_exists else None,
+        "lock_path": lock_path if has_lock else None,
     }
     if has_skip:
         return UnitState("skipped", **common)
     if problem is None:
         return UnitState("done", artifacts=resolved, origin=manifest.get("origin"), **common)
+    if has_lock:
+        return UnitState("locked", **common)
     if has_error:
         return UnitState("error", **common)
     if done_exists or files:
@@ -685,7 +860,10 @@ def unit_state(prefix: str, name: str, *, scan: bool = True) -> UnitState:
 
 
 def remove_markers(prefix: str, *markers: str) -> None:
-    """Delete the given markers (``done``, ``error``, ``skip``) of a unit if present."""
+    """Delete the given markers (``done``, ``error``, ``skip``) of a unit if present.
+
+    The unit's ``.lock`` is not a marker; :meth:`UnitLock.release` removes it.
+    """
     for marker in markers:
         path = marker_path(prefix, marker)
         try:

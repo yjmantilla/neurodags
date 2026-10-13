@@ -120,8 +120,10 @@ ENTITY_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 #: Reserved reference to the input file itself; not usable as a derivative name (any case).
 RESERVED_NAME = "SourceFile"
 
-#: Last suffix segments that denote completion markers; reserved for artifacts (any case).
-MARKER_SEGMENTS = frozenset({"done", "error", "skip"})
+#: Last suffix segments reserved for a unit's own bookkeeping files: the completion markers
+#: (``done``, ``error``, ``skip``) and the per-unit write lock (``lock``). Artifact suffixes
+#: may not end in one of them (any case).
+MARKER_SEGMENTS = frozenset({"done", "error", "skip", "lock"})
 
 #: Names longer than this produce a warning in :func:`check_derivative_names`.
 NAME_LENGTH_WARNING = 64
@@ -558,7 +560,7 @@ def _suffix_problem(suffix: Any) -> str | None:
     if last.lower() in MARKER_SEGMENTS:
         return (
             f"Artifact suffix {suffix!r} ends in {last!r}, which is reserved for completion "
-            "markers (.done, .error, .skip, any case)."
+            "markers and the unit lock (.done, .error, .skip, .lock, any case)."
         )
     return None
 
@@ -588,8 +590,12 @@ def validate_artifact_suffixes(suffixes: Iterable[Any]) -> None:
     Raises
     ------
     NamingError
-        Listing every invalid suffix (see :func:`validate_artifact_suffix`) and every group
-        of suffixes that differ only in case (``.fif`` and ``.FIF``).
+        Listing every invalid suffix (see :func:`validate_artifact_suffix`), every group
+        of suffixes that differ only in case (``.fif`` and ``.FIF``), and every pair where
+        one suffix is another with ``-<digits>`` inserted before the final extension
+        (``.EO.fif`` and ``.EO-1.fif``, compared ignoring case): MNE writes the split parts
+        of ``<prefix>.EO.fif`` as ``<prefix>.EO-1.fif``, ..., so the second artifact would
+        overwrite a part of the first.
     """
     problems: list[str] = []
     by_folded: dict[str, list[str]] = {}
@@ -607,6 +613,19 @@ def validate_artifact_suffixes(suffixes: Iterable[Any]) -> None:
                 "Artifact suffixes differ only in case: "
                 + ", ".join(repr(s) for s in group)
                 + ". They would collide on case-insensitive filesystems."
+            )
+    for folded, group in by_folded.items():
+        stem, ext = folded.rsplit(".", 1)
+        match = _SPLIT_TAIL_RE.fullmatch(stem)
+        if match is None:
+            continue
+        for base in by_folded.get(f"{match.group(1)}.{ext}", []):
+            base_stem, base_ext = base.rsplit(".", 1)
+            problems.append(
+                f"Artifact suffixes {base!r} and {group[0]!r} are both used: MNE writes the "
+                f"split parts of a large '<prefix>{base}' recording as "
+                f"'<prefix>{base_stem}-1.{base_ext}', ..., so {group[0]!r} would overwrite "
+                "one of them. Rename one of them."
             )
     if problems:
         raise NamingError("\n".join(problems))
@@ -681,9 +700,9 @@ def output_basename(source_basename: str, name: str, suffix: str) -> str:
 
 
 def marker_basename(source_basename: str, name: str, marker: str) -> str:
-    """Return the basename of a completion marker (``marker`` is done, error or skip)."""
+    """Return the basename of a marker (``marker`` is done, error, skip or lock)."""
     if marker not in MARKER_SEGMENTS:
-        raise NamingError(f"Unknown marker {marker!r}; expected one of done, error, skip.")
+        raise NamingError(f"Unknown marker {marker!r}; expected one of done, error, skip, lock.")
     return output_prefix_basename(source_basename, name) + "." + marker
 
 

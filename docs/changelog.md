@@ -288,6 +288,14 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `a_b` and `a|b`, produced the same column; the new encoding is reversible.
 - `datasets_psycho.yml`'s `fir` `file_pattern` was a bare directory and is now a `**/*.vhdr`
   glob.
+- **Runtime integrity of units** (0.4.0 review): artifact suffixes such as `.EO.fif` and
+  `.EO-1.fif` in one result are rejected (MNE's split part of the first is the second), and two
+  artifacts reporting the same file fail the unit instead of certifying an overwritten
+  recording. A unit being computed is claimed with `<prefix>.lock`, so a duplicate or retried
+  task on the same unit refuses it instead of interleaving writes; `status` reports leftover
+  locks as `locked` (they are never broken automatically). A `save: false` derivative reached
+  as a dependency is no longer read from an old manifest. A failing dependency or argument
+  preparation now writes the consuming unit's `.error` and removes its old `.done`.
 
 ## 0.3.6 — 2026-10-12
 

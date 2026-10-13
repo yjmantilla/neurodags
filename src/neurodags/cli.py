@@ -393,6 +393,7 @@ _STATE_TO_STATUS = {
     "error": "errored",
     "incomplete": "incomplete",
     "missing": "missing",
+    "locked": "locked",
 }
 
 
@@ -413,7 +414,9 @@ def _status_classify(plan: list) -> str:
     - 'errored': a ``.error`` marker exists;
     - 'incomplete': output files exist without a valid ``.done`` (a partial or
       interrupted write, or 0.3.x outputs not yet migrated); recomputed by the next run;
-    - 'missing': nothing exists for the unit.
+    - 'missing': nothing exists for the unit;
+    - 'locked': a ``.lock`` exists (a job is writing the unit, or one was killed while
+      writing it); runs refuse the unit until the lock is gone.
     """
     final = _status_final(plan)
     if final is None:
@@ -442,6 +445,11 @@ def _status_origin(plan: list) -> str | None:
 def _status_unlisted(plan: list) -> list[str]:
     final = _status_final(plan)
     return list(final.get("unlisted") or []) if final else []
+
+
+def _status_lock_path(plan: list) -> str | None:
+    final = _status_final(plan)
+    return final.get("lock_path") if final else None
 
 
 def _status_error_path(plan: list) -> str | None:
@@ -491,6 +499,7 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
                 "label": "done (migrated)" if migrated else status,
                 "migrated": migrated,
                 "error_path": _status_error_path(plan),
+                "lock_path": None if missing_source else _status_lock_path(plan),
                 "unlisted": [] if missing_source else _status_unlisted(plan),
             }
         )
@@ -537,6 +546,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "missing": 0,
         "errored": 0,
         "missing-source": 0,
+        "locked": 0,
     }
     per_deriv: dict[str, dict[str, int]] = {}
     all_derivs = sorted({r["derivative"] for r in rows})
@@ -557,6 +567,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         and grand["incomplete"] == 0
         and grand["errored"] == 0
         and grand["missing-source"] == 0
+        and grand["locked"] == 0
     )
     n_unlisted = sum(len(r["unlisted"]) for r in rows)
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
@@ -585,6 +596,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "missing_indices": _status_indices(rows, ("missing",)),
             "incomplete_indices": _status_indices(rows, ("incomplete",)),
             "errored_indices": _status_indices(rows, ("errored",)),
+            "locked_indices": _status_indices(rows, ("locked",)),
             "unlisted_files": n_unlisted,
             "inputs": inputs_file,
             "missing_source_indices": missing_source_indices,
@@ -600,6 +612,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "status": r["status"],
                     "label": r["label"],
                     "error_path": r["error_path"],
+                    "lock_path": r["lock_path"],
                     "unlisted": r["unlisted"],
                 }
                 for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
@@ -681,6 +694,18 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "manifest; they are ignored (see --format json --include-files)."
         )
     _print_input_list_report()
+
+    locked_rows = sorted((r for r in rows if r["status"] == "locked"), key=_status_index_key)
+    if locked_rows:
+        print(
+            f"\n{len(locked_rows)} unit(s) locked (not in the table): a job is writing them, "
+            "or one was killed while writing them; runs refuse a locked unit. If no job is "
+            "running for them any more, delete the lock file(s):"
+        )
+        for r in locked_rows[:10]:
+            print(f"  {r['lock_path']}")
+        if len(locked_rows) > 10:
+            print(f"  ... and {len(locked_rows) - 10} more (see --format json --include-files)")
 
     if grand["errored"]:
         print(f"\n{grand['errored']} error(s) found.", end="")

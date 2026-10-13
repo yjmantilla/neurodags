@@ -26,7 +26,7 @@ unless you convert the tree with `neurodags migrate` (see {doc}`migrating_to_0_4
 | Use names matching `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`: `BandPower`, `band_power`, `psd-welch`, `Fit_alpha-0p5_w-6`. | Use `.`, `@`, `&`, `/`, `\`, glob characters, spaces, `,`, `:`, non-ASCII, a leading digit or `-`, or the name `SourceFile` — rejected (see [Derivative names](#naming-derivative-names)). |
 | Quote YAML keys that YAML would read as something else: `"Yes":`, `"1_000":`. | Write `Yes:`, `On:`, `1_000:`, `0x1F:`, `~:` as derivative names — YAML loads them as booleans, numbers or null; rejected with "quote the key". |
 | Use the YAML name everywhere: files, `derivative: band_power.nc`, `DerivativeList`, `--derivative`, dataframe columns, `find -name '*@band_power*'`. | Define names that differ only in case (`Clean` / `clean`) or a name plus a split-like tail (`Clean` / `Clean-1`) — rejected. |
-| Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO_baseline.fif`). | Use keys without a leading `.`, with spaces, ending in `.done`/`.error`/`.skip`, or two keys differing only in case — the unit fails with `.error` and nothing is written. |
+| Start custom node artifact keys with `.` (`.nc`, `.report.html`, `.EO_baseline.fif`). | Use keys without a leading `.`, with spaces, ending in `.done`/`.error`/`.skip`/`.lock`, two keys differing only in case, or a key plus the same key with `-<digits>` before its extension (`.EO.fif` / `.EO-1.fif`) — the unit fails with `.error` and nothing is written. |
 | Make custom artifact writers return every file they write (see [Writer contract](#naming-writer-contract)). | Write extra files from a writer without reporting them — they are not part of the unit and the manifest ignores them. |
 | Set `source_root` to the root folder of the dataset's sources; outputs mirror the tree below it. | Rely on the set of matched files to decide output folders — it never does since 0.4.0. |
 | Split dataframe column names with `neurodags.naming.parse_column` (see [Dataframe column names](#naming-dataframe-columns)). | Split columns by hand on `_` or `-` — dimension names and values are percent-encoded. |
@@ -53,10 +53,16 @@ Every saved artifact of a *unit* (one source file × one derivative) is written 
 - **`<name>`** is the derivative name exactly as written in `DerivativeDefinitions`.
 - **`<artifact suffix>`** is the key of each artifact the last node returns, appended verbatim:
   `.fif`, `.nc`, `.json`, `.report.html`, `.EO_baseline.fif`, `.fif.gz`. It must match
-  `^(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$`, its last segment must not be `done`, `error` or `skip`
-  (any case), and two suffixes of one result must not differ only in case. Suffixes are checked
-  **before the first writer runs**: an invalid key fails the unit with an `.error` marker and
-  writes nothing.
+  `^(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$`, its last segment must not be `done`, `error`, `skip`
+  or `lock` (any case), and two suffixes of one result must not differ only in case. Nor may one
+  suffix be another with `-<digits>` inserted before the final extension (`.EO.fif` and
+  `.EO-1.fif`, compared ignoring case): MNE writes the split parts of a large
+  `<prefix>.EO.fif` as `<prefix>.EO-1.fif`, `<prefix>.EO-2.fif`, ..., which the second artifact
+  would overwrite (the artifact-level analogue of the `Clean` / `Clean-1` name rule). Suffixes
+  are checked **before the first writer runs**: an invalid key fails the unit with an `.error`
+  marker and writes nothing. As a second line of defence, a writer is not run when an earlier
+  artifact of the unit already reported its target, and two artifacts reporting the same file
+  fail the unit (no `.done`).
 
 (naming-done-manifest)=
 
@@ -67,8 +73,11 @@ Three marker files share the unit's prefix; a unit has at most one of them:
 | File | Written when | Effect |
 |------|--------------|--------|
 | `<reference_base>@<name>.done` | every artifact was written | JSON manifest listing the unit's files. The unit is **done** (cached) while it is valid. |
-| `<reference_base>@<name>.error` | a node of the derivative raised, or an artifact could not be written | Contains the error. The unit is retried on the next run unless `--skip-errors` / `skip_errors=True`. |
+| `<reference_base>@<name>.error` | anything inside the unit failed: a node, a derivative it depends on, preparing a node's arguments, selecting a referenced artifact, or writing an artifact | Contains the error. The unit is retried on the next run unless `--skip-errors` / `skip_errors=True`. |
 | `<reference_base>@<name>.skip` | a node raised `SkipDerivative` (not applicable to this file) | The unit (and units depending on it) is skipped until the marker is deleted or `overwrite: true`. |
+
+A fourth file, `<reference_base>@<name>.lock`, exists only while a process (re)computes the unit
+(see [Unit lock](#naming-unit-lock)); it is not a completion marker.
 
 The manifest:
 
@@ -96,13 +105,42 @@ match, and every file it lists exists. Files that match the prefix but are not l
 ignored (and reported by `neurodags status`). There is no other cache check: a file named like
 an output but without a valid manifest is not trusted.
 
-**Write order.** On (re)compute NeuroDAGs validates the suffixes, deletes the old `.done`, runs
+**Write order.** On (re)compute NeuroDAGs takes the unit's lock, deletes the old `.done` (before
+computing anything, including the derivatives it depends on), validates the suffixes, runs
 every writer, then publishes the new `.done` atomically (a temporary file in the same folder
-renamed with `os.replace`) and removes any `.error`/`.skip`. Writing an `.error` or `.skip`
-removes the other markers, including `.done`. A crash or a failing writer therefore never leaves a
-`.done` for a half-written unit; the next run recomputes it.
+renamed with `os.replace`), removes any `.error`/`.skip` and releases the lock. Writing an
+`.error` or `.skip` removes the other markers, including `.done`. A crash, a failing writer or a
+failing dependency therefore never leaves a `.done` for a half-written or failed recompute; the
+next run recomputes it.
 
-`save: false` derivatives write neither outputs nor markers and are never a cache hit.
+`save: false` derivatives write neither outputs nor markers and are never a cache hit, also
+when another derivative references them: an old manifest left from when the derivative was
+saved is not read.
+
+(naming-unit-lock)=
+
+### Unit lock
+
+Before (re)computing a saved unit, a run creates `<reference_base>@<name>.lock` exclusively
+(`O_CREAT | O_EXCL`, which is atomic on local filesystems and NFSv3 or later). The file holds the
+pid, host and start time of the process. It is removed once the `.done`, `.error` or `.skip` is
+published (or the run is interrupted with an exception, such as Ctrl-C).
+
+A second process reaching a locked unit (a duplicate or retried array task, or two pipelines
+sharing a dependency) does not touch it: the unit fails for that process with
+`neurodags.outputs.UnitLockedError` ("locked by another process"), logged as an error like any
+failed unit (with `raise_on_error`, the run stops with a non-zero exit). No `.error` is written,
+because the unit belongs to the holder. A parent derivative whose dependency is locked fails the
+same way, again without an `.error`. Reading a done unit (a cache hit) never needs the lock.
+
+Locks are **never broken automatically**. A process killed without cleanup (`kill -9`, a
+scheduler timeout or preemption, a node crash) leaves its `.lock` behind, and every later run
+refuses the unit until the file is deleted. `neurodags status` reports such units as `locked`
+and prints their lock files; delete them once no job is running for those units, for example:
+
+```bash
+find <derivatives_path> -name '*.lock' -delete   # only when no neurodags job is running
+```
 
 (naming-unit-states)=
 
@@ -116,6 +154,7 @@ report each unit (one source file × one derivative) as:
 | `done` | valid `.done` manifest (see above) | skipped (cached) |
 | `done (migrated)` | `done`, but the manifest was written by `neurodags migrate` (`"origin": "migrate"`) from 0.3.x outputs; counted as `done` (the table adds a `(migrated)` column, JSON a `migrated` count and per-file `label`) | skipped (cached) |
 | `skipped` | `.skip` marker (the derivative does not apply to this file) | skipped |
+| `locked` | `.lock` file without a valid `.done`: a job is writing the unit, or one was killed while writing it (see [Unit lock](#naming-unit-lock)). Not a column of the `status` table: the table is followed by the list of lock files; JSON has a `locked` count, `locked_indices` and per-file `lock_path`. `status` exits 1 while any unit is locked | refused until the lock file is gone |
 | `errored` | `.error` marker (state `error` in the dry-run plan) | retried, unless `--skip-errors` |
 | `incomplete` | output files (or an invalid `.done`) without a valid manifest: an interrupted write, a deleted part, or 0.3.x outputs not yet migrated | recomputed |
 | `missing` | nothing on disk for the unit | computed |
