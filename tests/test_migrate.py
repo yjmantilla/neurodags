@@ -53,9 +53,11 @@ def _legacy_write(
     return path
 
 
-def _legacy_tree(derivs: Path, sources: list[str], outputs: dict[str, list[str]]) -> list[Path]:
+def _legacy_tree(
+    derivs: Path, sources: list[str], outputs: dict[str, list[str]], root: str | None = None
+) -> list[Path]:
     """0.3.x outputs for every source: ``{name: [tails]}`` (root over the given sources)."""
-    root = find_unique_root(sources, mode="maximal")
+    root = root or find_unique_root(sources, mode="maximal")
     written = []
     for source in sources:
         for name, tails in outputs.items():
@@ -376,28 +378,224 @@ stage2:
 
 
 def test_chained_source_names_with_at(tmp_path, capsys):
-    """Sources that are themselves outputs ('@' in the name) were written with '&'."""
+    """Sources that are themselves outputs ('@' in the name) were written with '&' by 0.3.x;
+    they are matched by that legacy key and moved to the verbatim (multi-'@') name."""
     pipe = _project(tmp_path, datasets=CHAINED_DATASETS)
     sources = _sources(
         tmp_path / "upstream", ["sub-01/x.vhdr@CleanPrep.fif", "sub-02/y.vhdr@CleanPrep.fif"]
     )
     outputs = _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".nc"]})
-    assert outputs[0].name == "x.vhdr&CleanPrep.fif@BandPower.nc"
+    assert outputs[0].name == "x.vhdr&CleanPrep.fif@BandPower.nc"  # authentic 0.3.x name
 
     plan = _plan(pipe, tmp_path)
     assert plan.refusals == []
+    assert [u.status for u in plan.units()] == ["move", "move"]
     assert [os.path.basename(n) for _, n in plan.moves] == [
-        "x.vhdr&CleanPrep.fif@band_power.nc",
-        "y.vhdr&CleanPrep.fif@band_power.nc",
+        "x.vhdr@CleanPrep.fif@band_power.nc",
+        "y.vhdr@CleanPrep.fif@band_power.nc",
     ]
     # Patterns referencing 0.3.x output names are printed, never edited.
     assert any("*@CleanPrep.fif" in p for p in plan.chained_patterns)
     apply_migration(plan)
     assert "*@CleanPrep.fif" in (tmp_path / "ds.yml").read_text()
-    manifest = json.loads(
-        (tmp_path / "derivatives/sub-01/x.vhdr&CleanPrep.fif@band_power.done").read_text()
-    )
+    prefix = tmp_path / "derivatives/sub-01/x.vhdr@CleanPrep.fif@band_power"
+    manifest = json.loads(Path(f"{prefix}.done").read_text())
     assert manifest["source"]["rel"] == "sub-01/x.vhdr@CleanPrep.fif"
+    assert manifest["artifacts"] == {".nc": ["x.vhdr@CleanPrep.fif@band_power.nc"]}
+    state = unit_state(str(prefix), "band_power")
+    assert (state.state, state.origin) == ("done", "migrate")
+    assert not outputs[0].exists()
+    assert not _plan(pipe, tmp_path).has_work
+
+
+def test_literal_ampersand_sources_keep_their_ampersand(tmp_path):
+    """'&' is never decoded: a source really named with '&' matches its own key."""
+    datasets = CHAINED_DATASETS.replace("*@CleanPrep.fif", "*.fif")
+    pipe = _project(tmp_path, datasets=datasets)
+    sources = _sources(tmp_path / "upstream", ["sub-01/x&A.fif", "sub-02/x&literal@CleanPrep.fif"])
+    outputs = _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".nc"]})
+    assert [o.name for o in outputs] == [
+        "x&A.fif@BandPower.nc",
+        "x&literal&CleanPrep.fif@BandPower.nc",
+    ]
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    assert [os.path.basename(n) for _, n in plan.moves] == [
+        "x&A.fif@band_power.nc",
+        "x&literal@CleanPrep.fif@band_power.nc",
+    ]
+    apply_migration(plan)
+    prefix = tmp_path / "derivatives/sub-01/x&A.fif@band_power"
+    assert unit_state(str(prefix), "band_power").state == "done"
+
+
+def test_at_and_ampersand_sources_sharing_a_legacy_name_are_ambiguous(tmp_path, capsys):
+    """0.3.x wrote x@A.fif and x&A.fif to the same outputs: ownership cannot be told."""
+    datasets = CHAINED_DATASETS.replace("*@CleanPrep.fif", "*.fif")
+    pipe = _project(tmp_path, datasets=datasets)
+    sources = _sources(tmp_path / "upstream", ["sub-01/x@A.fif", "sub-01/x&A.fif"])
+    _legacy_tree(tmp_path / "derivatives", sources[:1], {"band_power": [".nc"]})
+    plan = _plan(pipe, tmp_path)
+    assert [u.status for u in plan.units()] == ["ambiguous"]
+    assert any("ambiguous" in r for r in plan.refusals)
+    with pytest.raises(MigrationRefused):
+        apply_migration(plan)
+    out = _refused_cli(pipe, tmp_path, capsys)
+    assert "ambiguous" in out
+
+
+def test_unresolved_chained_outputs_are_refused(tmp_path, capsys):
+    """A 0.3.x chained output whose upstream source is not discovered is not silently
+    left as an orphan (it would be recomputed): the plan is refused."""
+    pipe = _project(tmp_path, datasets=CHAINED_DATASETS)
+    _sources(tmp_path / "upstream", ["sub-01/x.vhdr@CleanPrep.fif"])
+    gone = [str(tmp_path / "upstream/sub-02/y.vhdr@CleanPrep.fif")]
+    up = str(tmp_path / "upstream")
+    _legacy_tree(tmp_path / "derivatives", gone, {"band_power": [".nc"]}, root=up)
+    # A plain unmatched output (no '&<Name><suffix>' source part) stays an orphan.
+    (tmp_path / "derivatives/sub-02/stray.txt@BandPower.nc").write_text("x")
+
+    plan = _plan(pipe, tmp_path)
+    statuses = sorted(u.status for u in plan.units())
+    assert statuses == ["orphan", "unresolved"]
+    assert any("chained pipeline match no discovered source" in r for r in plan.refusals)
+    assert plan.to_dict()["unresolved"] == [
+        str(tmp_path / "derivatives/sub-02/y.vhdr&CleanPrep.fif@BandPower.nc")
+    ]
+    preview = migrate.format_preview(plan)
+    assert "1 unresolved" in preview
+    assert "unresolved chained outputs" in preview
+    out = _refused_cli(pipe, tmp_path, capsys)
+    assert "unresolved" in out
+
+
+def test_chained_dataset_with_zero_discovered_sources_is_refused(tmp_path, capsys):
+    """After an upstream rename every chained source can vanish at once: the output tree
+    is still scanned, its chained outputs are unresolved and nothing is applied."""
+    pipe = _project(tmp_path, datasets=CHAINED_DATASETS)
+    (tmp_path / "upstream").mkdir()  # pattern matches nothing
+    gone = [str(tmp_path / "upstream/sub-01/x.vhdr@CleanPrep.fif")]
+    up = str(tmp_path / "upstream")
+    legacy = _legacy_tree(tmp_path / "derivatives", gone, {"band_power": [".nc"]}, root=up)
+
+    plan = _plan(pipe, tmp_path)
+    assert [u.status for u in plan.units()] == ["unresolved"]
+    assert plan.to_dict()["unresolved"] == [str(legacy[0])]
+    assert any("chained pipeline match no discovered source" in r for r in plan.refusals)
+    with pytest.raises(MigrationRefused):
+        apply_migration(plan)
+    out = _refused_cli(pipe, tmp_path, capsys)  # YAML and outputs byte-identical
+    assert "unresolved" in out
+    assert "naming_version" not in (tmp_path / "pl.yml").read_text()
+
+
+def test_outputs_next_to_undiscovered_sources_are_reported(tmp_path, capsys):
+    """Datasets without derivatives_path: folders with no discovered source are scanned
+    too, so a chained output there is unresolved instead of silently left behind."""
+    datasets = CHAINED_DATASETS.replace("  derivatives_path: derivatives\n", "")
+    pipe = _project(tmp_path, datasets=datasets)
+    kept = _sources(tmp_path / "upstream", ["sub-01/x.vhdr@CleanPrep.fif"])
+    Path(f"{tmp_path}/upstream/sub-01/x.vhdr&CleanPrep.fif@BandPower.nc").write_text("x")
+    stale = tmp_path / "upstream/sub-02/y.vhdr&CleanPrep.fif@BandPower.nc"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("y")
+
+    plan = _plan(pipe, tmp_path)
+    assert sorted(u.status for u in plan.units()) == ["move", "unresolved"]
+    assert [os.path.basename(n) for _, n in plan.moves] == ["x.vhdr@CleanPrep.fif@band_power.nc"]
+    assert plan.to_dict()["unresolved"] == [str(stale)]
+    _refused_cli(pipe, tmp_path, capsys)
+
+    stale.unlink()  # recompute it on purpose
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    apply_migration(plan)
+    assert unit_state(f"{kept[0]}@band_power", "band_power").state == "done"
+    assert not _plan(pipe, tmp_path).has_work
+
+
+def test_chained_unit_moved_before_its_manifest_is_completed_on_resume(tmp_path, monkeypatch):
+    """Crash after a move but before .done: the moved file has the 0.4.0 name (two '@',
+    rejected by the 0.3.x parser); it is recognized as a planned target and the unit
+    completes. A further run is a no-op."""
+    pipe = _project(tmp_path, datasets=CHAINED_DATASETS)
+    sources = _sources(tmp_path / "upstream", ["sub-01/x.vhdr@CleanPrep.fif"])
+    up = str(tmp_path / "upstream")
+    _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".nc", ".json"]}, root=up)
+    folder = tmp_path / "derivatives/sub-01"
+    prefix = folder / "x.vhdr@CleanPrep.fif@band_power"
+
+    plan = _plan(pipe, tmp_path)
+    assert len(plan.moves) == 2
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk went away")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(migrate.os, "replace", flaky_replace)
+    with pytest.raises(OSError, match="disk went away"):
+        apply_migration(plan)
+    monkeypatch.setattr(migrate.os, "replace", real_replace)
+    # Half moved: one file at the new name, one at the 0.3.x name, no .done.
+    names = sorted(p.name for p in folder.iterdir())
+    assert len([n for n in names if n.startswith("x.vhdr@CleanPrep.fif@band_power.")]) == 1
+    assert len([n for n in names if n.startswith("x.vhdr&CleanPrep.fif@BandPower.")]) == 1
+    assert not Path(f"{prefix}.done").exists()
+
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.refusals == []
+    assert [t.unrecognized for t in resumed.trees] == [[]]
+    assert len(resumed.moves) == 1
+    assert len(resumed.manifests) == 1
+    apply_migration(resumed)
+    state = unit_state(str(prefix), "band_power")
+    assert (state.state, state.origin) == ("done", "migrate")
+    assert set(state.artifacts) == {".nc", ".json"}
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "x.vhdr@CleanPrep.fif@band_power.done",
+        "x.vhdr@CleanPrep.fif@band_power.json",
+        "x.vhdr@CleanPrep.fif@band_power.nc",
+    ]
+    again = _plan(pipe, tmp_path)
+    assert again.refusals == []
+    assert not again.has_work
+
+
+def test_chained_unit_fully_moved_without_manifest_gets_its_manifest(tmp_path, monkeypatch):
+    pipe = _project(tmp_path, datasets=CHAINED_DATASETS)
+    sources = _sources(tmp_path / "upstream", ["sub-01/x.vhdr@CleanPrep.fif"])
+    up = str(tmp_path / "upstream")
+    outputs = {"band_power": [".nc"], "Clean": [".error"]}
+    _legacy_tree(tmp_path / "derivatives", sources, outputs, root=up)
+    plan = _plan(pipe, tmp_path)
+
+    def crash(*args, **kwargs):
+        raise OSError("crash before the manifest")
+
+    monkeypatch.setattr(migrate, "write_manifest", crash)
+    with pytest.raises(OSError, match="crash before the manifest"):
+        apply_migration(plan)
+    monkeypatch.undo()
+    folder = tmp_path / "derivatives/sub-01"
+    # The crash hit the first unit's manifest; the second unit was not reached.
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "x.vhdr&CleanPrep.fif@Clean.error",
+        "x.vhdr@CleanPrep.fif@band_power.nc",
+    ]
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.refusals == []
+    assert [os.path.basename(n) for _, n in resumed.moves] == ["x.vhdr@CleanPrep.fif@Clean.error"]
+    assert sorted(u.status for u in resumed.units()) == ["identity", "move"]
+    assert len(resumed.manifests) == 1
+    apply_migration(resumed)
+    done = unit_state(str(folder / "x.vhdr@CleanPrep.fif@band_power"), "band_power")
+    assert done.state == "done"
+    assert unit_state(str(folder / "x.vhdr@CleanPrep.fif@Clean"), "Clean").state == "error"
+    assert not _plan(pipe, tmp_path).has_work
 
 
 def test_upstream_map_matches_renamed_upstream_sources(tmp_path):
@@ -411,10 +609,15 @@ def test_upstream_map_matches_renamed_upstream_sources(tmp_path):
 
     without = _plan(pipe, tmp_path)
     assert without.moves == []
-    assert len(without.units("orphan")) == 1
+    assert len(without.units("unresolved")) == 1  # refused, not silently recomputed
+    assert without.refusals
 
     plan = _plan(pipe, tmp_path, upstream_renames=["CleanPrep=clean_prep"])
-    assert [os.path.basename(n) for _, n in plan.moves] == ["x.vhdr&clean_prep.fif@band_power.nc"]
+    assert plan.refusals == []
+    assert [os.path.basename(n) for _, n in plan.moves] == ["x.vhdr@clean_prep.fif@band_power.nc"]
+    apply_migration(plan)
+    prefix = tmp_path / "derivatives/sub-01/x.vhdr@clean_prep.fif@band_power"
+    assert unit_state(str(prefix), "band_power").state == "done"
 
 
 def test_other_yaml_files_referencing_old_tokens_are_printed(full_project, tmp_path):
@@ -589,6 +792,47 @@ def test_interrupted_apply_resumes(full_project, tmp_path, monkeypatch):
             assert unit_state(prefix, name).state == "done"
     assert "naming_version: 1" in (tmp_path / "pl.yml").read_text()
     assert not _plan(pipe, tmp_path).has_work
+
+
+@pytest.mark.parametrize("renames", [[], ["band_power=BandPower"]])
+def test_interrupted_between_configuration_files_resumes(
+    full_project, tmp_path, monkeypatch, renames
+):
+    """The datasets YAML is published before the pipeline (which declares naming_version);
+    a crash in between is completed by running the same command again."""
+    pipe, _ = full_project
+    plan = _plan(pipe, tmp_path, renames=renames)
+    real_write = migrate._write_config
+    order = []
+
+    def crash_on_pipeline(change):
+        order.append(change.role)
+        if change.role != "datasets":
+            raise OSError("crash before the pipeline is written")
+        real_write(change)
+
+    monkeypatch.setattr(migrate, "_write_config", crash_on_pipeline)
+    with pytest.raises(OSError, match="crash before the pipeline"):
+        apply_migration(plan)
+    monkeypatch.setattr(migrate, "_write_config", real_write)
+    assert order == ["datasets", "pipeline"]
+    assert "source_root" in (tmp_path / "ds.yml").read_text()
+    assert (tmp_path / "pl.yml").read_text() == PIPELINE_TEXT
+
+    resumed = _plan(pipe, tmp_path, renames=renames)
+    assert resumed.refusals == []
+    assert [c.role for c in resumed.config_changes] == ["pipeline"]
+    apply_migration(resumed)
+    config = load_pipeline_configuration(str(pipe))
+    assert config["naming_version"] == 1
+    new_name = "BandPower" if renames else "band_power"
+    assert new_name in config["DerivativeDefinitions"]
+    for rel in RELS:
+        prefix = str(tmp_path / "derivatives" / f"{rel}@{new_name}")
+        assert unit_state(prefix, new_name).state == "done"
+    again = _plan(pipe, tmp_path, renames=renames)
+    assert again.refusals == []
+    assert not again.has_work
 
 
 def test_unit_half_moved_by_an_interrupted_run_is_completed(tmp_path):

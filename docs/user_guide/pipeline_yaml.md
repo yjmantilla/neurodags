@@ -98,8 +98,8 @@ columns and `status`. Names must match `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$
 `X` and `X-<digits>`; every entry point rejects invalid names before anything runs.
 
 See **[File Naming and Output Layout](naming.md)** for all naming rules: output files, `.done`
-manifests and markers, references, the output layout, `&` in chained pipelines and dataframe
-column names.
+manifests and markers, references, the output layout, chained names (the last `@` separates
+source and derivative) and dataframe column names.
 
 ### Derivative Flags
 

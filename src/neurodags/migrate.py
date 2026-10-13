@@ -10,16 +10,27 @@ One pass converts both the configuration and the existing output tree:
   Files are edited in place (comments and ordering kept) through YAML node positions; when
   that is not possible the file is re-serialized and the preview says comments are lost.
   Backups ``<file>.bak-0.3`` are kept. Configuration files are written last, after every file
-  move succeeded.
+  move succeeded: a separate datasets YAML first, then the pipeline that declares
+  ``naming_version: 1`` (a re-run after a crash in between accepts the migrated datasets).
 - **Outputs** (spec 10.3). The new layout is enumerated (discovery with the new config,
   :func:`neurodags.outputs.output_reference_base`); the existing trees are *scanned* (never
   recomputed from the 0.3.x roots, which depended on which files were discovered). An old
   output ``<dir>/<source>@<Token><tail>`` (``Token`` = the 0.3.x
   :func:`neurodags._legacy.snake_to_camel` spelling of a YAML name) maps to the source whose
-  new base name equals ``<source>`` and whose new folder ends with the old folder (every
-  historical 0.3.x root lies at or below ``source_root``). One candidate: the unit moves
-  (``os.replace``) to ``<new prefix><tail>``, the name verbatim. None: *orphan*, left in
-  place. Several: *ambiguous*, refused.
+  *legacy key* (its basename with every ``@`` written as ``&``, the 0.3.x spelling) equals
+  ``<source>`` and whose new folder ends with the old folder (every historical 0.3.x root
+  lies at or below ``source_root``). One candidate: the unit moves (``os.replace``) to
+  ``<new prefix><tail>``, with the source basename verbatim (a chained ``x&A.fif@B.nc``
+  becomes ``x@A.fif@B.nc``) and the name verbatim. None: *orphan*, left in place, unless
+  the source part looks like a 0.3.x chained output (``...&<Name><suffix>``): then
+  *unresolved*, refused (it would otherwise be recomputed silently). Several (e.g. sources
+  ``x@A.fif`` and ``x&A.fif`` both exist): *ambiguous*, refused. ``&`` is never decoded
+  globally: a source really named with ``&`` matches its own key and keeps it.
+- **Resume.** Files already at their 0.4.0 name (moved by an interrupted ``--apply``) are
+  recognized by the planned targets: a file ``<b>@<name><suffix>`` that the 0.3.x parser
+  rejects counts only when ``<dir>/<b>`` is the new reference base of a discovered source.
+  It is an ``identity`` unit and joins the remaining old files of the same unit, so the
+  unit gets its ``.done``.
 - **MNE split recordings** (spec 10.3.5) are re-saved with MNE under the new name (the first
   part stores the next part's file name) and verified before the old parts are deleted.
 - **Manifests** (spec 10.4). Moved units get a ``.done`` with ``"origin": "migrate"`` when the
@@ -53,7 +64,7 @@ from neurodags.definitions import DatasetConfig
 from neurodags.iterators import discover_inputs
 from neurodags.loaders import UniqueKeySafeLoader, check_pipeline_names, load_configuration
 from neurodags.loggers import get_logger
-from neurodags.naming import NamingError, error_column, format_column
+from neurodags.naming import NamingError, error_column, format_column, parse_output_basename
 from neurodags.outputs import (
     build_manifest,
     dataset_derivatives_base,
@@ -98,6 +109,7 @@ _PATH_FIELDS = ("file_pattern", "exclude_pattern", "derivatives_path")
 _MARKER_TAILS = {".error": "error", ".skip": "skip", ".done": "done"}
 _SPLIT_TAIL = re.compile(r"^(.*)-(\d+)(\.fif)$")
 _SPLIT_START = re.compile(r"^-\d+\.")
+_SPLIT_NAME = re.compile(r"(.+)-(\d+)")
 _WINDOWS_ABS = re.compile(r"^[A-Za-z]:[\\/]")
 _MAX_LISTED = 20
 
@@ -168,7 +180,10 @@ class Unit:
     derivative: str  # new (verbatim) name
     artifacts: dict[str, list[str]] = field(default_factory=dict)  # tail -> [main, parts...]
     markers: dict[str, str] = field(default_factory=dict)  # error/skip/done -> path
-    status: str = "pending"  # move | identity | orphan | ambiguous | duplicate | conflict
+    #: move | identity | orphan | unresolved | ambiguous | duplicate | conflict
+    status: str = "pending"
+    #: Recognized at its 0.4.0 name (a planned target), not by the 0.3.x parser.
+    canonical: bool = False
     candidate: _Candidate | None = None
     candidates: list[_Candidate] = field(default_factory=list)
     new_prefix: str | None = None
@@ -215,6 +230,10 @@ class TreePlan:
     journal: str
     units: list[Unit] = field(default_factory=list)
     unrecognized: list[str] = field(default_factory=list)
+    #: Scan below ``root`` recursively (default: only for ``derivatives`` trees).
+    recursive: bool | None = None
+    #: Folders another tree of the plan already scans (skipped here).
+    skip_dirs: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -323,6 +342,7 @@ class MigrationPlan:
                 if u.manifest_suffixes is None and u.manifest_reason
             ],
             "orphans": [f for u in self.units("orphan") for f in u.files],
+            "unresolved": [f for u in self.units("unresolved") for f in u.files],
             "ambiguous": [
                 {
                     "files": u.files,
@@ -754,6 +774,34 @@ def _parse_legacy(basename: str, tokens: Sequence[str]) -> tuple[str, str, str] 
     return None
 
 
+def _parse_canonical(basename: str, names: set[str]) -> tuple[str, str, str] | None:
+    """``(source_part, name, tail)`` of a 0.4.0 output name (last ``@``), else ``None``.
+
+    Only used for files the 0.3.x parser rejects (more than one ``@``); whether the file
+    really is a planned target is decided by the caller against the discovered sources.
+    """
+    parsed = parse_output_basename(basename)
+    if parsed is None:
+        return None
+    if parsed.name in names:
+        return parsed.source_part, parsed.name, parsed.suffix
+    match = _SPLIT_NAME.fullmatch(parsed.name)
+    if match and match.group(1) in names and parsed.suffix == ".fif":
+        return parsed.source_part, match.group(1), f"-{match.group(2)}.fif"
+    return None
+
+
+def _legacy_key(basename: str) -> str:
+    """How 0.3.x spelled a source basename in output names (every ``@`` written ``&``)."""
+    return basename.replace("@", "&")
+
+
+def _looks_chained(source_part: str) -> bool:
+    """A 0.3.x source part ``<head>&<Name><suffix>``: the output of an upstream stage."""
+    head, sep, tail = source_part.rpartition("&")
+    return bool(sep and head) and parse_output_basename(f"{head}@{tail}") is not None
+
+
 def _is_path_suffix(old_dir: str, new_dir: str) -> bool:
     if old_dir in ("", "."):
         return True
@@ -837,7 +885,8 @@ def plan_migration(
     upstream_renames : mapping or iterable of ``"OLDTOKEN=NEWNAME"``, optional
         For chained pipelines whose sources are another pipeline's outputs: the upstream
         rename (``@OLDTOKEN`` -> ``@NEWNAME``). Old source parts ``...&OLDTOKEN.<ext>`` then
-        match the renamed sources ``...&NEWNAME.<ext>``.
+        match the renamed sources ``...@NEWNAME.<ext>`` (compared in the 0.3.x ``&``
+        spelling, see the module docstring).
 
     Returns
     -------
@@ -1017,6 +1066,17 @@ def plan_migration(
             f"their name and folder): {shown}. Move them out of the tree (or delete them) "
             "and run migrate again; they will be recomputed."
         )
+    unresolved = plan.units("unresolved")
+    if unresolved:
+        shown = ", ".join(u.label for u in unresolved[:3]) + (" ..." if len(unresolved) > 3 else "")
+        plan.refusals.append(
+            f"{len(unresolved)} set(s) of 0.3.x outputs of a chained pipeline match no "
+            f"discovered source: {shown}. Their source part ('x&A.fif' in 'x&A.fif@B.nc') "
+            "names an upstream output 'x@A.fif' that file_pattern does not find; left "
+            "alone they would be recomputed. Fix the dataset (file_pattern, or "
+            "--upstream-map OLDTOKEN=NEWNAME when the upstream name changed), or move "
+            "them out of the tree to recompute them, and run migrate again."
+        )
     _plan_targets(plan)
     _plan_artifact_sets(plan)
     _plan_manifests(plan)
@@ -1184,13 +1244,30 @@ def _plan_trees(
 ) -> None:
     """Scan every output tree and attach each 0.3.x unit to its candidate sources."""
     trees: dict[str, TreePlan] = {}
+    # Per tree: candidates by legacy key (0.3.x spelling of the basename), and by their
+    # new reference base (to recognize already moved, 0.4.0-named files).
     by_tree: dict[str, dict[str, list[_Candidate]]] = {}
+    by_base: dict[str, dict[str, list[_Candidate]]] = {}
     pipeline_journal = os.path.join(os.path.dirname(plan.pipeline), ".neurodags", JOURNAL_NAME)
     derivatives_paths: dict[str, str | None] = {}
     for name, cfg in configs.items():
         if not cfg.skip:
             raw = resolve_dataset_field(cfg, "derivatives_path", mount)
             derivatives_paths[name] = os.path.normpath(raw) if raw else None
+    # Every active dataset's output tree is scanned, even with zero discovered sources
+    # (e.g. a chained pattern that no longer matches): its 0.3.x outputs must still be
+    # reported (orphan / unresolved), never silently left behind.
+    for name, root in derivatives_paths.items():
+        if root:
+            key = os.path.abspath(root)
+            tree = trees.setdefault(
+                key,
+                TreePlan(key, "derivatives", [], os.path.join(key, ".neurodags", JOURNAL_NAME)),
+            )
+            if name not in tree.datasets:
+                tree.datasets.append(name)
+            by_tree.setdefault(key, {})
+            by_base.setdefault(key, {})
     for entry in entries:
         cfg = configs[entry.dataset]
         base = os.path.abspath(
@@ -1209,31 +1286,70 @@ def _plan_trees(
             tree = trees.setdefault(key, TreePlan(key, "sources", [], pipeline_journal))
         if entry.dataset not in tree.datasets:
             tree.datasets.append(entry.dataset)
-        by_tree.setdefault(key, {}).setdefault(os.path.basename(base), []).append(candidate)
+        by_tree.setdefault(key, {}).setdefault(_legacy_key(os.path.basename(base)), []).append(
+            candidate
+        )
+        by_base.setdefault(key, {}).setdefault(os.path.normcase(base), []).append(candidate)
+    # Datasets writing next to their sources: also scan the rest of source_root, so
+    # outputs in folders without a discovered source are reported too.
+    covered = {os.path.normcase(k) for k, t in trees.items() if t.kind == "sources"}
+    for name, root in derivatives_paths.items():
+        if root:
+            continue
+        source_root = resolve_dataset_field(configs[name], "source_root", mount)
+        if not source_root:
+            continue
+        rest_root = os.path.abspath(source_root)
+        key = "\0rest\0" + rest_root
+        tree = trees.setdefault(
+            key, TreePlan(rest_root, "sources", [], pipeline_journal, recursive=True)
+        )
+        tree.skip_dirs |= covered
+        if name not in tree.datasets:
+            tree.datasets.append(name)
+        by_tree.setdefault(key, {})
+        by_base.setdefault(key, {})
 
     tokens = sorted(plan.tokens, key=len, reverse=True)
+    names = set(plan.tokens.values())
     derivative_roots = [k for k, t in trees.items() if t.kind == "derivatives"]
     for key, tree in trees.items():
         index = by_tree[key]
-        units: dict[tuple[str, str, str], Unit] = {}
-        scans: list[tuple[str, bool]] = [(tree.root, tree.kind == "derivatives")]
+        bases = by_base[key]
+        units: dict[tuple[str, str, str, bool], Unit] = {}
+        recursive_scan = tree.kind == "derivatives" if tree.recursive is None else tree.recursive
+        scans: list[tuple[str, bool]] = [(tree.root, recursive_scan)]
         if tree.kind == "derivatives":
             scans.append((os.path.dirname(tree.root), False))
-        nested = [r for r in derivative_roots if r != key and r.startswith(key + os.sep)]
+        nested = [
+            r for r in derivative_roots if r != tree.root and r.startswith(tree.root + os.sep)
+        ]
         for scan_root, recursive in scans:
             single_form = scan_root != tree.root
             for path in _scan_tree(scan_root, recursive=recursive, exclude=nested):
+                if tree.skip_dirs and os.path.normcase(os.path.dirname(path)) in tree.skip_dirs:
+                    continue
                 basename = os.path.basename(path)
                 if single_form and not basename.startswith(os.path.basename(tree.root) + "@"):
                     continue
+                directory = os.path.dirname(path)
                 parsed = _parse_legacy(basename, tokens)
+                canonical = False
+                if parsed is None and not single_form:
+                    # Kept apart from the 0.3.x parser: a file at its 0.4.0 name (last
+                    # '@') counts only when it is the target of a discovered source.
+                    parsed = _parse_canonical(basename, names)
+                    canonical = parsed is not None and (
+                        os.path.normcase(os.path.join(directory, parsed[0])) in bases
+                    )
+                    if not canonical:
+                        parsed = None
                 if parsed is None:
                     if not single_form and tree.kind == "derivatives":
                         tree.unrecognized.append(path)
                     continue
                 source_part, token, tail = parsed
-                directory = os.path.dirname(path)
-                ukey = (directory, source_part, token)
+                ukey = (directory, source_part, token, canonical)
                 unit = units.get(ukey)
                 if unit is None:
                     old_dir = (
@@ -1241,7 +1357,9 @@ def _plan_trees(
                         if single_form
                         else os.path.relpath(directory, tree.root).replace(os.sep, "/")
                     )
-                    unit = Unit(key, directory, old_dir, source_part, token, plan.tokens[token])
+                    derivative = token if canonical else plan.tokens[token]
+                    unit = Unit(key, directory, old_dir, source_part, token, derivative)
+                    unit.canonical = canonical
                     units[ukey] = unit
                 if tail in _MARKER_TAILS:
                     unit.markers[_MARKER_TAILS[tail]] = path
@@ -1249,8 +1367,10 @@ def _plan_trees(
                     unit.artifacts[tail] = [path]
         for unit in units.values():
             _group_split_parts(unit, tree)
-            _match_unit(unit, tree, index, upstream)
+            _match_unit(unit, tree, index, upstream, bases)
         tree.units = [u for u in units.values() if u.artifacts or u.markers]
+        if tree.recursive and not tree.units:
+            continue  # nothing left behind next to undiscovered sources
         plan.trees.append(tree)
     _resume_from_journals(plan)
 
@@ -1274,8 +1394,27 @@ def _group_split_parts(unit: Unit, tree: TreePlan) -> None:
 
 
 def _match_unit(
-    unit: Unit, tree: TreePlan, index: Mapping[str, list[_Candidate]], upstream: Mapping[str, str]
+    unit: Unit,
+    tree: TreePlan,
+    index: Mapping[str, list[_Candidate]],
+    upstream: Mapping[str, str],
+    bases: Mapping[str, list[_Candidate]] | None = None,
 ) -> None:
+    """Attach *unit* to its candidate sources and set its status.
+
+    0.3.x units are matched by legacy key (*index*: basename with ``@`` written ``&``);
+    units recognized at their 0.4.0 name by their exact reference base (*bases*).
+    """
+    if unit.canonical:
+        found = (bases or {}).get(os.path.normcase(os.path.join(unit.directory, unit.source_part)))
+        unit.candidates = list(found or [])
+        if len(unit.candidates) == 1:
+            unit.candidate = unit.candidates[0]
+            unit.new_prefix = output_prefix(unit.candidate.reference_base, unit.derivative)
+            unit.status = "identity"
+        else:
+            unit.status = "ambiguous" if unit.candidates else "orphan"
+        return
     parts = [unit.source_part]
     if "&" in unit.source_part and upstream:
         head, _, tail = unit.source_part.rpartition("&")
@@ -1302,7 +1441,7 @@ def _match_unit(
         unit.new_prefix = output_prefix(candidates[0].reference_base, unit.derivative)
         unit.status = "identity" if unit.new_prefix == unit.old_prefix else "move"
     elif not candidates:
-        unit.status = "orphan"
+        unit.status = "unresolved" if _looks_chained(unit.source_part) else "orphan"
     else:
         unit.status = "ambiguous"
 
@@ -1783,7 +1922,8 @@ def format_preview(plan: MigrationPlan, *, apply: bool = False) -> str:
         counts = Counter(u.status for u in tree.units)
         lines.append(
             f"  units: {counts['move']} to move, {counts['identity']} already in place, "
-            f"{counts['orphan']} orphan, {counts['ambiguous']} ambiguous, "
+            f"{counts['orphan']} orphan, {counts['unresolved']} unresolved, "
+            f"{counts['ambiguous']} ambiguous, "
             f"{counts['duplicate']} duplicate; {len(tree.unrecognized)} unrecognized file(s)"
         )
         lines.append(
@@ -1810,6 +1950,10 @@ def format_preview(plan: MigrationPlan, *, apply: bool = False) -> str:
         if orphans:
             lines.append("  orphans (no matching source; left in place):")
             _listed(lines, [_rel(f, tree.root) for f in orphans])
+        unresolved = [f for u in tree.units if u.status == "unresolved" for f in u.files]
+        if unresolved:
+            lines.append("  unresolved chained outputs (no matching upstream source; REFUSED):")
+            _listed(lines, [_rel(f, tree.root) for f in unresolved])
         ambiguous = [u for u in tree.units if u.status == "ambiguous"]
         if ambiguous:
             lines.append("  ambiguous (several sources match; REFUSED):")
@@ -2226,7 +2370,10 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
                 _apply_unit(unit, journal, result)
         finally:
             journal.close()
-    for change in plan.config_changes:
+    # A separate datasets YAML first, the pipeline (which declares naming_version: 1)
+    # last: interrupted in between, the datasets already have source_root, which a
+    # re-run in legacy mode accepts as 0.4.0 paths, so the same command completes.
+    for change in sorted(plan.config_changes, key=lambda c: c.role == "pipeline"):
         _write_config(change)
         result.configs.append(change.path)
     return result

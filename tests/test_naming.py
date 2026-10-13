@@ -425,6 +425,11 @@ TRICKY_SOURCES = [
     ".hidden",
     "café.set",
     "x@Name.nc",
+    "x@Clean.fif@Power.nc",
+    "@lead.vhdr",
+    "trail@",
+    "a%40b&c.vhdr",
+    "x.done",
 ]
 
 
@@ -434,9 +439,10 @@ TRICKY_SOURCES = [
 def test_output_basename_round_trip(source, name, suffix):
     base = output_basename(source, name, suffix)
     assert base == output_prefix_basename(source, name) + suffix
-    assert base.count("@") == 1
+    assert base == f"{source}@{name}{suffix}"  # source verbatim
+    assert base.count("@") == source.count("@") + 1
     parsed = parse_output_basename(base)
-    assert parsed == ParsedOutput(source.replace("@", "&"), name, suffix, False, None)
+    assert parsed == ParsedOutput(source, name, suffix, False, None)
 
 
 @pytest.mark.parametrize("source", TRICKY_SOURCES)
@@ -444,12 +450,28 @@ def test_output_basename_round_trip(source, name, suffix):
 def test_marker_basename_round_trip(source, marker):
     base = marker_basename(source, "Clean", marker)
     parsed = parse_output_basename(base)
-    assert parsed == ParsedOutput(source.replace("@", "&"), "Clean", "." + marker, True, marker)
+    assert parsed == ParsedOutput(source, "Clean", "." + marker, True, marker)
 
 
-def test_prefix_rewrites_at():
-    assert output_prefix_basename("a@b.vhdr", "X") == "a&b.vhdr@X"
+def test_prefix_keeps_source_verbatim():
+    """'@' and '&' in a source are kept: a@b.vhdr and a&b.vhdr are distinct units."""
+    assert output_prefix_basename("a@b.vhdr", "X") == "a@b.vhdr@X"
     assert output_prefix_basename("a&b.vhdr", "X") == "a&b.vhdr@X"
+    assert output_prefix_basename("a@b.vhdr", "X") != output_prefix_basename("a&b.vhdr", "X")
+
+
+def test_chained_output_parses_twice():
+    """A chained name nests: its source part is itself an output name (last-'@' parsing)."""
+    upstream = output_basename("sub-1.fif", "CleanedEEG", ".fif")
+    downstream = output_basename(upstream, "PowerSpectrum", ".nc")
+    assert downstream == "sub-1.fif@CleanedEEG.fif@PowerSpectrum.nc"
+    outer = parse_output_basename(downstream)
+    assert outer == ParsedOutput(upstream, "PowerSpectrum", ".nc", False, None)
+    inner = parse_output_basename(outer.source_part)
+    assert inner == ParsedOutput("sub-1.fif", "CleanedEEG", ".fif", False, None)
+    assert parse_output_basename(inner.source_part) is None
+    marker = parse_output_basename(marker_basename(upstream, "PowerSpectrum", "done"))
+    assert marker == ParsedOutput(upstream, "PowerSpectrum", ".done", True, "done")
 
 
 @pytest.mark.parametrize("source", ["", ".", "..", "a/b.vhdr", "a\\b.vhdr", "a\0b", None])

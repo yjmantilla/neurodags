@@ -107,6 +107,7 @@ neurodags migrate pipeline.yml [-d datasets.yml] [--mount NAME]
 | `moves` | Every planned `old → new` file move, relative to the output tree. |
 | `MNE split recordings` | Recordings saved in several parts (`X.fif`, `X-1.fif`, ...) whose name changes; they are re-saved with MNE (see below). |
 | `orphans` | 0.3.x outputs whose source no longer exists (or is no longer matched by `file_pattern`). Left in place; delete them when you are sure. |
+| `unresolved` | 0.3.x outputs of a chained pipeline (`x.vhdr&CleanPrep.fif@Feature.nc`) whose upstream source (`x.vhdr@CleanPrep.fif`) is not discovered. **Refused**, so they are not silently recomputed (see [Chained pipelines](#chained-pipelines)). |
 | `ambiguous` | Outputs that several current sources could own. **Refused.** |
 | `duplicates` | Old outputs identical to an existing new file. Left in place; delete them when happy. |
 | `unrecognized` | Files with `@` that do not belong to this pipeline's derivatives (another pipeline's outputs, notes, ...). Left alone. |
@@ -115,7 +116,7 @@ neurodags migrate pipeline.yml [-d datasets.yml] [--mount NAME]
 | `REFUSED` | Why nothing will be applied (see [Refusals](#refusals)). |
 
 `--report plan.json` writes all of it as JSON: `moves`, `mne_rewrites`, `manifests`,
-`without_manifest` (with the reason), `orphans`, `ambiguous`, `duplicates`, `unrecognized`,
+`without_manifest` (with the reason), `orphans`, `unresolved`, `ambiguous`, `duplicates`, `unrecognized`,
 `artifact_sets`, `config` (files, changes, `source_root` values, renames), `column_map`,
 `chained_patterns`, `refusals` and `notes`. After `--apply` it also has an `applied`
 section.
@@ -129,15 +130,20 @@ recomputes that root: it **scans** each `derivatives_path` (skipping `code/` and
 `.neurodags/`) for file names containing `@` and parses them with the 0.3.x rules (the token
 after `@` is the CamelCase spelling of a YAML name, longest first, followed by `.`, an MNE
 split tail `-<n>.fif`, or `.error`/`.skip`). An old output is matched to the current source
-whose 0.4.0 output folder **ends with** the old folder and whose base name equals the old
-source part. Every historical 0.3.x root lies at or below `source_root`, so this works for
-full runs, pilot runs, `max_files_per_dataset` runs and the pre-0.3.3 single-file form
-(`<derivatives_path>@Deriv.*` next to the tree).
+whose 0.4.0 output folder **ends with** the old folder and whose base name, spelled the 0.3.x
+way (every `@` written as `&`), equals the old source part. Every historical 0.3.x root lies at
+or below `source_root`, so this works for full runs, pilot runs, `max_files_per_dataset` runs
+and the pre-0.3.3 single-file form (`<derivatives_path>@Deriv.*` next to the tree).
 
-- One candidate: the unit moves (`os.replace`). `.error` and `.skip` markers move with it.
-- No candidate: orphan, left in place.
+- One candidate: the unit moves (`os.replace`) to the 0.4.0 name, with the source basename
+  verbatim: `x.vhdr&CleanPrep.fif@BandPower.nc` becomes `x.vhdr@CleanPrep.fif@band_power.nc`.
+  `.error` and `.skip` markers move with it. A source really named with `&` matches its own
+  name and keeps the `&`; `&` is never decoded on its own.
+- No candidate: orphan, left in place, unless the old source part looks like a 0.3.x chained
+  output (`...&<Name><suffix>`): then it is *unresolved* and refused.
 - Several candidates (for example `rec.txt` from a pilot run rooted at `sub-01/eeg/`, when
-  `sub-02/eeg/rec.txt` also exists): ambiguous, refused.
+  `sub-02/eeg/rec.txt` also exists, or sources `x@A.fif` and `x&A.fif` that 0.3.x wrote to the
+  same `x&A.fif@...` outputs): ambiguous, refused.
 
 Datasets without `derivatives_path` keep their outputs next to the sources; only the names
 change.
@@ -254,7 +260,18 @@ The reliable path is to rebuild the dataframe from the (unchanged) artifacts wit
 ## Chained pipelines
 
 A pipeline whose sources are another pipeline's outputs (`file_pattern: .../*@CleanPrep.fif`)
-depends on the upstream file names:
+depends on the upstream file names. 0.3.x wrote every `@` of such a source as `&`
+(`x.vhdr&CleanPrep.fif@Feature.nc`); 0.4.0 keeps the source name verbatim
+(`x.vhdr@CleanPrep.fif@Feature.nc`), and migrate renames these outputs too. Until they are
+migrated, `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to
+`neurodags migrate` instead of recomputing them: they scan each `derivatives_path` (and, for
+datasets without one, the folders of the discovered sources) for files named like an output of
+the pipeline's derivatives whose source part contains `&` and that no `.done` claims. The error
+lists the files; if they are not neurodags 0.3.x outputs, or are obsolete, move them out of the
+tree. Scripts that split chained file names on the
+first `@` must split on the last one (`rsplit("@", 1)`), and a broad pattern such as
+`*@CleanPrep*` now also matches downstream outputs in the same tree: anchor it on the artifact
+suffix (`*@clean_prep.fif`).
 
 1. Migrate the upstream pipeline. If its names change on disk (`@CleanPrep` →
    `@clean_prep`), its preview lists the downstream patterns it can see.
@@ -262,8 +279,9 @@ depends on the upstream file names:
    patterns.
 3. Migrate the downstream pipeline with `--upstream-map CleanPrep=clean_prep`: its outputs,
    named after the old upstream files (`x.vhdr&CleanPrep.fif@Feature.nc`), then match the
-   renamed sources (`x.vhdr&clean_prep.fif@...`). Without it they are orphans and get
-   recomputed.
+   renamed sources (`x.vhdr@clean_prep.fif`) and move to `x.vhdr@clean_prep.fif@Feature.nc`.
+   Without it they are *unresolved* and the migration is refused (they would otherwise be
+   recomputed). To recompute them on purpose, move them out of the tree first.
 
 (refusals)=
 
@@ -274,6 +292,7 @@ Nothing is applied while any of these remains:
 | Refusal | How to resolve |
 |---|---|
 | Ambiguous mapping (several sources match an old output) | Move the listed outputs out of the tree (or delete them); they are recomputed. |
+| Unresolved chained outputs (`x&A.fif@B.nc` with no discovered `x@A.fif`) | Fix the downstream `file_pattern`, pass `--upstream-map OLDTOKEN=NEWNAME` when the upstream name changed, or move the listed outputs out of the tree to recompute them. |
 | A target exists with different content | Keep one of the two files (delete or move the other) and run again. Identical files are not refused: the old one is left as a duplicate. |
 | Two old outputs map to one target with different content (e.g. a pilot-era copy and a full-run copy of the same unit) | Keep one: see [Pilot copy and full-run copy](#pilot-duplicates). If they are identical, the deeper one is used and the other is left as a duplicate. |
 | The configuration already declares `naming_version: 1` but the tree still has 0.3.x outputs, and there is no `pipeline.yml.bak-0.3` | Restore the 0.3.x configuration and migrate it, or (if it was migrated on another mount) keep the backup next to the pipeline. |
@@ -295,9 +314,15 @@ Nothing is applied while any of these remains:
   `<derivatives_path>/.neurodags/migrate-journal.json` (JSON Lines; for datasets without
   `derivatives_path`, `.neurodags/` next to the pipeline). If a run is interrupted, run the
   same command again: it scans the tree, continues the remaining moves, completes
-  half-moved units and uses the journal to finish (or redo) an interrupted MNE rewrite.
-- Configuration files are written last with `.bak-0.3` backups, so an interrupted run keeps
-  the 0.3.x configuration and can simply be re-run.
+  half-moved units and uses the journal to finish (or redo) an interrupted MNE rewrite. Files
+  already moved to a chained 0.4.0 name (`x@A.fif@B.nc`, which the 0.3.x parser rejects) are
+  recognized as the planned target of their discovered source and join their unit, which then
+  gets its `.done`.
+- Configuration files are written last, after every file move, with `.bak-0.3` backups: a
+  separate datasets YAML first, then the pipeline (which declares `naming_version: 1`). An
+  interrupted run therefore leaves either the 0.3.x pipeline (with the datasets YAML possibly
+  already migrated, which a re-run accepts as is) or a finished migration; run the same command
+  again, with the same options (`--map`, ...), to complete it.
 - A datasets YAML shared by several pipelines is migrated with the first one; later
   migrations see that every dataset has a `source_root`, take its paths as 0.4.0 paths and
   leave it unchanged.

@@ -248,6 +248,8 @@ class InputEnumeration:
     #: With a frozen list: per dataset, the ``rel`` of files found on disk that the list
     #: does not contain (ignored). Empty for discovery.
     not_in_list: dict[str, list[str]] = field(default_factory=dict)
+    #: Set once the pre-0.4.0 output guard ran for this enumeration (internal).
+    legacy_checked: bool = field(default=False, repr=False, compare=False)
 
     @property
     def files_per_dataset(self) -> dict[str, list[str]]:

@@ -11,12 +11,14 @@ For a source file discovered at ``path``, ``rel`` is its path relative to the da
 ``source_root`` (POSIX separators, from :mod:`neurodags.iterators`). The *reference base*
 of the source is::
 
-    <derivatives_path>[/<derivatives_subdir>]/<dirname(rel)>/<basename(rel) with @ -> &>
+    <derivatives_path>[/<derivatives_subdir>]/<dirname(rel)>/<basename(rel)>
 
-or ``<dirname(path)>/<basename with @ -> &>`` when the dataset has no
+or ``<dirname(path)>/<basename>`` when the dataset has no
 ``derivatives_path`` (outputs next to the source). The output *prefix* of a unit is
 ``<reference base>@<derivative name>``; artifact files are ``prefix + suffix`` and markers
-``prefix + ".done" | ".error" | ".skip"``. Nothing here depends on which other files were
+``prefix + ".done" | ".error" | ".skip"``. The source basename is kept verbatim (it may
+contain ``@``, e.g. a chained source ``sub-1.fif@Clean.fif``); the last ``@`` of an output
+name separates source and derivative. Nothing here depends on which other files were
 discovered, on limits, indices or previous runs. See :func:`output_reference_base`.
 
 Completion (spec 6)
@@ -33,6 +35,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,7 +43,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from neurodags.loggers import get_logger
-from neurodags.naming import output_prefix_basename
+from neurodags.naming import output_prefix_basename, parse_output_basename
 from neurodags.utils import DatasetConfigError, effective_derivatives_base, resolve_dataset_field
 
 log = get_logger(__name__)
@@ -48,9 +51,11 @@ log = get_logger(__name__)
 __all__ = [
     "MANIFEST_VERSION",
     "NAMING_VERSION",
+    "LegacyOutputsError",
     "UnitState",
     "UnitStatus",
     "build_manifest",
+    "check_legacy_chained_outputs",
     "check_output_collisions",
     "dataset_derivatives_base",
     "entry_reference_base",
@@ -72,6 +77,7 @@ MANIFEST_VERSION = 1
 NAMING_VERSION = 1
 
 _MARKERS = ("done", "error", "skip")
+_SPLIT_NAME_RE = re.compile(r"(.+)-([0-9]+)")
 
 UnitStatus = Literal["done", "error", "skipped", "incomplete", "missing"]
 
@@ -103,8 +109,7 @@ def output_reference_base(rel: str, source_path: str, derivatives_base: str | No
     -------
     str
         ``<derivatives_base>/<dirname(rel)>/<basename(rel)>`` or
-        ``<dirname(source_path)>/<basename(rel)>``, with every ``@`` of the basename
-        replaced by ``&``.
+        ``<dirname(source_path)>/<basename(rel)>``, with the basename verbatim.
 
     Raises
     ------
@@ -117,7 +122,7 @@ def output_reference_base(rel: str, source_path: str, derivatives_base: str | No
             f"source path {rel!r} must be a non-empty path relative to source_root "
             "(no '..', '.', or empty components)."
         )
-    base = parts[-1].replace("@", "&")
+    base = parts[-1]
     if derivatives_base:
         outdir = os.path.join(derivatives_base, *parts[:-1])
     else:
@@ -148,8 +153,8 @@ def entry_reference_base(entry: Any, dataset_config: Any, mount_point: Any = Non
 def output_prefix(reference_base: str | os.PathLike, name: str) -> str:
     """Return ``<reference_base>@<name>``, the prefix of every file of one unit.
 
-    The name is validated (:func:`neurodags.naming.output_prefix_basename`); any ``@``
-    left in the reference base's basename becomes ``&``.
+    The name is validated (:func:`neurodags.naming.output_prefix_basename`); the reference
+    base's basename is kept verbatim.
     """
     reference_base = os.fspath(reference_base)
     dirpart, basename = os.path.split(reference_base)
@@ -190,12 +195,200 @@ def check_output_collisions(units: Iterable[tuple[str, str]]) -> None:
             problems.append(
                 "sources "
                 + " and ".join(repr(label) for label in labels)
-                + f" map to the same outputs ({group[0][1]}@<name>...); '@' in a source "
-                "file name is written as '&', and datasets sharing a tree need distinct "
-                "derivatives_subdir values. Rename a source or exclude one of them."
+                + f" map to the same outputs ({group[0][1]}@<name>...). Datasets sharing "
+                "an output tree need distinct derivatives_subdir values, and file names "
+                "that differ only in case collide on case-insensitive filesystems. Rename "
+                "a source or exclude one of them."
             )
     if problems:
         raise DatasetConfigError(problems)
+
+
+class LegacyOutputsError(DatasetConfigError):
+    """Outputs exist only in the pre-0.4.0 layout; ``neurodags migrate`` converts them."""
+
+    def __init__(self, problems: Sequence[str]):
+        self.problems = list(problems)
+        lines = "\n".join(f"  - {p}" for p in self.problems)
+        ValueError.__init__(self, f"outputs need 'neurodags migrate':\n{lines}")
+
+
+def check_legacy_chained_outputs(
+    datasets: Mapping[str, Any],
+    mount_point: Any,
+    names: Iterable[str],
+    entries: Iterable[Any] = (),
+) -> None:
+    """Refuse unmigrated 0.3.x outputs of sources whose basename contained ``@``.
+
+    Before 0.4.0 every ``@`` of a source basename was written as ``&`` (a chained source
+    ``x@A.fif`` gave ``x&A.fif@B.nc``); 0.4.0 keeps it verbatim (``x@A.fif@B.nc``). Such
+    units would silently be recomputed, so this stops with a pointer to ``neurodags
+    migrate``.
+
+    One scan per active output tree: every ``derivatives_path`` (whole, so pilot-era flat
+    files and folders from before a ``derivatives_subdir`` count; ``code/`` and
+    ``.neurodags/`` skipped) and, for datasets writing next to their sources, the folders
+    of the enumerated *entries*. A file is legacy when its name parses (last ``@``) as an
+    output of one of *names* (or its 0.3.x CamelCase token), its source part contains
+    ``&``, and nothing shows it belongs to a 0.4.0 unit:
+
+    - no ``.done`` in the scanned trees has the same source part, in its own spelling or
+      with ``@`` written ``&`` (0.3.x never wrote ``.done``; this also covers duplicates
+      left by ``migrate``), and
+    - no source file of that exact spelling exists where the dataset's ``source_root``
+      would hold it (a real source named with ``&``, whatever is selected now).
+
+    Downstream outputs (``x@Clean.fif@Fit.nc@Power.nc``) never count: their source part
+    holds no ``&``.
+
+    Parameters
+    ----------
+    datasets : mapping
+        Dataset configurations (``skip: true`` ones are ignored).
+    mount_point : str or None
+        Active mount.
+    names : iterable of str
+        Derivative names of the pipeline.
+    entries : iterable
+        Enumerated inputs (``dataset``, ``path``), for datasets without
+        ``derivatives_path``.
+
+    Raises
+    ------
+    LegacyOutputsError
+        Listing the files (a :class:`neurodags.utils.DatasetConfigError`).
+    """
+    from neurodags._legacy import snake_to_camel
+
+    token_names: dict[str, str] = {}
+    for name in names:
+        token_names.setdefault(name, name)
+        token_names.setdefault(snake_to_camel(name), name)
+    if not token_names:
+        return
+
+    def norm(path: str) -> str:
+        return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+    # (output root, its source_root) pairs used to look for real '&' sources.
+    contexts: list[tuple[str, str]] = []
+    trees: set[str] = set()  # walked recursively
+    folders: set[str] = set()  # listed only (outputs next to the sources)
+    for name, cfg in datasets.items():
+        if getattr(cfg, "skip", False):
+            continue
+        try:
+            source_root = resolve_dataset_field(cfg, "source_root", mount_point)
+            derivatives = resolve_dataset_field(cfg, "derivatives_path", mount_point)
+            base = dataset_derivatives_base(cfg, mount_point)
+        except (ValueError, KeyError):
+            continue  # reported by the configuration checks
+        if derivatives:
+            trees.add(os.path.abspath(derivatives))
+            if source_root:
+                contexts.append((os.path.abspath(derivatives), os.path.abspath(source_root)))
+                if base:
+                    contexts.append((os.path.abspath(base), os.path.abspath(source_root)))
+        else:
+            folders.update(
+                os.path.dirname(os.path.abspath(e.path))
+                for e in entries
+                if getattr(e, "dataset", None) == name
+            )
+
+    def files() -> Iterable[tuple[str, str]]:
+        for root in sorted(trees):
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = sorted(
+                    d for d in dirnames if dirpath != root or d not in ("code", ".neurodags")
+                )
+                for fname in sorted(filenames):
+                    yield dirpath, fname
+        for folder in sorted(folders - trees):
+            try:
+                listing = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for fname in listing:
+                yield folder, fname
+
+    # (source part in 0.3.x spelling, name) -> folders holding such a .done
+    done_dirs: dict[tuple[str, str], list[str]] = {}
+    suspects: list[tuple[str, str, str, str]] = []  # (dir, source part, path, name)
+    seen: set[str] = set()
+    for dirpath, fname in files():
+        if "@" not in fname:
+            continue
+        path = os.path.join(dirpath, fname)
+        key = norm(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed = parse_output_basename(fname)
+        if parsed is None:
+            continue
+        name = token_names.get(parsed.name)
+        if name is None:
+            split = _SPLIT_NAME_RE.fullmatch(parsed.name)
+            name = token_names.get(split.group(1)) if split else None
+        if name is None:
+            continue
+        if parsed.marker == "done" and parsed.name == name:
+            key = (parsed.source_part.replace("@", "&"), name)
+            done_dirs.setdefault(key, []).append(dirpath)
+            continue
+        if "&" in parsed.source_part and os.path.isfile(path):
+            suspects.append((dirpath, parsed.source_part, path, name))
+
+    def rel_in_tree(path: str) -> tuple[str, str] | None:
+        for root in trees:
+            rel = os.path.relpath(path, root)
+            if rel == os.curdir or not rel.startswith(os.pardir):
+                return norm(root), rel.replace(os.sep, "/")
+        return None
+
+    def claimed(dirpath: str, key: tuple[str, str]) -> bool:
+        """A .done of this unit in the same folder, or (same tree) in a folder whose
+        path ends with this one: the unit was migrated and this file is a leftover."""
+        here = rel_in_tree(dirpath)
+        for done_dir in done_dirs.get(key, []):
+            if norm(done_dir) == norm(dirpath):
+                return True
+            there = rel_in_tree(done_dir)
+            if here and there and here[0] == there[0]:
+                old, new = here[1], there[1]
+                if old == "." or new == old or new.endswith("/" + old):
+                    return True
+        return False
+
+    listed = {norm(f) for f in folders}
+    found: list[str] = []
+    for dirpath, source_part, path, name in suspects:
+        if claimed(dirpath, (source_part, name)):
+            continue
+        real = [os.path.join(dirpath, source_part)] if norm(dirpath) in listed else []
+        for out_root, source_root in contexts:
+            rel = os.path.relpath(dirpath, out_root)
+            if rel == os.curdir or not rel.startswith(os.pardir):
+                real.append(os.path.normpath(os.path.join(source_root, rel, source_part)))
+        if any(os.path.isfile(r) for r in real):
+            continue  # a real source named with '&' (0.4.0 unit without .done yet)
+        found.append(path)
+    if found:
+        shown = "\n      ".join(found[:5]) + (
+            f"\n      ... and {len(found) - 5} more" if len(found) > 5 else ""
+        )
+        raise LegacyOutputsError(
+            [
+                f"{len(found)} file(s) look like neurodags 0.3.x outputs of sources whose "
+                "name contained '@' (0.3.x wrote it as '&'; 0.4.0 keeps source names "
+                "verbatim), and no .done claims them, so their units would be recomputed:"
+                f"\n      {shown}\n    Run 'neurodags migrate' on this pipeline to rename "
+                "them. If they are not neurodags 0.3.x outputs, or are obsolete, move them "
+                "out of the output tree."
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -427,12 +620,24 @@ def _prefix_files(prefix: str) -> list[str]:
     # The prefix is a literal path built from source and derivative names: escape it so
     # glob metacharacters ([, ], *, ?) in any component match verbatim. Status only:
     # never used to decide a cache hit.
+    # Outputs of a downstream unit whose source is this unit's artifact (for prefix
+    # ``x@Clean``: ``x@Clean.fif@Power.nc``) also match the glob; they parse at their last
+    # ``@`` to another unit and are not this unit's files.
     marker_names = {marker_path(prefix, m) for m in _MARKERS}
+    own = len(os.path.basename(prefix))
     return [
         p
         for p in sorted(glob.glob(glob.escape(prefix) + ".*"))
-        if p not in marker_names and os.path.isfile(p)
+        if p not in marker_names
+        and os.path.isfile(p)
+        and not _is_descendant_output(os.path.basename(p), own)
     ]
+
+
+def _is_descendant_output(basename: str, prefix_len: int) -> bool:
+    # This unit's own suffixes never contain ``@`` (SUFFIX_RE), so an ``@`` after the
+    # prefix plus a valid last-``@`` parse means the file belongs to a downstream unit.
+    return "@" in basename[prefix_len:] and parse_output_basename(basename) is not None
 
 
 def unit_state(prefix: str, name: str, *, scan: bool = True) -> UnitState:

@@ -1,7 +1,7 @@
 import inspect
 import os
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +26,11 @@ from neurodags.loggers import get_logger
 from neurodags.naming import ColumnCollisionError, error_column, validate_derivative_name
 from neurodags.nodes import get_node, list_nodes
 from neurodags.nodes.loader import load_node_definitions
-from neurodags.outputs import check_output_collisions, entry_reference_base
+from neurodags.outputs import (
+    check_legacy_chained_outputs,
+    check_output_collisions,
+    entry_reference_base,
+)
 from neurodags.utils import (
     expand_path,
     resolve_dataset_field,
@@ -129,15 +133,21 @@ def _absolute(path: Any) -> Any:
 
 
 def _reference_bases(
-    entries: list[InputEntry], datasets_configs: Mapping[str, Any], mount_point: Any
+    enumeration: InputEnumeration,
+    datasets_configs: Mapping[str, Any],
+    mount_point: Any,
+    names: Iterable[str] = (),
 ) -> dict[int, str]:
     """Absolute reference base per enumerated input, checked for collisions (spec 4.1, 4.3).
 
     Uses the one layout rule of :func:`neurodags.outputs.entry_reference_base` (from
-    ``source_root``, never from the discovered set). Pure path computation: nothing is
-    written. Raises :class:`neurodags.utils.DatasetConfigError` when two sources map to
-    the same outputs.
+    ``source_root``, never from the discovered set). Nothing is written. Raises
+    :class:`neurodags.utils.DatasetConfigError` when two sources map to the same outputs,
+    or when outputs of the derivatives *names* are still in the pre-0.4.0 ``&`` layout
+    (:func:`neurodags.outputs.check_legacy_chained_outputs`; scanned once per
+    enumeration, which every derivative of one invocation shares).
     """
+    entries = enumeration.entries
     bases = {
         entry.index: entry_reference_base(entry, datasets_configs[entry.dataset], mount_point)
         for entry in entries
@@ -145,6 +155,10 @@ def _reference_bases(
     check_output_collisions(
         (f"{entry.dataset}: {entry.rel}", bases[entry.index]) for entry in entries
     )
+    names = list(names)
+    if names and not enumeration.legacy_checked:
+        check_legacy_chained_outputs(datasets_configs, mount_point, names, entries)
+        enumeration.legacy_checked = True
     return bases
 
 
@@ -393,7 +407,12 @@ def iterate_derivative_pipeline(
             "(they are already applied to the enumeration)."
         )
     # Output locations from source_root (spec 4.1); collisions fail before any write.
-    reference_bases = _reference_bases(enumeration.entries, datasets_configs, mount_point)
+    reference_bases = _reference_bases(
+        enumeration,
+        datasets_configs,
+        mount_point,
+        list(config_dict.get("DerivativeDefinitions") or {}),
+    )
     # Sorted, limited, indexed; only_index filters it (unknown indices raise).
     selected_entries = enumeration.select(only_index)
 
@@ -843,7 +862,12 @@ def run_pipeline(
             )
         enumeration.select(only_index)  # validate --only-index up front
         # Output collisions (spec 4.3) fail before the snapshot writes anything.
-        _reference_bases(enumeration.entries, _ds_configs, _mount)
+        _reference_bases(
+            enumeration,
+            _ds_configs,
+            _mount,
+            list(config.get("DerivativeDefinitions") or {}),
+        )
 
     if (
         not dry_run
@@ -1046,7 +1070,9 @@ def build_derivative_dataframe(
         max_files_per_dataset=max_files_per_dataset,
         inputs=inputs,
     )
-    reference_bases = _reference_bases(enumeration.entries, datasets_configs, mount_point)
+    reference_bases = _reference_bases(
+        enumeration, datasets_configs, mount_point, list(derivative_definitions)
+    )
     selected_entries = enumeration.select(only_index)
     for missing_entry in (e for e in selected_entries if e.missing):
         log.error(
