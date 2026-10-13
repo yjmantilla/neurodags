@@ -293,11 +293,17 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   artifacts reporting the same file fail the unit instead of certifying an overwritten
   recording. Artifacts are written in a hidden staging folder next to the outputs and moved
   into place with `os.replace` (split parts first, main file last) before `.done` is
-  published, so a killed task, a duplicate task on the same unit or a concurrent reader can
-  never leave or see a partial file under an output name, and nothing blocks the next run;
-  `status` counts leftover staging folders (`staging_dirs`). Artifact writers must write next
-  to (or below) the path they are given; unreported files are discarded. An overwrite also
-  drops an old `.skip` before recomputing. A `save: false` derivative reached as a dependency
+  published, so a killed task never leaves a partial file under an output name and nothing
+  blocks the next run; `status` counts leftover staging folders (`staging_dirs`). `.done`
+  records a `[size, mtime_ns]` fingerprint per file, and a file changed after publication
+  (e.g. by a second job on the same unit) makes the unit `incomplete`; copy trees with
+  `rsync -a` / `cp -a`. Running two jobs on one unit at once, or overwriting a unit another
+  job reads, is documented as unsupported. Artifact writers must write next to (or below) the
+  path they are given, under names starting with the unit's prefix (a shared `figs/` folder
+  fails the unit); unreported files are discarded. `migrate` on a configuration that already
+  declares `naming_version: 1` no longer certifies files without a `.done` (an interrupted
+  run) unless it moved them itself. The TUI status counts skipped and no-save units. An
+  overwrite also drops an old `.skip` before recomputing. A `save: false` derivative reached as a dependency
   is no longer read from an old manifest. A failing dependency or argument preparation now
   writes the consuming unit's `.error` and removes its old `.done`.
 

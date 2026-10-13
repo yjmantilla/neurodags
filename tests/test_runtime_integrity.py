@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import shutil
 import signal
+import time
 from pathlib import Path
 
 import mne
@@ -432,26 +434,310 @@ def test_staging_folder_names_never_parse_as_outputs(tmp_path):
     assert unit_state(prefix, "B").temps == (staging,)
 
 
-def test_writer_outputs_land_relative_to_target_and_unreported_files_are_dropped(tmp_path):
-    @register_node(name="rt_layout", override=True)
-    def layout():
+def _companion_node(name: str, layout: str, text: str) -> None:
+    """Register *name*: a ``.txt`` artifact plus a ``plot.txt`` companion (*layout*)."""
+
+    @register_node(name=name, override=True)
+    def node():
         def writer(p):
-            sub = Path(p).parent / "figs"
+            if layout == "namespaced":
+                sub = Path(p + ".figs")  # owned by the unit: starts with its prefix
+            else:
+                sub = Path(p).parent / "figs"  # shared by every unit of the folder
             sub.mkdir()
-            Path(p).write_text("main")
-            (sub / "plot.txt").write_text("plot")
+            Path(p).write_text(text)
+            (sub / "plot.txt").write_text(text)
             Path(p + ".unreported").write_text("scratch")
             return [p, str(sub / "plot.txt")]
 
-        return NodeResult({".txt": Artifact("x", writer)})
+        return NodeResult({".txt": Artifact(text, writer)})
 
+
+def test_writer_outputs_land_relative_to_target_and_unreported_files_are_dropped(tmp_path):
+    _companion_node("rt_layout", "namespaced", "main")
     base = _source(tmp_path)
     run_derivative(_single("rt_layout"), "Lay", str(base), base)
     prefix = str(base) + "@Lay"
-    assert read_manifest(prefix)["artifacts"] == {".txt": ["source@Lay.txt", "figs/plot.txt"]}
-    assert (tmp_path / "figs" / "plot.txt").read_text() == "plot"
+    assert read_manifest(prefix)["artifacts"] == {
+        ".txt": ["source@Lay.txt", "source@Lay.txt.figs/plot.txt"]
+    }
+    assert (tmp_path / "source@Lay.txt.figs" / "plot.txt").read_text() == "main"
     assert not os.path.exists(prefix + ".txt.unreported")
-    assert unit_state(prefix, "Lay").temps == ()
+    state = unit_state(prefix, "Lay")
+    assert state.state == "done"
+    assert state.temps == ()
+
+
+def test_companion_outside_the_unit_namespace_fails_unit_and_replaces_nothing(tmp_path):
+    """Astra's finding 4: ``figs/plot.txt`` is not owned by the unit."""
+    (tmp_path / "figs").mkdir()
+    (tmp_path / "figs" / "plot.txt").write_text("someone else's")
+    _companion_node("rt_shared", "shared", "mine")
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="does not start with the unit's prefix"):
+        run_derivative(_single("rt_shared"), "Shared", str(base), base)
+    prefix = str(base) + "@Shared"
+    assert unit_state(prefix, "Shared").state == "error"
+    assert not os.path.exists(prefix + ".txt")
+    assert (tmp_path / "figs" / "plot.txt").read_text() == "someone else's"
+
+
+@pytest.mark.parametrize("layout", ["namespaced", "shared"])
+def test_two_derivatives_never_share_a_companion(tmp_path, layout):
+    _companion_node("rt_first", layout, "First")
+    _companion_node("rt_second", layout, "Second")
+    base = _source(tmp_path)
+    for node, name in (("rt_first", "First"), ("rt_second", "Second")):
+        if layout == "shared":
+            with pytest.raises(RuntimeError, match="does not start with the unit's prefix"):
+                run_derivative(_single(node), name, str(base), base)
+        else:
+            run_derivative(_single(node), name, str(base), base)
+    for name in ("First", "Second"):
+        state = unit_state(f"{base}@{name}", name)
+        if layout == "shared":
+            assert state.state == "error"
+            continue
+        assert state.state == "done"
+        assert [Path(p).read_text() for p in state.artifacts[".txt"]] == [name, name]
+    assert not (tmp_path / "figs").exists()
+
+
+@pytest.mark.parametrize("layout", ["namespaced", "shared"])
+def test_two_sources_never_share_a_companion(tmp_path, layout):
+    _companion_node("rt_comp", layout, "x")
+    states = []
+    for source in ("one", "two"):
+        base = tmp_path / source
+        base.write_text(source)
+        if layout == "shared":
+            with pytest.raises(RuntimeError, match="does not start with the unit's prefix"):
+                run_derivative(_single("rt_comp"), "Comp", str(base), base)
+        else:
+            run_derivative(_single("rt_comp"), "Comp", str(base), base)
+        states.append(unit_state(f"{base}@Comp", "Comp"))
+    if layout == "shared":
+        assert [s.state for s in states] == ["error", "error"]
+        assert not (tmp_path / "figs").exists()
+    else:
+        assert [s.state for s in states] == ["done", "done"]
+        assert states[0].artifacts[".txt"][1] != states[1].artifacts[".txt"][1]
+
+
+@pytest.mark.parametrize(
+    ("rel", "ok"),
+    [
+        ("x@A.fif", True),
+        ("x@A-1.fif", True),
+        ("x@A.EO-2.fif", True),
+        ("x@A.fif.figs/p.png", True),
+        ("x@A/p.png", True),
+        ("x@A", False),
+        ("x@A.done", False),
+        ("x@A2.fif", False),
+        ("x@A-x.fif", False),
+        ("x@A.fif@B.nc", False),
+        ("figs/p.png", False),
+        ("y@A.fif", False),
+    ],
+)
+def test_unit_namespace_rule(rel, ok):
+    from neurodags.outputs import _unit_namespace_problem
+
+    assert (_unit_namespace_problem(rel, "x@A") is None) is ok
+
+
+# ---------------------------------------------------------------------------
+# Fingerprints: a .done never certifies files another process replaced
+# ---------------------------------------------------------------------------
+
+
+@register_node(name="rt_pair", override=True)
+def _rt_pair(text):
+    return NodeResult(
+        {
+            ".a.txt": Artifact(text, lambda p: Path(p).write_text(text)),
+            ".b.txt": Artifact(text, lambda p: Path(p).write_text(text)),
+        }
+    )
+
+
+def _pause_replace(after: bool, paused, resume, then_exit: bool = False) -> None:
+    """In a forked child: make the first ``os.replace`` pause (before or after it runs)."""
+    real = os.replace
+    calls = []
+
+    def replace(src, dst):
+        calls.append(dst)
+        if len(calls) == 1 and not after:
+            paused.set()
+            assert resume.wait(30)
+        real(src, dst)
+        if len(calls) == 1 and then_exit:
+            os._exit(23)
+        if len(calls) == 1 and after:
+            paused.set()
+            assert resume.wait(30)
+
+    os.replace = replace
+
+
+@needs_fork
+def test_interleaved_publishers_are_not_certified(tmp_path, procs):
+    """Astra's schedule 1: A replaces .a.txt and pauses; B publishes both files and its .done;
+    A replaces .b.txt and writes its .done. Files are B/A: the unit must not be done."""
+    ctx = mp.get_context("fork")
+    paused, resume = ctx.Event(), ctx.Event()
+    base = _source(tmp_path)
+    prefix = str(base) + "@Pair"
+
+    def run_a():
+        _pause_replace(True, paused, resume)
+        run_derivative(_single("rt_pair", text="A"), "Pair", str(base), base)
+
+    a = _start(procs, lambda: _exit_after(run_a))
+    assert paused.wait(30)
+    run_derivative(_single("rt_pair", text="BBBB"), "Pair", str(base), base)
+    assert unit_state(prefix, "Pair").state == "done"
+    resume.set()
+    a.join(30)
+    assert a.exitcode == 0
+
+    assert Path(prefix + ".a.txt").read_text() == "BBBB"
+    assert Path(prefix + ".b.txt").read_text() == "A"
+    state = unit_state(prefix, "Pair")
+    assert state.state == "incomplete"
+    assert "modified after publication" in state.problem
+    assert "cached" not in run_derivative(_single("rt_pair", text="A"), "Pair", str(base), base)
+    assert unit_state(prefix, "Pair").state == "done"
+
+
+@needs_fork
+def test_publisher_dying_mid_publication_is_not_certified(tmp_path, procs):
+    """Astra's schedule 2 with a real split FIF: B stages 9s and pauses before its first
+    continuation replace; A publishes a complete recording of 1s; B replaces one part and
+    dies. The recording mixes both: the unit must not be done."""
+    ctx = mp.get_context("fork")
+    paused, resume = ctx.Event(), ctx.Event()
+
+    @register_node(name="rt_rec", override=True)
+    def rec(value):
+        raw = mne.io.RawArray(np.full((4, 200_000), value * 1e-6), mne.create_info(4, 1000, "eeg"))
+        return NodeResult(
+            {".fif": Artifact(raw, lambda p: save_mne(raw, p, split_size="2MB", verbose="error"))}
+        )
+
+    base = _source(tmp_path)
+    prefix = str(base) + "@Rec"
+
+    def run_b():
+        _pause_replace(False, paused, resume, then_exit=True)
+        run_derivative(_single("rt_rec", value=9), "Rec", str(base), base)
+
+    b = _start(procs, lambda: _exit_after(run_b))
+    assert paused.wait(60)
+    time.sleep(1.2)  # A's computation starts later than B's: its files are newer
+    run_derivative(_single("rt_rec", value=1), "Rec", str(base), base)
+    assert unit_state(prefix, "Rec").state == "done"
+    resume.set()
+    b.join(30)
+    assert b.exitcode == 23
+
+    data = mne.io.read_raw_fif(prefix + ".fif", preload=True, verbose="error").get_data()
+    assert {round(v * 1e6) for v in np.unique(data)} == {1, 9}  # really mixed
+    state = unit_state(prefix, "Rec")
+    assert state.state == "incomplete"
+    assert "Rec-1.fif" in state.problem
+
+
+def test_fingerprints_survive_metadata_preserving_copies_only(tmp_path):
+    base = _source(tmp_path)
+    run_derivative(_single("rt_pair", text="v"), "Fp", str(base), base)
+    prefix = str(base) + "@Fp"
+
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    for path in tmp_path.glob("source@Fp.*"):
+        shutil.copy2(path, copy / path.name)  # like rsync -a / cp -a
+    assert unit_state(str(copy / "source@Fp"), "Fp").state == "done"
+
+    st = os.stat(prefix + ".a.txt")
+    os.utime(prefix + ".a.txt", ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    state = unit_state(prefix, "Fp")
+    assert state.state == "incomplete"
+    assert "modified after publication" in state.problem
+
+    # Manifests written before fingerprints existed stay valid.
+    done = Path(prefix + ".done")
+    manifest = json.loads(done.read_text())
+    del manifest["fingerprints"]
+    done.write_text(json.dumps(manifest))
+    assert unit_state(prefix, "Fp").state == "done"
+
+
+# ---------------------------------------------------------------------------
+# Migrate never certifies an interrupted 0.4.0 run
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_does_not_certify_interrupted_run(tmp_path, monkeypatch):
+    """Astra's finding 3: Ctrl-C after the first final replace leaves NEW/OLD and no .done;
+    migrate on the (already naming_version 1) pipeline must not certify it."""
+    import yaml
+
+    from neurodags.migrate import apply_migration, plan_migration
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "source.txt").write_text("s")
+    ds = {"name": "d", "source_root": "raw", "file_pattern": "raw/*.txt", "derivatives_path": "out"}
+    (tmp_path / "ds.yml").write_text(yaml.safe_dump({"d": ds}))
+    pipeline = tmp_path / "pl.yml"
+    pipeline.write_text(
+        yaml.safe_dump(
+            {
+                "naming_version": 1,
+                "datasets": "ds.yml",
+                "DerivativeDefinitions": {"Pair": _single("rt_pair", text="OLD")},
+                "DerivativeList": ["Pair"],
+            }
+        )
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    base = out / "source.txt"
+    prefix = str(base) + "@Pair"
+    run_derivative(_single("rt_pair", text="OLD"), "Pair", str(base), base)
+
+    from neurodags import outputs
+
+    real = os.replace
+    calls = []
+
+    def interrupted(src, dst):
+        real(src, dst)
+        calls.append(dst)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(outputs.os, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run_derivative(
+            {**_single("rt_pair", text="NEW"), "overwrite": True}, "Pair", str(base), base
+        )
+    monkeypatch.setattr(outputs.os, "replace", real)
+    assert Path(prefix + ".a.txt").read_text() == "NEW"
+    assert Path(prefix + ".b.txt").read_text() == "OLD"
+    assert unit_state(prefix, "Pair").state == "incomplete"
+
+    plan = plan_migration(str(pipeline))
+    assert plan.mode == "tree-only"
+    assert plan.refusals == []
+    apply_migration(plan)
+    assert unit_state(prefix, "Pair").state == "incomplete"
+    assert not os.path.exists(prefix + ".done")
+    reasons = [u.manifest_reason for u in plan.units("move", "identity")]
+    assert any("recompute with neurodags run" in (r or "") for r in reasons)
 
 
 def test_writer_reporting_a_file_outside_its_folder_fails_unit(tmp_path):

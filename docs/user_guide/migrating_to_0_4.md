@@ -177,7 +177,14 @@ for most derivatives) is complete for the unit. Not certified (no `.done`, statu
 
 - units missing an artifact of that set (a partial 0.3.x write);
 - units with an `.error` marker;
-- every unit of a derivative whose two most common sets tie.
+- every unit of a derivative whose two most common sets tie;
+- when the configuration already declares `naming_version: 1`, units whose files already
+  have their 0.4.0 names and that this migration did not move itself (its journal): they may
+  be an interrupted `neurodags run` with some artifacts new and some old. Recompute them with
+  `neurodags run`.
+
+A synthesized `.done` records the size and modification time of each file as found
+(`fingerprints`), like a run's.
 
 Units with a `.skip` marker keep it (status `skipped`). `--no-synthesize` writes no
 manifests at all, so every migrated unit is recomputed.

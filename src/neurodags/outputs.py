@@ -24,8 +24,10 @@ discovered, on limits, indices or previous runs. See :func:`output_reference_bas
 Completion (spec 6)
 -------------------
 A unit is done when ``<prefix>.done`` is a valid manifest: it parses, its
-``naming_version`` and ``derivative`` match, and every file it lists exists (see
-:func:`manifest_artifacts`). The manifest is written last and atomically, from the paths
+``naming_version`` and ``derivative`` match, every file it lists exists, and every file
+still matches its recorded fingerprint (size, and mtime within one second) when the manifest
+has ``fingerprints`` (see :func:`manifest_artifacts`). The manifest is written last and
+atomically, from the paths
 the artifact writers reported (:func:`writer_paths`), never from a glob. Files that match
 the prefix but have no valid manifest make the unit ``incomplete``.
 
@@ -73,6 +75,7 @@ __all__ = [
     "check_output_collisions",
     "dataset_derivatives_base",
     "entry_reference_base",
+    "file_fingerprint",
     "is_staging_name",
     "make_staging_dir",
     "manifest_artifacts",
@@ -541,6 +544,34 @@ def remove_staging_dir(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+_SPLIT_TAIL_START_RE = re.compile(r"-[0-9]+(?:\.|$)")
+
+
+def _unit_namespace_problem(rel: str, base: str) -> str | None:
+    """Why *rel* (relative to the output folder) is not a file of the unit *base*, or None.
+
+    The first path component must be the unit's prefix basename followed by ``.``
+    (``x@Clean.fif``, ``x@Clean.figs/plot.png``), by an MNE split tail ``-<digits>``
+    (``x@Clean-1.fif``), or be exactly the prefix basename used as a folder
+    (``x@Clean/plot.png``); without any ``@`` after the prefix (that would be a downstream
+    unit's file) and never the unit's own markers.
+    """
+    parts = rel.split("/")
+    first = parts[0]
+    if first in {f"{base}.{m}" for m in _MARKERS}:
+        return "that is one of the unit's completion markers."
+    rest = first[len(base) :] if first.startswith(base) else None
+    if rest is not None and "@" not in rest:
+        if rest.startswith(".") or _SPLIT_TAIL_START_RE.match(rest):
+            return None
+        if rest == "" and len(parts) > 1:
+            return None
+    return (
+        f"its name {first!r} does not start with the unit's prefix {base!r} (followed by '.'),"
+        " so another unit could write the same file."
+    )
+
+
 def publish_staged(
     staging: str, prefix: str, staged: Mapping[str, Sequence[str]]
 ) -> dict[str, list[str]]:
@@ -569,10 +600,12 @@ def publish_staged(
     Raises
     ------
     RuntimeError
-        If a writer reported a file outside *staging*: writers must write into the folder of
-        the path they are given (a file written elsewhere cannot be published atomically).
+        If a writer reported a file outside *staging* (writers must write into the folder of
+        the path they are given; a file written elsewhere cannot be published atomically), or
+        a file whose name is not owned by the unit (its first path component must start with
+        the prefix basename, see :func:`_unit_namespace_problem`). Nothing is moved then.
     """
-    directory = os.path.dirname(prefix)
+    directory, base = os.path.split(prefix)
     root = os.path.abspath(staging)
     final: dict[str, list[str]] = {}
     moves: list[tuple[str, str]] = []
@@ -586,6 +619,13 @@ def publish_staged(
                     f"artifact writer for {suffix!r} reported {path!r}, outside the path it "
                     f"was given ({root}); writers must write next to (or below) their target "
                     "path so the files can be published atomically."
+                )
+            problem = _unit_namespace_problem(rel.replace(os.sep, "/"), base)
+            if problem is not None:
+                raise RuntimeError(
+                    f"artifact writer for {suffix!r} reported {path!r}: {problem} Name every "
+                    "extra file after the path the writer is given (e.g. path + '.json' or "
+                    "a folder path + '.figs'), so no other unit can write the same file."
                 )
             target = os.path.join(directory, rel)
             final[suffix].append(target)
@@ -623,8 +663,13 @@ def build_manifest(
     artifacts: Mapping[str, Sequence[str]],
     companions: Sequence[str] = (),
     origin: str = "run",
+    fingerprints: Mapping[str, tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``.done`` manifest of one unit (spec 6.1).
+
+    Every listed file gets a fingerprint ``[size, mtime_ns]`` (``fingerprints`` in the
+    manifest, keyed by the listed name). A later change of a file (another process replacing
+    it, a partial overwrite) makes the manifest invalid; see :func:`unit_state`.
 
     Parameters
     ----------
@@ -642,8 +687,27 @@ def build_manifest(
         Other files belonging to the unit that no artifact suffix covers.
     origin : {"run", "migrate"}
         Who wrote the manifest.
+    fingerprints : mapping of path to (size, mtime_ns), optional
+        Fingerprints of the listed files, keyed by the paths given in *artifacts* /
+        *companions*. A run passes those of the staged files, taken before they are moved
+        into place (``os.replace`` keeps size and mtime), so a file another process
+        replaced in between does not match. Missing entries are taken from the files on
+        disk now (what ``migrate`` certifies).
     """
     manifest_dir = os.path.dirname(prefix)
+    given = dict(fingerprints or {})
+    prints: dict[str, list[int]] = {}
+    for path in [p for paths in artifacts.values() for p in paths] + list(companions):
+        entry = _relative_entry(path, manifest_dir)
+        if path in given:
+            size, mtime_ns = given[path]
+        else:
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            size, mtime_ns = st.st_size, st.st_mtime_ns
+        prints[entry] = [int(size), int(mtime_ns)]
     return {
         "manifest_version": MANIFEST_VERSION,
         "naming_version": NAMING_VERSION,
@@ -654,9 +718,49 @@ def build_manifest(
             for suffix, paths in artifacts.items()
         },
         "companions": [_relative_entry(p, manifest_dir) for p in companions],
+        "fingerprints": prints,
         "written": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "origin": origin,
     }
+
+
+def file_fingerprint(path: str) -> tuple[int, int]:
+    """``(size, mtime_ns)`` of a file, as recorded in a manifest's ``fingerprints``."""
+    st = os.stat(path)
+    return st.st_size, st.st_mtime_ns
+
+
+#: Fingerprint mtimes match when within this many nanoseconds (1 s): filesystems that keep
+#: only seconds, and copies made with ``rsync -a`` / ``cp -a``, still verify.
+FINGERPRINT_MTIME_TOLERANCE_NS = 1_000_000_000
+
+
+def _fingerprint_problem(fingerprints: Any, directory: str) -> str | None:
+    if fingerprints is None:
+        return None  # manifests written before fingerprints were recorded stay valid
+    if not isinstance(fingerprints, dict):
+        return "malformed fingerprints"
+    changed = []
+    for entry, value in fingerprints.items():
+        if (
+            not _safe_entry(entry)
+            or not isinstance(value, list)
+            or len(value) != 2
+            or not all(isinstance(v, int) for v in value)
+        ):
+            return "malformed fingerprints"
+        try:
+            st = os.stat(os.path.join(directory, *entry.split("/")))
+        except OSError:
+            changed.append(entry)
+            continue
+        size, mtime_ns = value
+        if st.st_size != size or abs(st.st_mtime_ns - mtime_ns) >= FINGERPRINT_MTIME_TOLERANCE_NS:
+            changed.append(entry)
+    if changed:
+        names = ", ".join(os.path.basename(e) for e in changed)
+        return f"file(s) modified after publication: {names}"
+    return None
 
 
 def write_manifest(prefix: str, manifest: Mapping[str, Any]) -> str:
@@ -736,6 +840,9 @@ def _manifest_problem(
     missing = [p for p in listed if not os.path.isfile(p)]
     if missing:
         return f"listed file(s) missing: {', '.join(os.path.basename(p) for p in missing)}", {}
+    problem = _fingerprint_problem(manifest.get("fingerprints"), directory)
+    if problem is not None:
+        return problem, {}
     return None, resolved
 
 
@@ -743,8 +850,9 @@ def manifest_artifacts(prefix: str, name: str) -> dict[str, list[str]] | None:
     """Cache hit check (spec 6.2): the unit's files per suffix, or ``None``.
 
     The unit is done when ``prefix + ".done"`` parses, its ``naming_version`` and
-    ``derivative`` match and every listed file exists. Files matching the prefix but not
-    listed are ignored.
+    ``derivative`` match, every listed file exists and matches its fingerprint (when the
+    manifest records ``fingerprints``; a file modified after publication fails). Files
+    matching the prefix but not listed are ignored.
 
     Returns
     -------

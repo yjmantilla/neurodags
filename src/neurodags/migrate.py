@@ -1642,6 +1642,17 @@ def _add_move(plan: MigrationPlan, unit: Unit, old: str, new: str, all_old: set[
 
 
 def _plan_manifests(plan: MigrationPlan) -> None:
+    # With a configuration already at naming_version 1, files at their 0.4.0 names without a
+    # .done may be an interrupted `neurodags run` (some artifacts new, some old): never
+    # certify those. Only units with 0.3.x-named files (moved now) or files an interrupted
+    # `migrate --apply` itself moved (its journal) can still be legacy output.
+    journaled: set[str] | None = None
+    if plan.mode == "tree-only":
+        journaled = set()
+        for journal in {t.journal for t in plan.trees}:
+            for entry in read_journal(journal):
+                news = [entry.get("new"), *(entry.get("new_parts") or [])]
+                journaled.update(os.path.normpath(p) for p in news if isinstance(p, str))
     for unit in _primaries(plan):
         artifacts, markers = _group_view(unit)
         unit.manifest_suffixes = None
@@ -1658,6 +1669,20 @@ def _plan_manifests(plan: MigrationPlan) -> None:
             continue
         if "skip" in markers:
             continue  # .skip is its own state
+        if journaled is not None and not all(
+            member.status == "move"
+            or all(
+                os.path.normpath(p) in journaled
+                for paths in member.artifacts.values()
+                for p in paths
+            )
+            for member in unit.members or [unit]
+        ):
+            unit.manifest_reason = (
+                "incomplete — files at their 0.4.0 names without a .done (an interrupted "
+                "'neurodags run'?); recompute with neurodags run"
+            )
+            continue
         info = plan.artifact_sets.get(unit.derivative)
         known = info.get("known") if info else None
         if not known:

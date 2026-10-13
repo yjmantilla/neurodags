@@ -86,6 +86,7 @@ The manifest:
   "source": {"dataset": "study", "rel": "sub-01/eeg/sub-01_task-rest_eeg.vhdr"},
   "artifacts": {".nc": ["sub-01_task-rest_eeg.vhdr@Fit_alpha-0p5_w-6.nc"]},
   "companions": [],
+  "fingerprints": {"sub-01_task-rest_eeg.vhdr@Fit_alpha-0p5_w-6.nc": [52144, 1791799200123456789]},
   "written": "2026-10-12T10:00:00Z",
   "origin": "run"
 }
@@ -94,11 +95,21 @@ The manifest:
 - `artifacts` maps each suffix to the files it consists of: usually one, every part for an MNE
   split recording (`X.fif`, `X-1.fif`, ...). File names are relative to the manifest's folder, so
   a tree moved or copied to another mount (local ↔ HPC) still verifies.
+- `fingerprints` records `[size, mtime_ns]` of every listed file as this run wrote it (taken
+  from the staged file before it was moved into place). Copy derivative trees with tools that
+  keep modification times (`rsync -a`, `cp -a`): a plain `cp` gives the copies new mtimes, so
+  their units no longer verify and are recomputed.
 - `source.rel` is the source path relative to `source_root` with its original spelling
   (including any `@`).
 
 **A unit is done** (a cache hit) when its `.done` parses, its `naming_version` and `derivative`
-match, and every file it lists exists. Files that match the prefix but are not listed are
+match, every file it lists exists and, when the manifest has `fingerprints`, every file still
+has the recorded size and a modification time within one second of the recorded one (so
+filesystems that keep whole seconds and `rsync -a` / `cp -a` copies verify). A file changed
+after publication (replaced by another process, edited, copied without its mtime) makes the
+unit `incomplete` ("modified after publication") and it is recomputed. Manifests without
+`fingerprints` (written before 0.4.0 was released) are checked by existence only. Files that
+match the prefix but are not listed are
 ignored (and reported by `neurodags status`). There is no other cache check: a file named like
 an output but without a valid manifest is not trusted.
 
@@ -130,20 +141,33 @@ afterwards, and also when a writer fails.
 
 Consequences:
 
-- A reader (a node reading a cached dependency, dataframe collection, your own scripts) sees a
-  complete old file or a complete new one at any time, never a partially written one, even
-  while another process overwrites the unit. One limitation: a split recording replaced
-  *while* a reader is opening its parts one by one may be read as a mix of both versions.
-- A process killed at any point (an exception, Ctrl-C, `SIGTERM`, `kill -9`, a scheduler
-  timeout) leaves no `.done` over half-written files and nothing that blocks the next run.
-- Two processes computing the same unit at once (a duplicate or retried array task) each
-  write their own staging folder; both publish complete files and the last one to move a file
-  wins. If their results differ, the unit's artifacts can come from different runs (each one
-  complete).
-- Writers must write inside the folder of the path they are given (the target or files next to
-  or below it, e.g. a `figs/` subfolder). A writer that reports a file elsewhere fails the
-  unit, and files a writer writes without reporting them are discarded with the staging
-  folder (see [Writer contract](#naming-writer-contract)).
+- No file under an output name is ever partially written: a process killed at any point (an
+  exception, Ctrl-C, `SIGTERM`, `kill -9`, a scheduler timeout) leaves no `.done` over
+  half-written files and nothing that blocks the next run.
+- Each file of a unit and its fingerprint are checked against the `.done`, so a unit whose
+  files were replaced or mixed after publication is not `done` (see above).
+- Writers must write inside the folder of the path they are given, under names that start
+  with the unit's prefix (see [Writer contract](#naming-writer-contract)). A writer that
+  reports a file elsewhere fails the unit, and files a writer writes without reporting them
+  are discarded with the staging folder.
+
+(naming-concurrency)=
+
+**Not supported: two jobs on one unit at the same time.** Publication is per file, not per
+unit, and readers do not hold a snapshot. Therefore:
+
+- **Do not run two jobs that compute the same unit at once** (a requeued task while the
+  original still runs, overlapping arrays, two derivatives computing the same uncached
+  intermediate in parallel). Interleaved publications can leave a unit's files from two runs,
+  even the parts of one split recording; the fingerprints then make the unit `incomplete` and
+  it is recomputed, but which run's results you got is undefined until then.
+- **Do not overwrite a unit while another job reads it.** A reader holds file names, not a
+  snapshot: a lazily loaded MNE recording (`preload=False`) can read new samples with old
+  metadata, and a dataframe collection can mix columns from the old and the new results.
+  Nothing detects that in the reader's output.
+
+Run dependencies before their consumers (the per-file pattern or chained arrays in {doc}`hpc`)
+and finish or cancel jobs before overwriting units they use.
 
 A process killed before it could clean up leaves its staging folder behind. Staging folders are
 ignored by discovery, `status`, dataframe collection, `migrate` and the 0.3.x output check;
@@ -188,11 +212,27 @@ built from these reports, never from a directory listing.
 `path` has the final basename (`<reference_base basename>@<name><suffix>`) but lies in the
 unit's staging folder, not in the output folder (see
 [Atomic publication](#naming-atomic-publication)). Derive every other file name from `path`
-(`path + ".json"`, `os.path.join(os.path.dirname(path), "figs", ...)`), never from the
-output folder or `reference_base`: reported files are moved to the same relative place in the
-output folder, a reported file outside the staging folder fails the unit, and unreported files
-are discarded. Writers that ignore `path` and write somewhere fixed cannot be published
-atomically and are not supported.
+by appending to it (`path + ".json"`, `os.path.join(path + ".figs", "plot.png")`), never from
+the output folder or `reference_base`. Reported files are moved to the same relative place in
+the output folder, and each must belong to the unit: the first component of its path
+(relative to the output folder) must be the unit's prefix `<reference_base basename>@<name>`
+followed by `.` (or an MNE split tail `-1`, `-2`, ...), or be exactly the prefix used as a
+folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, which every
+unit of the folder would share, fails the unit before anything is replaced. A reported file
+outside the staging folder also fails the unit, and unreported files are discarded. Writers
+that ignore `path` and write somewhere fixed cannot be published atomically and are not
+supported.
+
+```python
+from pathlib import Path
+
+def writer(path):
+    figs = Path(path + ".figs")  # x.vhdr@Clean.fif.figs/: owned by this unit
+    figs.mkdir()
+    report.save(path)
+    plot.savefig(figs / "psd.png")
+    return [path, str(figs / "psd.png")]
+```
 
 MNE splits recordings larger than `split_size` (2 GB by default) into `X.fif`, `X-1.fif`,
 `X-2.fif`, ...; the first part names the next, so the parts belong together. The built-in

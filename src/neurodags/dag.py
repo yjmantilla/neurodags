@@ -40,6 +40,7 @@ from neurodags.nodes import get_node
 from neurodags.outputs import (
     build_manifest,
     check_artifact_ownership,
+    file_fingerprint,
     make_staging_dir,
     manifest_artifacts,
     output_prefix,
@@ -920,15 +921,20 @@ def _save_final_artifacts(
                     exc_info=True,
                 )
                 raise
+        # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
+        # and mtime): a file another process replaces before our .done no longer matches.
+        staged_prints = [file_fingerprint(p) for paths in staged.values() for p in paths]
         written = publish_staged(staging, final_prefix, staged)
     finally:
         remove_staging_dir(staging)
+    finals = [p for paths in written.values() for p in paths]
     manifest = build_manifest(
         final_prefix,
         derivative_name,
         dataset=source_dataset,
         rel=source_rel,
         artifacts=written,
+        fingerprints=dict(zip(finals, staged_prints, strict=True)),
     )
     manifest_path = write_manifest(final_prefix, manifest)
     remove_markers(final_prefix, "error", "skip")

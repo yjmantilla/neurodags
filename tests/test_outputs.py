@@ -114,9 +114,13 @@ def test_manifest_format(tmp_path):
         "source",
         "artifacts",
         "companions",
+        "fingerprints",
         "written",
         "origin",
     ]
+    main_file = done.parent / "x0.txt@Fit_alpha-0p5_w-6.message.txt"
+    st = main_file.stat()
+    assert manifest["fingerprints"] == {main_file.name: [st.st_size, st.st_mtime_ns]}
     assert manifest["manifest_version"] == 1
     assert manifest["naming_version"] == 1
     assert manifest["derivative"] == "Fit_alpha-0p5_w-6"
