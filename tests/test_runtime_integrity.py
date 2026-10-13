@@ -675,6 +675,34 @@ def test_fingerprints_survive_metadata_preserving_copies_only(tmp_path):
     assert unit_state(prefix, "Fp").state == "done"
 
 
+def test_immediate_same_size_replacement_is_not_done(tmp_path):
+    """Review c823337 P2: fingerprints compare size and mtime_ns exactly; a same-size
+    replacement right after publication (sub-second mtime change) is not done."""
+    from neurodags.outputs import build_manifest, write_manifest
+
+    base = _source(tmp_path)
+    prefix = str(base) + "@Same"
+    Path(prefix + ".txt").write_text("111")
+    manifest = build_manifest(
+        prefix, "Same", dataset=None, rel=None, artifacts={".txt": [prefix + ".txt"]}
+    )
+    write_manifest(prefix, manifest)
+    assert unit_state(prefix, "Same").state == "done"
+    recorded = os.stat(prefix + ".txt").st_mtime_ns
+    deadline = time.monotonic() + 0.5
+    while True:  # replace until the filesystem clock ticks (well under one second)
+        Path(prefix + ".txt").write_text("999")
+        if os.stat(prefix + ".txt").st_mtime_ns != recorded or time.monotonic() > deadline:
+            break
+        time.sleep(0.001)
+    st = os.stat(prefix + ".txt")
+    assert st.st_size == 3
+    assert 0 < abs(st.st_mtime_ns - recorded) < 1_000_000_000
+    state = unit_state(prefix, "Same")
+    assert state.state == "incomplete"
+    assert "modified after publication" in state.problem
+
+
 # ---------------------------------------------------------------------------
 # Migrate never certifies an interrupted 0.4.0 run
 # ---------------------------------------------------------------------------
@@ -950,6 +978,8 @@ def test_argument_preparation_failure_marks_overwritten_parent_error(tmp_path):
     ("entry", "expected"),
     [
         ({"op": "move", "old": "/o/a@A.txt", "new": "/n/a@A.txt"}, ["/n/a@A.txt"]),
+        ({"op": "move-start", "old": "/o/a@A.txt", "new": "/n/a@A.txt"}, ["/n/a@A.txt"]),
+        ({"op": "apply-complete"}, []),
         ({"op": "mne-done", "new_parts": ["/n/a@A.fif", "/n/a@A-1.fif"]}, None),
         (
             {"op": "mne-staged", "new": "/n/a@A.fif", "parts": [["a@A.fif", 3, "x"]]},

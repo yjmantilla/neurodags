@@ -25,8 +25,8 @@ Completion (spec 6)
 -------------------
 A unit is done when ``<prefix>.done`` is a valid manifest: it parses, its
 ``naming_version`` and ``derivative`` match, every file it lists exists, and every file
-still matches its recorded fingerprint (size, and mtime within one second) when the manifest
-has ``fingerprints`` (see :func:`manifest_artifacts`). The manifest is written last and
+still matches its recorded fingerprint (size and ``mtime_ns``, compared exactly) when the
+manifest has ``fingerprints`` (see :func:`manifest_artifacts`). The manifest is written last and
 atomically, from the paths
 the artifact writers reported (:func:`writer_paths`), never from a glob. Files that match
 the prefix but have no valid manifest make the unit ``incomplete``.
@@ -397,6 +397,8 @@ def check_legacy_chained_outputs(
                     return True
         return False
 
+    from neurodags.iterators import is_input_path
+
     listed = {norm(f) for f in folders}
     found: list[str] = []
     for dirpath, source_part, path, name in suspects:
@@ -407,8 +409,10 @@ def check_legacy_chained_outputs(
             rel = os.path.relpath(dirpath, out_root)
             if rel == os.curdir or not rel.startswith(os.pardir):
                 real.append(os.path.normpath(os.path.join(source_root, rel, source_part)))
-        if any(os.path.isfile(r) for r in real):
-            continue  # a real source named with '&' (0.4.0 unit without .done yet)
+        if any(is_input_path(r) for r in real):
+            # A real source named with '&' (a file or a recording container directory,
+            # the inputs discovery accepts): a 0.4.0 unit without .done yet.
+            continue
         found.append(path)
     if found:
         shown = "\n      ".join(found[:5]) + (
@@ -737,11 +741,6 @@ def file_fingerprint(path: str) -> tuple[int, int]:
     return st.st_size, st.st_mtime_ns
 
 
-#: Fingerprint mtimes match when within this many nanoseconds (1 s): filesystems that keep
-#: only seconds, and copies made with ``rsync -a`` / ``cp -a``, still verify.
-FINGERPRINT_MTIME_TOLERANCE_NS = 1_000_000_000
-
-
 def _fingerprint_problem(fingerprints: Any, directory: str) -> str | None:
     if fingerprints is None:
         return None  # manifests written before fingerprints were recorded stay valid
@@ -761,8 +760,12 @@ def _fingerprint_problem(fingerprints: Any, directory: str) -> str | None:
         except OSError:
             changed.append(entry)
             continue
+        # Exact: any other size or mtime_ns (even a same-size replacement a few microseconds
+        # later) is a file this manifest does not identify. A copy that keeps nanosecond
+        # mtimes (``cp -a``/``rsync -a`` on Linux) verifies; a filesystem that truncates
+        # timestamps only causes a recompute, never a false hit.
         size, mtime_ns = value
-        if st.st_size != size or abs(st.st_mtime_ns - mtime_ns) >= FINGERPRINT_MTIME_TOLERANCE_NS:
+        if st.st_size != size or st.st_mtime_ns != mtime_ns:
             changed.append(entry)
     if changed:
         names = ", ".join(os.path.basename(e) for e in changed)
