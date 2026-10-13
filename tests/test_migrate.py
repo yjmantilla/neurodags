@@ -40,16 +40,53 @@ def _sources(root: Path, rels) -> list[str]:
     return out
 
 
+_FIF_BYTES: dict[str, bytes] = {}
+
+
+def _fif_bytes(seed: str) -> bytes:
+    """A real, tiny single-file Raw FIF whose data depend on *seed* (cached)."""
+    if seed not in _FIF_BYTES:
+        import tempfile
+        import zlib
+
+        mne = pytest.importorskip("mne")
+        np = pytest.importorskip("numpy")
+        rng = np.random.default_rng(zlib.crc32(seed.encode()))
+        raw = mne.io.RawArray(
+            rng.standard_normal((2, 50)) * 1e-5, mne.create_info(2, 100.0, "eeg"), verbose="error"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tiny_raw.fif"
+            raw.save(path, verbose="error")
+            _FIF_BYTES[seed] = path.read_bytes()
+    return _FIF_BYTES[seed]
+
+
 def _legacy_write(
-    derivs: Path, old_root: str, source: str, name: str, tail: str, content: str | None = None
+    derivs: Path,
+    old_root: str,
+    source: str,
+    name: str,
+    tail: str,
+    content: str | bytes | None = None,
 ) -> Path:
-    """Write one output exactly where 0.3.x put it (root from find_unique_root, CamelCase)."""
+    """Write one output exactly where 0.3.x put it (root from find_unique_root, CamelCase).
+
+    ``.fif`` artifacts are real (tiny) FIF recordings: migrate loads every FIF before
+    certifying it. *content* (text) then seeds the recording's data.
+    """
     rel = os.path.relpath(source, old_root)
     base = derivs / rel
     base = base.parent / base.name.replace("@", "&")
     path = Path(f"{base}@{snake_to_camel(name)}{tail}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content if content is not None else f"{name}{tail} of {rel}")
+    text = content if content is not None else f"{name}{tail} of {rel}"
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    elif tail == ".fif":
+        path.write_bytes(_fif_bytes(text))
+    else:
+        path.write_text(text)
     return path
 
 
@@ -531,6 +568,8 @@ def test_chained_unit_moved_before_its_manifest_is_completed_on_resume(tmp_path,
     calls = {"n": 0}
 
     def flaky_replace(src, dst, **kw):
+        if "linkprobe" in os.fspath(src):  # hard-link probe, not a move
+            return real_replace(src, dst, **kw)
         calls["n"] += 1
         if calls["n"] == 2:
             raise OSError("disk went away")
@@ -675,7 +714,9 @@ def test_mne_split_recording_is_rewritten_and_verified(tmp_path):
     assert np.array_equal(reloaded.get_data(), original.get_data())
     assert list(reloaded.annotations.description) == ["blink"]
     # The plain single-file .fif of the other unit was simply renamed.
-    assert Path(str(tmp_path / "derivatives" / f"{RELS[1]}@band_power.fif")).read_text() == "small"
+    assert Path(
+        str(tmp_path / "derivatives" / f"{RELS[1]}@band_power.fif")
+    ).read_bytes() == _fif_bytes("small")
 
 
 def test_mne_rewrite_failure_leaves_unit_in_place(tmp_path, monkeypatch):
@@ -770,7 +811,7 @@ def test_interrupted_apply_resumes(full_project, tmp_path, monkeypatch):
     calls = {"n": 0}
 
     def flaky_replace(src, dst, **kw):
-        if os.fspath(dst).endswith(".done"):  # manifest publication, not a move
+        if os.fspath(dst).endswith(".done") or "linkprobe" in os.fspath(src):
             return real_replace(src, dst, **kw)
         calls["n"] += 1
         if calls["n"] == 4:
@@ -952,7 +993,7 @@ def test_two_identical_old_outputs_keep_the_deeper_one(full_project, tmp_path):
         sources[0],
         "Clean",
         ".fif",
-        full.read_text(),
+        full.read_bytes(),
     )
     plan = _plan(pipe, tmp_path)
     assert plan.refusals == []
@@ -1367,12 +1408,18 @@ def test_two_contending_runs_never_both_hold_the_lock(tmp_path, stale):
             ctx.Process(target=_contend, args=(str(directory), barrier, queue, finished))
             for _ in "ab"
         ]
-        for proc in procs:
-            proc.start()
-        results = sorted(queue.get(timeout=30) for _ in procs)
-        finished.set()
-        for proc in procs:
-            proc.join(timeout=30)
+        try:
+            for proc in procs:
+                proc.start()
+            results = sorted(queue.get(timeout=30) for _ in procs)
+        finally:
+            finished.set()
+            for proc in procs:
+                if proc.pid is not None:
+                    proc.join(timeout=30)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join()
         assert results == (["refused", "refused"] if stale else ["acquired", "refused"])
 
 
@@ -1900,3 +1947,187 @@ def test_different_duplicate_of_a_migrated_keeper_is_still_refused(tmp_path):
     apply_migration(_plan(pipe, tmp_path))
     (tmp_path / "out/x.txt@CleanRaw.nc").write_text("different")
     assert any("different content" in r for r in _plan(pipe, tmp_path).refusals)
+
+
+# ---------------------------------------------------------------------------
+# Regressions (review 1858bbc, PR #62 round 3)
+# ---------------------------------------------------------------------------
+
+
+def test_single_fif_that_is_not_a_recording_gets_no_manifest(tmp_path):
+    """R1: a single-file '.fif' that does not load is never certified (fail closed)."""
+    pipe = _mini_project(tmp_path)
+    (tmp_path / "out/x.txt@Clean.fif").write_bytes(b"not a FIF recording")
+    result = apply_migration(_plan(pipe, tmp_path))
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state != "done"
+    assert len(result.recompute) == 1
+
+
+def test_single_fif_with_truncated_data_gets_no_manifest(tmp_path):
+    """R1: valid headers, last data buffer cut in half: loading fails, no .done."""
+    pytest.importorskip("mne")
+    from mne._fiff.constants import FIFF
+    from mne._fiff.open import fiff_open
+
+    pipe = _mini_project(tmp_path)
+    path = tmp_path / "out/x.txt@Clean.fif"
+    path.write_bytes(_fif_bytes("single"))
+    fid, _, directory = fiff_open(path)
+    fid.close()
+    last = [d for d in directory if d.kind == FIFF.FIFF_DATA_BUFFER][-1]
+    with open(path, "r+b") as handle:
+        handle.truncate(last.pos + 16 + last.size // 2)
+    result = apply_migration(_plan(pipe, tmp_path))
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state != "done"
+    assert len(result.recompute) == 1
+
+
+def test_valid_single_fif_is_certified(tmp_path):
+    pipe = _mini_project(tmp_path)
+    (tmp_path / "out/x.txt@Clean.fif").write_bytes(_fif_bytes("single"))
+    result = apply_migration(_plan(pipe, tmp_path))
+    assert result.recompute == []
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state == "done"
+
+
+def test_fif_inspection_failure_withholds_the_manifest(small_split, tmp_path, monkeypatch):
+    """R1: when MNE's split-chain inspection itself fails, the unit is not certified."""
+    import mne._fiff.open
+
+    pipe = _mini_project(tmp_path)
+    old = _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
+    for part in old[1:]:
+        os.unlink(part)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("inspection failed")
+
+    monkeypatch.setattr(mne._fiff.open, "_get_next_fname", broken)
+    monkeypatch.setattr(mne.io.fiff.raw, "_get_next_fname", broken)
+    result = apply_migration(_plan(pipe, tmp_path))
+    monkeypatch.undo()
+    assert unit_state(str(tmp_path / "out/sub/x.txt@Clean"), "Clean").state != "done"
+    assert len(result.recompute) == 1
+
+
+@pytest.mark.parametrize("code", ["EPERM", "EOPNOTSUPP", "EXDEV"])
+def test_filesystem_without_hard_links_is_refused_before_any_change(
+    full_project, tmp_path, monkeypatch, code
+):
+    """R2/R4: no fallback publication: without hard links the whole apply is refused."""
+    import errno
+
+    pipe, _ = full_project
+    plan = _plan(pipe, tmp_path)
+    before = _snapshot(tmp_path)
+
+    def no_links(src, dst, **kwargs):
+        raise OSError(getattr(errno, code), "hard links not supported")
+
+    monkeypatch.setattr(migrate.os, "link", no_links)
+    with pytest.raises(MigrationRefused, match="hard links do not work"):
+        apply_migration(plan)
+    monkeypatch.undo()
+    assert _snapshot(tmp_path) == before
+
+
+def test_configuration_lock_without_output_tree(tmp_path, monkeypatch):
+    """R3: two config-only applies with no output folder: the second waits for the lock."""
+    pipe = _mini_project(tmp_path)
+    (tmp_path / "out").rmdir()
+    first = _plan(pipe, tmp_path, renames=["Clean=First"])
+    second = _plan(pipe, tmp_path, renames=["Clean=Second"])
+    assert first.refusals == []
+    assert second.refusals == []
+    real_write = migrate._write_config
+    outcome = {}
+
+    def interleave(change):
+        try:
+            apply_migration(second)
+        except MigrationRefused as exc:
+            outcome["second"] = str(exc)
+        real_write(change)
+
+    monkeypatch.setattr(migrate, "_write_config", interleave)
+    apply_migration(first)
+    monkeypatch.undo()
+    assert "holds the lock" in outcome["second"]
+    text = pipe.read_text()
+    assert "First" in text
+    assert "Second" not in text
+    assert not list(tmp_path.glob(".*.migrate.lock"))
+    with pytest.raises(MigrationRefused, match="changed since the plan"):
+        apply_migration(second)
+
+
+@pytest.mark.parametrize("deleted", [1, 2, 3])
+def test_duplicate_of_a_keeper_interrupted_while_deleting_old_parts(
+    small_split, tmp_path, monkeypatch, deleted
+):
+    """R5: a recorded duplicate does not block resuming its keeper's old-part deletion."""
+    import shutil
+
+    pipe = _mini_project(tmp_path, "clean_raw")
+    dup = _place_split(small_split, tmp_path / "out/x.txt@CleanRaw.fif")
+    (tmp_path / "out/sub").mkdir()
+    keeper = []
+    for part in dup:
+        shutil.copyfile(part, tmp_path / "out/sub" / os.path.basename(part))
+        keeper.append(str(tmp_path / "out/sub" / os.path.basename(part)))
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    assert len(plan.units("duplicate")) == 1
+    real_unlink = os.unlink
+    count = {"n": 0}
+
+    def interrupt(path, *args, **kwargs):
+        out = real_unlink(path, *args, **kwargs)
+        if os.fspath(path) in keeper:
+            count["n"] += 1
+            if count["n"] == deleted:
+                raise _Crash(f"after deleting {deleted} old part(s)")
+        return out
+
+    monkeypatch.setattr(migrate.os, "unlink", interrupt)
+    with pytest.raises(_Crash):
+        apply_migration(plan)
+    monkeypatch.undo()
+    assert sum(os.path.exists(p) for p in keeper) == len(keeper) - deleted
+
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.refusals == []
+    apply_migration(resumed)
+    _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@clean_raw"), "clean_raw")
+    assert not any(os.path.exists(p) for p in keeper)
+    assert all(os.path.exists(p) for p in dup)  # the duplicate is left in place
+    again = _plan(pipe, tmp_path)
+    assert again.refusals == []
+    assert not again.has_work
+
+
+def test_torn_utf8_journal_tail_is_ignored_and_repaired(full_project, tmp_path):
+    """R6: an append cut inside a multi-byte character does not stop planning; the next
+    apply drops it before appending."""
+    pipe, _ = full_project
+    journal = tmp_path / "derivatives/.neurodags/migrate-journal.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"op":"start"}\n{"op":"move","old":"caf\xc3')
+    assert [e["op"] for e in read_journal(str(journal))] == ["start"]
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    apply_migration(plan)
+    lines = journal.read_bytes().split(b"\n")
+    assert lines[-1] == b""
+    assert all(json.loads(line) for line in lines[:-1])  # every line is a whole record
+    assert not _plan(pipe, tmp_path).has_work
+
+
+def test_damaged_journal_interior_is_a_clear_error(full_project, tmp_path):
+    """R6: corruption before the last line is not silently skipped."""
+    pipe, _ = full_project
+    journal = tmp_path / "derivatives/.neurodags/migrate-journal.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b'{"op":"start"}\n{"op":"mo\xff\n{"op":"end"}\n')
+    with pytest.raises(migrate.MigrationError, match="damaged at line 2"):
+        _plan(pipe, tmp_path)

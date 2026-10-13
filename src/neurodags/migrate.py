@@ -41,9 +41,12 @@ One pass converts both the configuration and the existing output tree:
 - **Manifests** (spec 10.4). Moved units get a ``.done`` with ``"origin": "migrate"`` when the
   derivative's set of artifact suffixes is known (the set decides completeness; the manifest
   lists every artifact of the unit).
-- **No overwrites, one run per tree.** Moves are ``os.link`` + ``os.unlink`` (an exclusive
-  claim of the new name without hard links). ``--apply`` holds ``migrate.lock`` next to each
-  tree's journal for its whole run; a lock is never taken over automatically.
+- **No overwrites, one run at a time.** Moves are ``os.link`` + ``os.unlink``; hard links are
+  required (probed before any change, no fallback). ``--apply`` holds a lock next to the
+  pipeline and ``migrate.lock`` next to each tree's journal for its whole run; a lock is
+  never taken over automatically.
+- **FIF artifacts** that were not re-saved, single files included, are loaded in full
+  before their ``.done``; any failure withholds it.
 
 Use :func:`plan_migration` (read-only), :func:`format_preview` and :func:`apply_migration`.
 The CLI wrapper is ``neurodags migrate``.
@@ -893,19 +896,40 @@ def _existing_ancestor(path: str) -> str:
 
 
 def read_journal(path: str) -> list[dict[str, Any]]:
-    """Entries of a migration journal (JSON Lines; a truncated last line is ignored)."""
-    entries: list[dict[str, Any]] = []
+    """Entries of a migration journal (JSON Lines).
+
+    Read as bytes and decoded per line. Only the last line may be incomplete (an append
+    interrupted mid-write, possibly inside a multi-byte character): it is ignored. Any
+    other unreadable line means the journal is damaged, and :class:`MigrationError` is
+    raised naming the file, since its history (which files a migration owns) cannot be
+    trusted.
+    """
     try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(entry, dict):
-                    entries.append(entry)
-    except OSError:
-        pass
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise MigrationError(f"cannot read the migration journal {path}: {exc}") from exc
+    lines = data.split(b"\n")
+    complete = data.endswith(b"\n")
+    entries: list[dict[str, Any]] = []
+    for number, raw in enumerate(lines, 1):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+        except ValueError:  # UnicodeDecodeError and JSONDecodeError
+            if number == len(lines) and not complete:
+                continue  # an interrupted final append
+            raise MigrationError(
+                f"the migration journal {path} is damaged at line {number} (not its last "
+                "line), so the files an interrupted migration owns cannot be told apart. "
+                "Restore the journal from a backup; move it away only when no migration of "
+                "this tree was interrupted."
+            ) from None
+        if isinstance(entry, dict):
+            entries.append(entry)
     return entries
 
 
@@ -1727,8 +1751,13 @@ def _plan_targets(plan: MigrationPlan) -> None:
                 other.secondary = True
             continue
         identity = [u for u in group if u.status == "identity"]
+        # A unit whose verified rewrite is being published or whose old parts are being
+        # deleted (journal mne-staged) is the keeper an earlier run chose.
+        active = [u for u in group if u.status == "move" and _in_transaction(plan, u)]
         if identity:
             keeper = identity[0]
+        elif active:
+            keeper = active[0]
         else:
             ranked = sorted(group, key=lambda u: len(u.old_dir or ""), reverse=True)
             keeper = ranked[0]
@@ -1938,6 +1967,14 @@ def _drop_link_leftovers(group: list[Unit]) -> list[Unit]:
     return kept
 
 
+def _in_transaction(plan: MigrationPlan, unit: Unit) -> bool:
+    """*unit* has an MNE rewrite whose verified copy was staged (journal ``mne-staged``)."""
+    return any(
+        _staged_txn(plan, paths[0], (unit.new_prefix or "") + tail) is not None
+        for tail, paths in unit.artifacts.items()
+    )
+
+
 def _recorded_duplicate(plan: MigrationPlan, keeper: Unit, other: Unit) -> bool:
     """*other* was found identical to *keeper* by an earlier run (journal ``duplicate``).
 
@@ -1945,7 +1982,7 @@ def _recorded_duplicate(plan: MigrationPlan, keeper: Unit, other: Unit) -> bool:
     again; *other*'s files must still match the fingerprints recorded then.
     """
     known = plan._duplicates.get(os.path.normcase(os.path.normpath(keeper.new_prefix or "")))
-    if not known or keeper.status != "identity":
+    if not known or not (keeper.status == "identity" or _in_transaction(plan, keeper)):
         return False
     files = other.files
     for path in files:
@@ -2416,12 +2453,29 @@ class ApplyResult:
         }
 
 
+def _drop_torn_tail(path: str) -> None:
+    """Cut an incomplete last line (an interrupted append) before appending (under the lock).
+
+    Otherwise the next record would be glued onto it and the damaged line would no longer
+    be the last one.
+    """
+    try:
+        with open(path, "r+b") as handle:
+            data = handle.read()
+            if not data or data.endswith(b"\n"):
+                return
+            handle.truncate(data.rfind(b"\n") + 1)
+    except FileNotFoundError:
+        return
+
+
 class _Journal:
     """Append-only JSON Lines record of completed operations (resume after interruption)."""
 
     def __init__(self, path: str, plan: MigrationPlan):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
+        _drop_torn_tail(path)
         self.handle = open(path, "a", encoding="utf-8")
         from neurodags import __version__
 
@@ -2490,15 +2544,16 @@ def _hostname() -> str:
         return ""
 
 
-def _acquire_lock(directory: str) -> tuple[str, str]:
-    """Create ``<directory>/migrate.lock`` exclusively; refuse when it exists.
+def _acquire_lock(directory: str, path: str | None = None) -> tuple[str, str]:
+    """Create ``<directory>/migrate.lock`` exclusively (or the lock file *path*); refuse
+    when it exists.
 
     Serializes ``--apply`` runs on one output tree. A lock is never taken over: a lock
     left by a killed run must be deleted by hand (the refusal says so). Returns the lock
     path and this run's token (only a lock with this token is released).
     """
     os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, LOCK_NAME)
+    path = path or os.path.join(directory, LOCK_NAME)
     token = uuid.uuid4().hex
     info = {
         "pid": os.getpid(),
@@ -2553,6 +2608,11 @@ def _release_lock(lock: tuple[str, str]) -> None:
         pass
 
 
+def _config_lock_path(config: str) -> str:
+    """``<folder>/.<file name>.migrate.lock``: serializes migrations of one configuration."""
+    return os.path.join(os.path.dirname(config), f".{os.path.basename(config)}.{LOCK_NAME}")
+
+
 def _lock_dirs(plan: MigrationPlan) -> list[str]:
     """Folders of every tree's lock (an output tree that does not exist yet has none)."""
     dirs = []
@@ -2565,41 +2625,18 @@ def _lock_dirs(plan: MigrationPlan) -> list[str]:
 
 # -- publication without replacing ----------------------------------------------------
 
-_NO_HARDLINK = {
-    errno.EPERM,
-    errno.EXDEV,
-    errno.EMLINK,
-    errno.ENOSYS,
-    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-    errno.EOPNOTSUPP,
-}
 
-
-def _link(src: str, dst: str) -> bool:
-    """Hard-link *src* as *dst* (``FileExistsError`` if *dst* exists); ``False`` when the
-    filesystem has no hard links."""
-    try:
-        os.link(src, dst, follow_symlinks=False)
-    except FileExistsError:
-        raise
-    except OSError as exc:
-        if exc.errno in _NO_HARDLINK:
-            return False
-        raise
-    return True
-
-
-def _claim(path: str) -> None:
-    """Create *path* empty and exclusively (``FileExistsError`` if it exists)."""
-    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+def _link(src: str, dst: str) -> None:
+    """Hard-link *src* as *dst*: ``FileExistsError`` if *dst* exists (never replaced)."""
+    os.link(src, dst, follow_symlinks=False)
 
 
 def _publish_move(old: str, new: str) -> None:
     """Move *old* to *new*; never replaces an existing *new* (``FileExistsError``).
 
-    ``os.link`` + ``os.unlink`` (an interruption in between leaves both names of one
-    file, which the next plan finishes); without hard links, *new* is claimed with
-    ``O_EXCL`` and only then replaced by *old*.
+    ``os.link`` + ``os.unlink``: an interruption in between leaves both names of one file,
+    which the next plan finishes. Hard links are required (checked by
+    :func:`_probe_hard_links` before anything is changed).
     """
     if os.path.lexists(new):
         if not _same_entry(old, new):
@@ -2609,28 +2646,64 @@ def _publish_move(old: str, new: str) -> None:
         else:
             os.rename(old, new)  # one entry, case-only rename (case-insensitive FS)
         return
-    if _link(old, new):
-        os.unlink(old)
-        return
-    _claim(new)
-    os.replace(old, new)
+    _link(old, new)
+    os.unlink(old)
 
 
 def _publish_copy(staged: str, dest: str) -> None:
     """Publish a staged file at *dest* without replacing anything (``FileExistsError``)."""
-    if _link(staged, dest):
-        os.unlink(staged)
-        return
-    _claim(dest)
-    try:
-        os.replace(staged, dest)
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-        shutil.copyfile(staged, dest)  # into our own claimed (empty) file
-        with open(dest, "rb") as handle:
-            os.fsync(handle.fileno())
-        os.unlink(staged)
+    _link(staged, dest)
+    os.unlink(staged)
+
+
+def _probe_hard_links(pairs: Iterable[tuple[str, str]]) -> list[str]:
+    """Check that hard links work from each source folder into each target folder.
+
+    One probe per pair of devices: a file is created in the (existing ancestor of the)
+    source folder, hard-linked into the target folder and both names removed. Returns
+    the problems (empty: every publication can be done without replacing files).
+    """
+    seen: set[tuple[int, int]] = set()
+    problems: list[str] = []
+    for src_dir, dst_dir in pairs:
+        src, dst = _existing_ancestor(src_dir), _existing_ancestor(dst_dir)
+        try:
+            key = (os.stat(src).st_dev, os.stat(dst).st_dev)
+        except OSError as exc:
+            problems.append(f"cannot inspect {src_dir} / {dst_dir}: {exc}")
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        tag = uuid.uuid4().hex
+        first = os.path.join(src, f".neurodags-linkprobe-{tag}")
+        second = os.path.join(dst, f".neurodags-linkprobe-{tag}-2")
+        try:
+            os.close(os.open(first, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            os.link(first, second, follow_symlinks=False)
+        except OSError as exc:
+            problems.append(
+                f"hard links do not work from {src} to {dst} ({exc}). migrate publishes "
+                "every file with a hard link so that it can never replace an existing file; "
+                "copy the output tree onto a filesystem with hard links (ext4, xfs, btrfs, "
+                "APFS, NTFS, ...) and migrate it there."
+            )
+        finally:
+            for probe in (second, first):
+                try:
+                    os.unlink(probe)
+                except OSError:
+                    pass
+    return problems
+
+
+def _publication_pairs(plan: MigrationPlan) -> list[tuple[str, str]]:
+    """(source folder, target folder) of every planned move and MNE publication."""
+    pairs = []
+    for unit in plan.units("move"):
+        pairs += [(os.path.dirname(o), os.path.dirname(n)) for o, n in unit.moves]
+        pairs += [(os.path.dirname(r.staging), os.path.dirname(r.new_path)) for r in unit.mne]
+    return list(dict.fromkeys(pairs))
 
 
 # -- MNE recordings ----------------------------------------------------------------------
@@ -2664,53 +2737,33 @@ def _recording_shape(path: str) -> tuple[str, list[int]]:
     return kind, _shape(kind, recording)
 
 
-def _next_part(path: str) -> str | None:
-    """The next split part a FIF file refers to (``None``: none, or not a readable FIF)."""
-    try:
-        from pathlib import Path
-
-        from mne._fiff.open import _get_next_fname, fiff_open
-
-        fid, tree, _ = fiff_open(Path(path), verbose="error")
-        with fid:
-            found = _get_next_fname(fid, Path(path), tree)
-    except Exception:
-        return None
-    return os.fspath(found) if found is not None else None
-
-
 def _verify_recording(files: Sequence[str], expected: Sequence[Any] | None) -> str | None:
     """Why the FIF artifact *files* is not a complete, loadable recording (``None``: it is).
 
-    A single file must not refer to a next part. A split recording is loaded in full
-    (every data buffer is read); a Raw must have read exactly the listed parts, and the
-    data shape must equal *expected* (``[kind, shape]`` recorded before it was moved).
+    Every FIF artifact, single file or split, is loaded in full (every data buffer is
+    read); any failure withholds the ``.done`` (fail closed). A Raw must have read exactly
+    the listed files (a single file that refers to a missing next part fails to load), and
+    the data shape must equal *expected* (``[kind, shape]`` recorded before a move).
     """
-    if len(files) == 1:
-        following = _next_part(files[0])
-        if following is not None:
-            return (
-                f"{files[0]} is the first part of a split recording whose next part "
-                f"{following} is missing"
-            )
-        return None
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             kind, recording = _read_fif(files[0], preload=True)
+        shape = _shape(kind, recording)
+        if kind == "raw":
+            listed = {os.path.normcase(os.path.abspath(f)) for f in files}
+            read = {os.path.normcase(os.path.abspath(os.fspath(f))) for f in recording.filenames}
+            if read != listed:
+                return f"recording {files[0]} consists of other files than listed"
+        del recording
     except Exception as exc:
-        return f"split recording {files[0]} does not load: {exc}"
-    if kind == "raw":
-        listed = {os.path.normcase(os.path.abspath(f)) for f in files}
-        read = {os.path.normcase(os.path.abspath(os.fspath(f))) for f in recording.filenames}
-        if read != listed:
-            return f"split recording {files[0]} consists of other parts than listed"
+        return f"recording {files[0]} does not load: {exc}"
     if expected:
         want_kind, want_shape = expected
-        if kind != want_kind or _shape(kind, recording) != list(want_shape):
+        if kind != want_kind or shape != list(want_shape):
             return (
-                f"split recording {files[0]} has shape {_shape(kind, recording)}, the "
-                f"recording before the move had {list(want_shape)}"
+                f"recording {files[0]} has shape {shape}, the recording before the move had "
+                f"{list(want_shape)}"
             )
     return None
 
@@ -3073,11 +3126,20 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
     # until the configuration files are written.
     locks: list[tuple[str, str]] = []
     try:
+        # The configuration's own lock first (held even when no output tree exists yet),
+        # then every tree's.
+        configs = [plan.pipeline] + [c.path for c in plan.config_changes]
+        for config in dict.fromkeys(configs):
+            locks.append(_acquire_lock(os.path.dirname(config), _config_lock_path(config)))
         for directory in _lock_dirs(plan):
             locks.append(_acquire_lock(directory))
         problems = _recheck(plan)
         if problems:
             raise MigrationRefused([*problems, "plan again (preview) and re-run --apply"])
+        # Hard links are required: checked before anything is changed.
+        problems = _probe_hard_links(_publication_pairs(plan))
+        if problems:
+            raise MigrationRefused(problems)
         for tree, units in work:
             journal = _Journal(tree.journal, plan)
             result.journals.append(tree.journal)

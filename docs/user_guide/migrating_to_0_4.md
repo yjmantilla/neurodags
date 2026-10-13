@@ -168,8 +168,8 @@ changes, migrate:
    raw, first sample, length and annotations (for epochs: events, event ids and times) match;
    the size and SHA-256 of every staged part go to the journal;
 4. publishes each part under its new name with a hard link (`os.link`), which fails instead of
-   replacing a file that already exists there. Without hard links (some network or FAT
-   filesystems) the name is first claimed with an exclusive create;
+   replacing a file that already exists there (hard links are required, see
+   [Safety and resuming](#safety-and-resuming));
 5. only then deletes the old parts. The new parts are listed in the unit's `.done`.
 
 If the check fails, the staged copy is removed, the old recording stays where it is, and the
@@ -186,8 +186,11 @@ headers are read (a recording that does not open is left in place) and the compl
 list, destinations and data shape are written to the journal, once per recording, so any
 number of interrupted runs rejoin the parts across both folders. Before its `.done` is
 written the recording is loaded in full (every data buffer read): MNE must read exactly the
-listed parts, and the data shape must equal the one recorded before the move. A single FIF
-file that refers to a next part (its continuations are missing) is not certified either.
+listed parts, and the data shape must equal the one recorded before the move.
+
+Every FIF artifact that was not re-saved, single files included, is loaded in full with MNE
+before its unit gets a `.done`; if loading fails for any reason (not a FIF file, truncated
+data, a missing next part, an MNE error) the unit gets no `.done` and is recomputed.
 
 ## Manifests for migrated outputs
 
@@ -200,7 +203,8 @@ for most derivatives) is complete for the unit. That set only decides completene
 - units missing an artifact of that set (a partial 0.3.x write);
 - units with an `.error` marker;
 - every unit of a derivative whose two most common sets tie;
-- FIF recordings that do not load completely (a missing, truncated or broken part).
+- FIF artifacts (single or split) that do not load completely with MNE (a missing,
+  truncated or broken file).
 
 Units with a `.skip` marker keep it (status `skipped`). `--no-synthesize` writes no
 manifests at all, so every migrated unit is recomputed.
@@ -326,7 +330,9 @@ Nothing is applied while any of these remains:
 | A derivative name is invalid in 0.4.0 (`.`, `@`, spaces, `Clean` + `Clean-1`, ...) | Rename it with `--map OLD=NEW`. |
 | Two derivatives share an on-disk token (`band_power` and `BandPower`) | Rename or remove one before migrating. |
 | `--map OLD=NEW` would give two derivatives the same name (`NEW` is already another definition, also ignoring case) | Choose another `NEW`; two definitions would otherwise collapse into one and one's outputs would be taken as the other's. |
-| Another `--apply` holds `<derivatives_path>/.neurodags/migrate.lock` (the refusal shows its pid, host and start time) | Wait for it to finish. If no migrate is running on that tree (it was killed, or the machine restarted), delete the lock file and run again. A lock is never removed automatically. |
+| Another `--apply` holds `<derivatives_path>/.neurodags/migrate.lock` or `.<pipeline file>.migrate.lock` next to the pipeline (the refusal shows its pid, host and start time) | Wait for it to finish. If no migrate is running (it was killed, or the machine restarted), delete the lock file named in the refusal and run again. A lock is never removed automatically. |
+| Hard links do not work on the output tree's filesystem (some network, FAT or exFAT filesystems) | Copy the tree onto a filesystem with hard links and migrate it there. Checked before anything is changed. |
+| The migration journal is damaged before its last line | Restore it from a backup; move it away only when no migration of that tree was interrupted. |
 | A file at the new name of a re-saved MNE recording is not this migration's verified copy | Move it away (the verified copy waits in `.neurodags/staging/`) and run again. |
 | The new name of an MNE split recording differs only in case and the filesystem ignores case | Choose a `--map` name that differs beyond case (re-saving in place would destroy the old recording). |
 | Two datasets share a `derivatives_path` without distinct `derivatives_subdir` | Add `derivatives_subdir` to the datasets in the 0.3.x file, then migrate (their outputs move into the subfolders). |
@@ -334,23 +340,31 @@ Nothing is applied while any of these remains:
 | A `.bak-0.3` backup already exists with other content | Move the old backup away. |
 | Datasets partly migrated (`source_root` on some only) | Finish them by hand or restore the 0.3.x file. |
 
+(safety-and-resuming)=
+
 ## Safety and resuming
 
 - The preview reads only; `--apply` re-checks every precondition (old files still there,
   targets still free, including every part name of a re-saved MNE recording, configuration
   unchanged since the plan) before touching anything. It never replaces an existing file:
-  moves are `os.link` then `os.unlink` (without hard links: an exclusive create of the new
-  name, then `os.replace` onto it), and MNE re-saves are staged and published the same way.
-  A file that appears at a target during the run stops it, untouched; run again to finish.
-- `--apply` holds a lock file, `migrate.lock` next to each tree's journal, for its whole run,
-  also when only configuration files change: a second `neurodags migrate --apply` on the same
-  output tree is refused until the first finishes. The lock is never taken over or removed
+  moves are `os.link` then `os.unlink`, and MNE re-saves are staged and published the same
+  way. Hard links are therefore required: before changing anything, `--apply` creates and
+  hard-links a probe file between the folders involved (removed right away) and refuses the
+  whole run when that fails; there is no copy fallback. A file that appears at a target
+  during the run stops it, untouched; run again to finish.
+- `--apply` holds lock files for its whole run: `.<pipeline file>.migrate.lock` next to the
+  pipeline (and next to a separate datasets YAML it rewrites), also when only configuration
+  files change or no output folder exists yet, and `migrate.lock` next to each tree's
+  journal. A second `neurodags migrate --apply` on the same configuration or output tree is
+  refused until the first finishes. The lock is never taken over or removed
   automatically; after a killed run, delete it by hand (the refusal names it). It serializes
   migrate runs only; do not run the pipeline on a tree while it is migrated.
 - Every completed operation is appended to
   `<derivatives_path>/.neurodags/migrate-journal.json` (JSON Lines; for datasets without
-  `derivatives_path`, `.neurodags/` next to the pipeline). If a run is interrupted, at any
-  point and any number of times, run the same command again: it scans the tree, continues
+  `derivatives_path`, `.neurodags/` next to the pipeline). An append cut short by an
+  interruption (the journal's last line) is ignored and removed before the next append. If
+  a run is interrupted (an exception, Ctrl-C or a killed process; power loss is not
+  tested), at any point and any number of times, run the same command again: it scans the tree, continues
   the remaining moves (a file left with both its old and its new name finishes its move),
   completes half-moved units, rejoins split recordings from the journal and publishes or
   redoes an interrupted MNE rewrite. Files
