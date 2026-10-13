@@ -891,14 +891,18 @@ def _two_dataset_files(p, names=("shown", "actual")):
                 {"id": 1, "node": "dummy", "args": {"param1": "id.0"}},
             ],
         }
-        for n in ("A", "B")
+        for n in ("A", "B", "C")
     }
     # Same relative name in two places: cwd/datasets.yml and cfg/datasets.yml.
     (p / "datasets.yml").write_text(_yaml.safe_dump(ds(names[0])))
     (p / "cfg" / "datasets.yml").write_text(_yaml.safe_dump(ds(names[1])))
     (p / "cfg" / "pipeline.yml").write_text(
         _yaml.safe_dump(
-            {"naming_version": 1, "DerivativeDefinitions": defs, "DerivativeList": ["A", "B"]}
+            {
+                "naming_version": 1,
+                "DerivativeDefinitions": defs,
+                "DerivativeList": ["A", "B", "C"],
+            }
         )
     )
 
@@ -927,6 +931,7 @@ class TestConfigTabExecutesWhatItShows:
                 assert _artifacts(tmp_path) == [
                     "shown-out/x.txt@A.message.txt",
                     "shown-out/x.txt@B.message.txt",
+                    "shown-out/x.txt@C.message.txt",
                 ]
 
         _run(_())
@@ -943,13 +948,29 @@ class TestConfigTabExecutesWhatItShows:
                 app.query_one("#datasets-path-input", Input).value = "datasets.yml"
                 app._handle_load_config()
                 status = str(app.query_one("#config-status", Static).render())
-                assert "Error" in status and "not found" in status
-                assert app._config is None and app._datasets_path is None
+                assert "Error" in status
+                assert "not found" in status
+                assert app._config is None
+                assert app._datasets_path is None
 
         _run(_())
 
-    @pytest.mark.parametrize("value", ["A B", "A,B", " A ,  B ", "A\tB"])
-    def test_dataframe_filter_accepts_whitespace_and_commas(self, tmp_path, monkeypatch, value):
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("A B", {"A", "B"}),
+            ("A,B", {"A", "B"}),
+            (" A ,  B ", {"A", "B"}),
+            ("A\tB", {"A", "B"}),
+            ("B", {"B"}),
+            ("", {"A", "B", "C"}),  # blank: every for_dataframe derivative
+            ("  ", {"A", "B", "C"}),
+        ],
+    )
+    def test_dataframe_filter_selects_exactly_the_named_derivatives(
+        self, tmp_path, monkeypatch, value, expected
+    ):
+        # C is computed and eligible too: ignoring the filter would include it.
         monkeypatch.chdir(tmp_path)
         _two_dataset_files(tmp_path)
 
@@ -963,6 +984,7 @@ class TestConfigTabExecutesWhatItShows:
                 app.query_one("#df-derivatives", Input).value = value
                 await app._assemble_dataframe()
                 assert app._df is not None
-                assert {"A.message.txt", "B.message.txt"} <= set(app._df.columns)
+                columns = {c for c in app._df.columns if c.endswith(".message.txt")}
+                assert columns == {f"{d}.message.txt" for d in expected}
 
         _run(_())

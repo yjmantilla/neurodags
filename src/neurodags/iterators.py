@@ -11,6 +11,7 @@ from neurodags.loggers import get_logger
 from neurodags.utils import (
     DatasetConfigError,
     effective_derivatives_base,
+    lexical_path_key,
     relative_to_source_root,
     resolve_dataset_field,
 )
@@ -141,6 +142,26 @@ def find_split_continuations(files: list[str]) -> set[str]:
     return drop
 
 
+#: Suffixes (matched case-insensitively) of *directories* that are one recording each,
+#: read by MNE from the directory itself: CTF (``.ds``, :func:`mne.io.read_raw_ctf`) and
+#: EGI MFF (``.mff``, :func:`mne.io.read_raw_egi`). Discovery returns such a directory
+#: as one input and never the files inside it; other directories are never inputs.
+RECORDING_CONTAINER_EXTENSIONS: tuple[str, ...] = (".ds", ".mff")
+
+
+def is_recording_container(path: str) -> bool:
+    """Whether *path* is a directory named like a recording container (see
+    :data:`RECORDING_CONTAINER_EXTENSIONS`). Symbolic links are followed for the check."""
+    name = os.path.basename(path.rstrip("/" + os.sep)).lower()
+    return name.endswith(RECORDING_CONTAINER_EXTENSIONS) and os.path.isdir(path)
+
+
+def is_input_path(path: str) -> bool:
+    """Whether *path* can be an input: a file (or a symbolic link to one) or a recording
+    container directory (:func:`is_recording_container`)."""
+    return os.path.isfile(path) or is_recording_container(path)
+
+
 def get_files_from_pattern(
     pattern,
     recursive: bool = True,
@@ -168,9 +189,12 @@ def get_files_from_pattern(
     Returns
     -------
     list of str
-        The matching *files* (directories are never returned; symbolic links to files
-        are, under their own path), lexically normalized (:func:`os.path.normpath`, no
-        symlink resolution) and without duplicates, in glob order.
+        The matching inputs, lexically normalized (:func:`lexical_path_key`, no symlink
+        resolution) and without duplicates, in glob order: files (symbolic links to files
+        under their own path) and recording containers
+        (:data:`RECORDING_CONTAINER_EXTENSIONS`, e.g. a CTF ``.ds`` directory). Other
+        directories are never returned, nor is anything inside a matched container (a
+        broad ``raw/**/*`` yields ``x.ds`` once, not its inner files).
     """
 
     log.debug("get_files_from_pattern: called", pattern=pattern, recursive=recursive)
@@ -179,21 +203,30 @@ def get_files_from_pattern(
     # pathnames for the same file. ``realpath`` is never used: the lexical path is the
     # input's identity (spec 4.1).
     matches = list(
-        dict.fromkeys(os.path.normpath(f) for f in glob.glob(pattern, recursive=recursive))
+        dict.fromkeys(lexical_path_key(f) for f in glob.glob(pattern, recursive=recursive))
     )
-    # Inputs are files: a broad pattern (``raw/**/*``) also matches directories.
-    files = [f for f in matches if os.path.isfile(f)]
+    # Inputs are files and recording containers: a broad pattern (``raw/**/*``) also
+    # matches organizational directories (never inputs) and the inside of containers
+    # (part of the container's single input).
+    containers = [f for f in matches if is_recording_container(f)]
+    prefixes = tuple(c.rstrip(os.sep) + os.sep for c in containers)
+    files = [
+        f
+        for f in matches
+        if (f in containers or os.path.isfile(f)) and not (prefixes and f.startswith(prefixes))
+    ]
     log.debug(
-        "get_files_from_pattern: found files",
+        "get_files_from_pattern: found inputs",
         count=len(files),
-        skipped_non_files=len(matches) - len(files),
+        containers=len(containers),
+        skipped=len(matches) - len(files),
     )
 
     # Apply exclude filter if provided (both sides normalized the same way)
     if exclude_filter:
         log.debug("get_files_from_pattern: applying exclude filter", exclude_filter=exclude_filter)
         excluded_files = {
-            os.path.normpath(f) for f in glob.glob(exclude_filter, recursive=recursive)
+            lexical_path_key(f) for f in glob.glob(exclude_filter, recursive=recursive)
         }
         files = [f for f in files if f not in excluded_files]
         log.debug("get_files_from_pattern: files after exclusion", count=len(files))
@@ -369,7 +402,7 @@ def output_tree_exclusions(
             continue
         if not derivatives_path:
             continue
-        derivatives_path = os.path.normpath(derivatives_path)
+        derivatives_path = lexical_path_key(derivatives_path)
         reserved += [
             os.path.join(derivatives_path, "code"),
             os.path.join(derivatives_path, ".neurodags"),
@@ -378,7 +411,7 @@ def output_tree_exclusions(
             base = effective_derivatives_base(derivatives_path, cfg.derivatives_subdir)
         except ValueError:
             base = derivatives_path
-        own[name] = os.path.normpath(base)
+        own[name] = lexical_path_key(base)
     result: dict[str, list[str]] = {}
     for name, cfg in datasets.items():
         dirs = list(dict.fromkeys(reserved))
@@ -387,7 +420,7 @@ def output_tree_exclusions(
                 root = resolve_dataset_field(cfg, "source_root", mount_point)
             except (ValueError, KeyError):
                 root = None
-            root = os.path.normpath(root) if root else None
+            root = lexical_path_key(root) if root else None
             if root is None or not (own[name] == root or _is_below(root, own[name])):
                 dirs.append(own[name])
         result[name] = dirs
@@ -415,10 +448,10 @@ def output_tree_warnings(
             continue
         if not root or not base:
             continue
-        root, base = os.path.normpath(root), os.path.normpath(base)
+        root, base = lexical_path_key(root), lexical_path_key(base)
         if not _is_below(base, root):
             continue
-        if exclude and os.path.normpath(exclude).startswith(base.rstrip(os.sep) + os.sep):
+        if exclude and lexical_path_key(exclude).startswith(base.rstrip(os.sep) + os.sep):
             continue
         warnings.append(
             f"datasets.{name}: source_root {root!r} contains this dataset's own outputs "
@@ -497,7 +530,7 @@ def _discover_dataset(
     excluded_dirs = list(excluded_dirs)
     n_excluded = 0
     for f in files:
-        path = os.path.normpath(f)
+        path = lexical_path_key(f)
         if any(path == d or _is_below(path, d) for d in excluded_dirs):
             n_excluded += 1
             continue
@@ -513,7 +546,7 @@ def _discover_dataset(
         more = f" (and {len(outside) - 3} more)" if len(outside) > 3 else ""
         problems.append(
             f"datasets.{dataset_name}: {len(outside)} discovered file(s) are not inside "
-            f"source_root {os.path.normpath(source_root)!r}: {shown}{more}. Every discovered "
+            f"source_root {lexical_path_key(source_root)!r}: {shown}{more}. Every discovered "
             "file must lie below its dataset's source_root; fix file_pattern or source_root."
         )
     if n_excluded:
@@ -590,7 +623,7 @@ def discover_inputs(
                     dataset=dataset_name,
                 )
             continue
-        source_roots[dataset_name] = os.path.normpath(
+        source_roots[dataset_name] = lexical_path_key(
             resolve_dataset_field(dataset_config, "source_root", mount_point)
         )
         if max_files_per_dataset is not None:
@@ -763,6 +796,7 @@ def load_inputs(
 
     roots: dict[str, str] = {}
     entries: list[InputEntry] = []
+    not_inputs: list[str] = []
     for index, dataset, rel in rows:
         if dataset not in roots:
             root = resolve_dataset_field(datasets[dataset], "source_root", mount_point)
@@ -770,9 +804,19 @@ def load_inputs(
                 raise DatasetConfigError(
                     [f"datasets.{dataset}.source_root is required (since 0.4.0)"]
                 )
-            roots[dataset] = os.path.normpath(root)
+            roots[dataset] = lexical_path_key(root)
         path = os.path.join(roots[dataset], *rel.split("/"))
+        if os.path.exists(path) and not is_input_path(path):
+            # Same rule as discovery; never silently dropped or renumbered.
+            not_inputs.append(f"{index} ({dataset}: {rel})")
         entries.append(InputEntry(index, dataset, rel, path, missing=not os.path.exists(path)))
+    if not_inputs:
+        raise InputsFileError(
+            f"{inputs_file}: listed entr{'y is' if len(not_inputs) == 1 else 'ies are'} not "
+            f"an input (a directory that is not a recording container "
+            f"{'/'.join(RECORDING_CONTAINER_EXTENSIONS)}): {', '.join(not_inputs)}. Fix or "
+            "regenerate the list with 'neurodags inputs'."
+        )
 
     # One discovery pass, only to report files the list does not contain.
     discovered = discover_inputs(

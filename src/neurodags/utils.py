@@ -338,10 +338,25 @@ def suggest_source_root(file_pattern: str) -> str | None:
     return f"{drive}{sep if absolute else ''}{joined}"
 
 
+def lexical_path_key(path: PathLike) -> str:
+    """The lexical identity of *path*: the key discovery, exclusions and containment compare.
+
+    :func:`os.path.normpath` (``.``/``..`` components and repeated separators removed;
+    symbolic links are never resolved). On POSIX, a leading ``//`` (which ``normpath``
+    keeps, as POSIX leaves its meaning to the implementation) is also reduced to ``/``:
+    Linux and macOS treat it as the root. Windows paths, UNC shares included, are only
+    ``normpath``-ed.
+    """
+    norm = os.path.normpath(os.fspath(path))
+    if os.name != "nt" and norm.startswith("//"):
+        norm = "/" + norm.lstrip("/")
+    return norm
+
+
 def relative_to_source_root(path: PathLike, source_root: PathLike) -> str:
     """Return *path* relative to *source_root*, lexically (spec §1.2, §4.1).
 
-    Both are normalized with :func:`os.path.normpath` (never ``realpath``). The result
+    Both are normalized with :func:`lexical_path_key` (never ``realpath``). The result
     is non-empty and has no ``..`` component.
 
     Raises
@@ -350,8 +365,8 @@ def relative_to_source_root(path: PathLike, source_root: PathLike) -> str:
         If *path* does not lie strictly below *source_root* (outside it, equal to it, or
         on another drive). The message names the file.
     """
-    norm_path = os.path.normpath(os.fspath(path))
-    norm_root = os.path.normpath(os.fspath(source_root))
+    norm_path = lexical_path_key(path)
+    norm_root = lexical_path_key(source_root)
     try:
         rel: str | None = os.path.relpath(norm_path, norm_root)
     except ValueError:  # different drives on Windows

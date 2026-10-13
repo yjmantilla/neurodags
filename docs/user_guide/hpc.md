@@ -89,7 +89,9 @@ The selection given to `slurm-script` is carried into every generated command an
 into the script as an absolute path) is passed to `neurodags inputs`/`count-inputs` and as
 `datasets_configuration=` to `run_pipeline`, and `--derivative` limits what the workers run
 (per-file workers pass `derivatives=[...]`; flat and chained arrays only list the selected
-derivatives).
+derivatives). Paths are shell-quoted, and the Python part of each worker is a quoted heredoc
+(`python - "$PIPELINE" ... <<'EOF'`) that reads them from `sys.argv`, so unusual file names
+(spaces, quotes, `$`) reach `run_pipeline` unchanged.
 
 ### Counting source files
 

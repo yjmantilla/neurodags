@@ -292,7 +292,10 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   counted and ran the pipeline's own datasets, and the per-file worker ran the whole
   `DerivativeList`. Every template now passes the resolved `-d` (absolute) to `neurodags
   inputs`/`count-inputs` and as `datasets_configuration=`, and the per-file worker passes
-  `derivatives=[...]`. Regenerate scripts made with `-d` or `--derivative`.
+  `derivatives=[...]`. Pipeline and datasets paths are now shell-quoted and reach the
+  workers as arguments of a quoted heredoc (never interpolated into shell or Python source),
+  so a name with spaces, quotes, `$` or backquotes runs the intended pipeline. Regenerate
+  scripts made with `-d` or `--derivative`, or for such paths.
 - **The TUI showed one datasets YAML and ran another**: a relative override typed in the Config
   tab was read against the current directory for the summary but against the pipeline's
   directory when running. It is now resolved like `-d` (current directory), stored absolute and
@@ -305,12 +308,15 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   exits `1`. The TUI Status tab counts them as errored. Empty discovery still succeeds.
 - **Discovery fixes** (spec §8): a pattern matching a file more than once (`raw/**/**/*.fif`)
   no longer drops the entry file of a BIDS split recording; `exclude_pattern` now matches other
-  spellings of the same path (`raw/./**`, `//`, `..`; lexical, symlinks are not resolved); and
-  only files are inputs: directories matched by a broad pattern (`raw/**/*`), including the
-  dataset's own output folder, are no longer enumerated. **This changes indices** for
-  configurations whose pattern matched directories; regenerate frozen lists (`neurodags
-  inputs`) for them. Directory-format recordings (such as CTF `.ds`, EGI `.mff`) are not
-  discovered as inputs.
+  spellings of the same path (`raw/./**`, `//`, `..`, a leading `//` on POSIX; lexical,
+  symlinks are not resolved); and inputs are files or recording containers only: a directory
+  is an input only when its name ends in `.ds` (CTF) or `.mff` (EGI), case-insensitively
+  (`neurodags.iterators.RECORDING_CONTAINER_EXTENSIONS`), and then as one input whose inner
+  files are never inputs themselves. Other directories matched by a broad pattern
+  (`raw/**/*`), including the dataset's own output folder, are no longer enumerated, and a
+  frozen list naming such a directory is refused. **This changes indices** for configurations
+  whose pattern matched ordinary directories or the inside of `.ds`/`.mff` recordings;
+  regenerate frozen lists (`neurodags inputs`) for them.
 - **TUI DataFrame filter**: derivative names are whitespace-separated as specified (`A B`);
   commas are still accepted.
 

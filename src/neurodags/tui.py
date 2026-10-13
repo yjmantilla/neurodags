@@ -463,7 +463,15 @@ class NeuroDagsApp(App):
         table.add_columns(*[str(c) for c in result.columns])
         for _, row in result.iterrows():
             table.add_row(*[str(v) for v in row])
-        self.notify(f"Dry run complete: {len(result)} rows.")
+        n_failed = int(result["planning_error"].notna().sum()) if "planning_error" in result else 0
+        if n_failed:
+            self.notify(
+                f"Dry run: {n_failed} of {len(result)} unit(s) could not be planned "
+                "(see the planning_error column).",
+                severity="error",
+            )
+        else:
+            self.notify(f"Dry run complete: {len(result)} rows.")
 
     # ------------------------------------------------------------------
     # Run pipeline

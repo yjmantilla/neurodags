@@ -6,6 +6,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,7 @@ from neurodags.iterators import (
     write_inputs_file,
 )
 from neurodags.orchestrators import build_derivative_dataframe, run_pipeline
-from neurodags.utils import DatasetConfigError
+from neurodags.utils import DatasetConfigError, lexical_path_key
 
 
 def _touch(path: Path) -> Path:
@@ -118,7 +120,7 @@ def test_duplicate_glob_hits_keep_bids_split_entry(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    "file_pattern, exclude_pattern",
+    ("file_pattern", "exclude_pattern"),
     [("./**/*.txt", "**/*.txt"), ("**/*.txt", "./**/*.txt"), ("**/*.txt", "sub//../sub/*.txt")],
 )
 def test_exclude_pattern_matches_equivalent_spellings(
@@ -167,6 +169,132 @@ def test_discovery_keeps_symlinked_files_under_their_lexical_path(tmp_path: Path
     # A symlink to a directory is not an input itself.
     ds.file_pattern = str(raw / "*")
     assert _rels({"d": ds}) == []
+
+
+@pytest.fixture
+def recordings(tmp_path: Path) -> Path:
+    """CTF ``.ds`` and EGI ``.mff`` recordings (directories), a file and a plain folder."""
+    raw = tmp_path / "raw"
+    _touch(raw / "sub-01_task-rest_meg.ds" / "sub-01_task-rest_meg.meg4")
+    _touch(raw / "sub-01_task-rest_meg.ds" / "hz.ds" / "hz.meg4")  # nested: still inside
+    _touch(raw / "sub-02_eeg.mff" / "signal1.bin")
+    _touch(raw / "UPPER.DS" / "x.meg4")  # extensions are case-insensitive
+    _touch(raw / "plain.vhdr")
+    _touch(raw / "sub" / "x.txt")
+    _touch(raw / "notes.dsx" / "y.txt")  # not a container: an ordinary folder
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("**/*.ds", ["sub-01_task-rest_meg.ds"]),  # the glob itself is case-sensitive
+        ("*.mff", ["sub-02_eeg.mff"]),
+        (
+            "**/*",
+            [
+                "UPPER.DS",
+                "notes.dsx/y.txt",
+                "plain.vhdr",
+                "sub-01_task-rest_meg.ds",
+                "sub-02_eeg.mff",
+                "sub/x.txt",
+            ],
+        ),
+        ("**/*.vhdr", ["plain.vhdr"]),
+    ],
+)
+def test_recording_containers_are_single_inputs(recordings: Path, pattern, expected):
+    # Containers are one input each (never their inner files); other folders are no input.
+    assert _rels({"d": _dataset(recordings, pattern)}) == expected
+
+
+def test_recording_container_constant():
+    assert iterators.RECORDING_CONTAINER_EXTENSIONS == (".ds", ".mff")
+
+
+def test_output_root_named_like_a_container_is_not_an_input(recordings: Path):
+    ds = _dataset(recordings, "**/*", derivatives_path=str(recordings / "out.ds"))
+    _touch(recordings / "out.ds" / "plain.vhdr@A.txt")
+    _touch(recordings / "out.ds" / "inner.mff" / "z.bin")
+    assert "out.ds" not in _rels({"d": ds})
+    assert not any(r.startswith("out.ds") for r in _rels({"d": ds}))
+
+
+def test_cli_counts_container_recordings(recordings: Path, tmp_path: Path):
+    pipe = tmp_path / "pipeline.yml"
+    pipe.write_text(
+        yaml.safe_dump(
+            {
+                "naming_version": 1,
+                "datasets": {
+                    "d": {
+                        "name": "d",
+                        "source_root": str(recordings),
+                        "file_pattern": str(recordings / "**" / "*.ds"),
+                    }
+                },
+            }
+        )
+    )
+    # In a subprocess: the first in-process main() would bind logging to capsys' stream.
+    result = subprocess.run(
+        [sys.executable, "-m", "neurodags.cli", "count-inputs", str(pipe)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(iterators.__file__).parent.parent)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "1"  # the one *.ds recording, not its inner files
+
+
+def test_frozen_list_with_containers_round_trips(recordings: Path, tmp_path: Path):
+    datasets = {"d": _dataset(recordings, "**/*")}
+    out = write_inputs_file(discover_inputs(datasets), tmp_path / "inputs.tsv")
+    loaded = load_inputs(out, datasets)
+    assert loaded.entries == discover_inputs(datasets).entries
+    assert loaded.missing_sources == []
+
+
+def test_frozen_list_rejects_entries_that_are_not_inputs(recordings: Path, tmp_path: Path):
+    datasets = {"d": _dataset(recordings, "**/*")}
+    out = tmp_path / "inputs.tsv"
+    out.write_text(f"{INPUTS_HEADER}\n0\td\tplain.vhdr\n1\td\tsub\n2\td\tsub-02_eeg.mff\n")
+    with pytest.raises(InputsFileError, match=r"1 \(d: sub\)"):
+        load_inputs(out, datasets)
+    # A listed container that disappeared is missing-source, like a file.
+    out.write_text(f"{INPUTS_HEADER}\n0\td\tplain.vhdr\n1\td\tgone.mff\n")
+    assert [e.index for e in load_inputs(out, datasets).missing_sources] == [1]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX leading-slash rule")
+def test_exclude_pattern_with_leading_double_slash(tmp_path: Path):
+    raw = tmp_path / "raw"
+    _touch(raw / "x.txt")
+    for file_pattern, exclude in [
+        (str(raw / "*.txt"), "/" + str(raw / "*.txt")),
+        ("/" + str(raw / "*.txt"), str(raw / "*.txt")),
+    ]:
+        ds = DatasetConfig(
+            name="d", source_root=str(raw), file_pattern=file_pattern, exclude_pattern=exclude
+        )
+        assert _rels({"d": ds}) == []
+    # And a pattern spelled with a leading // is still below a /-spelled source_root.
+    ds = DatasetConfig(name="d", source_root=str(raw), file_pattern="/" + str(raw / "*.txt"))
+    assert _rels({"d": ds}) == ["x.txt"]
+
+
+@pytest.mark.parametrize(
+    ("path", "key"),
+    [
+        ("/a//b/./c/../d", "/a/b/d"),
+        ("//a/b", "/a/b" if os.name != "nt" else os.path.normpath("//a/b")),
+        ("///a", os.path.normpath("///a")),
+        ("rel/./x", os.path.normpath("rel/x")),
+    ],
+)
+def test_lexical_path_key(path, key):
+    assert lexical_path_key(path) == key
 
 
 def test_limit_after_sort_is_a_prefix_per_dataset(tmp_path: Path):

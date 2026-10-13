@@ -3,12 +3,15 @@
 Text checks cannot tell a selection that is honoured from one that only appears in a
 comment, so these tests run the generated scripts unchanged with ``bash``. Small shims on
 ``PATH`` stand in for the cluster: ``sbatch`` runs every array task in turn (in submission
-order, which respects ``--dependency=afterok``), ``neurodags`` and ``python`` run this
-checkout, and ``activate`` is an empty file for ``source activate myenv``.
+order, which respects ``--dependency=afterok``; scheduler semantics such as ``--export``
+environment filtering are not modelled), ``neurodags`` and ``python`` run this checkout,
+and ``activate`` is an empty file for ``source activate myenv``. Both shims log their
+arguments so the tests can check what was frozen, counted and submitted.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -24,7 +27,7 @@ from neurodags.cli import main
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
 _SBATCH = """\
-import os, re, subprocess, sys
+import json, os, subprocess, sys
 args = sys.argv[1:]
 script = args[-1]
 env = dict(os.environ)
@@ -35,6 +38,9 @@ for arg in args[:-1]:
     elif arg.startswith("--export="):
         key, value = arg.split("=", 1)[1].split("=", 1)
         env[key] = value
+with open(os.environ["SHIM_LOG"], "a") as log:
+    log.write(json.dumps({"sbatch": args, "tasks": list(range(lo, hi + 1)),
+                          "derivative": env.get("DERIVATIVE")}) + "\\n")
 for task in range(lo, hi + 1):
     env["SLURM_ARRAY_TASK_ID"] = str(task)
     rc = subprocess.run(["bash", script], env=env).returncode
@@ -44,68 +50,109 @@ if "--parsable" in args:
     print("1234")
 """
 
+_NEURODAGS = """\
+import json, os, sys
+with open(os.environ["SHIM_LOG"], "a") as log:
+    log.write(json.dumps({"neurodags": sys.argv[1:]}) + "\\n")
+from neurodags.cli import main
+sys.exit(main(sys.argv[1:]))
+"""
+
 
 def _shims(bin_dir: Path) -> dict[str, str]:
     bin_dir.mkdir()
     (bin_dir / "activate").write_text("")
+    (bin_dir / "sbatch.py").write_text(_SBATCH)
+    (bin_dir / "neurodags_shim.py").write_text(_NEURODAGS)
     for name, body in {
         "python": f'#!/bin/sh\nexec "{sys.executable}" "$@"\n',
-        "neurodags": f'#!/bin/sh\nexec "{sys.executable}" -m neurodags.cli "$@"\n',
+        "neurodags": f'#!/bin/sh\nexec "{sys.executable}" "{bin_dir / "neurodags_shim.py"}" "$@"\n',
         "sbatch": f'#!/bin/sh\nexec "{sys.executable}" "{bin_dir / "sbatch.py"}" "$@"\n',
     }.items():
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
-    (bin_dir / "sbatch.py").write_text(_SBATCH)
     src = str(Path(neurodags.__file__).resolve().parent.parent)
     return {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "PYTHONPATH": os.pathsep.join(filter(None, [src, os.environ.get("PYTHONPATH")])),
         "LOG_LEVEL": "ERROR",
+        "SHIM_LOG": str(bin_dir / "calls.jsonl"),
     }
 
 
-@pytest.fixture
-def two_datasets(tmp_path: Path, monkeypatch) -> Path:
-    """A pipeline on dataset ``a`` and a ``-d`` override on ``b`` with the same key and rel.
+def _calls(env: dict) -> list[dict]:
+    path = Path(env["SHIM_LOG"])
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
-    A frozen list cannot tell them apart (same dataset key and ``rel``), so only the
-    dataset the worker actually loads decides which tree gets written.
-    """
-    for name in ("a", "b"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "x.txt").write_text(name)
 
-    def ds(name: str) -> dict:
-        return {
-            "d": {
-                "name": "d",
-                "source_root": str(tmp_path / name),
-                "file_pattern": str(tmp_path / name / "*.txt"),
-                "derivatives_path": str(tmp_path / (name + "-out")),
-            }
+def _dataset(p: Path, key: str, folder: str) -> dict:
+    return {
+        key: {
+            "name": key,
+            "source_root": str(p / folder),
+            "file_pattern": str(p / folder / "*.txt"),
+            "derivatives_path": str(p / (folder + "-out")),
         }
+    }
 
-    defs = {
+
+def _definitions(param2: str = "INTENDED") -> dict:
+    return {
         n: {
             "nodes": [
                 {"id": 0, "derivative": "SourceFile"},
-                {"id": 1, "node": "dummy", "args": {"param1": "id.0"}},
+                {"id": 1, "node": "dummy", "args": {"param1": "id.0", "param2": param2}},
             ]
         }
         for n in ("A", "B")
     }
-    (tmp_path / "pipeline.yml").write_text(
+
+
+def _write_pipeline(path: Path, datasets: dict, param2: str = "INTENDED") -> None:
+    path.write_text(
         yaml.safe_dump(
             {
                 "naming_version": 1,
-                "datasets": ds("a"),
-                "DerivativeDefinitions": defs,
+                "datasets": datasets,
+                "DerivativeDefinitions": _definitions(param2),
                 "DerivativeList": ["A", "B"],
             }
         )
     )
-    (tmp_path / "override.yml").write_text(yaml.safe_dump(ds("b")))
+
+
+def _files(p: Path, folder: str, names: list[str]) -> None:
+    (p / folder).mkdir()
+    for name in names:
+        (p / folder / name).write_text(name)
+
+
+@pytest.fixture
+def same_key(tmp_path: Path, monkeypatch) -> Path:
+    """Pipeline on folder ``a``, ``-d`` override on folder ``b``: same key ``d``, same rel.
+
+    The frozen list and count are identical for both, so only the dataset the *worker*
+    loads decides which tree is written.
+    """
+    _files(tmp_path, "a", ["x.txt"])
+    _files(tmp_path, "b", ["x.txt"])
+    _write_pipeline(tmp_path / "pipeline.yml", _dataset(tmp_path, "d", "a"))
+    (tmp_path / "override.yml").write_text(yaml.safe_dump(_dataset(tmp_path, "d", "b")))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def other_population(tmp_path: Path, monkeypatch) -> Path:
+    """Pipeline on dataset ``d`` (2 files), ``-d`` override on dataset ``e`` (3 files).
+
+    Freezing or counting the wrong dataset gives a different list and array size.
+    """
+    _files(tmp_path, "a", ["a1.txt", "a2.txt"])
+    _files(tmp_path, "b", ["z1.txt", "z2.txt", "z3.txt"])
+    _write_pipeline(tmp_path / "pipeline.yml", _dataset(tmp_path, "d", "a"))
+    (tmp_path / "override.yml").write_text(yaml.safe_dump(_dataset(tmp_path, "e", "b")))
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -114,107 +161,150 @@ def _artifacts(root: Path) -> list[str]:
     return sorted(str(f.relative_to(root)) for f in root.rglob("*.message.txt"))
 
 
-def _bash(script: Path, env: dict, cwd: Path) -> subprocess.CompletedProcess:
+def _bash(script: Path, env: dict, cwd: Path) -> None:
     result = subprocess.run(["bash", str(script)], env=env, cwd=cwd, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    return result
 
 
-def test_per_file_worker_honours_datasets_override_and_derivative(two_datasets: Path):
-    p = two_datasets
-    env = _shims(p / "bin")
-    assert (
-        main(
-            [
-                "--log-level",
-                "ERROR",
-                "slurm-script",
-                "pipeline.yml",
-                "-d",
-                "override.yml",
-                "--derivative",
-                "B",
-                "--output",
-                "run_array.sh",
-            ]
-        )
-        == 0
-    )
-    # The submission lines printed in the header freeze the override's inputs.
-    header = [
-        line[4:]
-        for line in (p / "run_array.sh").read_text().splitlines()
-        if line.startswith("#   ")
-    ]
+def _generate(*argv: str) -> None:
+    assert main(["--log-level", "ERROR", "slurm-script", *argv]) == 0
+
+
+def _submit_from_header(p: Path, script: str, env: dict) -> None:
+    """Run the submission lines printed in a per-file/flat template's header comment."""
+    header = [line[4:] for line in (p / script).read_text().splitlines() if line.startswith("#   ")]
     (p / "submit.sh").write_text("set -e\n" + "\n".join(header) + "\n")
     _bash(p / "submit.sh", env, p)
-    assert str(p / "b" / "x.txt") not in (p / "inputs.tsv").read_text()  # stores rel only
+
+
+def _frozen(p: Path) -> list[list[str]]:
+    lines = (p / "inputs.tsv").read_text().splitlines()
+    return [line.split("\t") for line in lines if not line.startswith("#")]
+
+
+# ---------------------------------------------------------------------------
+# Worker selection (same key and rel in both datasets)
+# ---------------------------------------------------------------------------
+
+
+def test_per_file_worker_honours_datasets_override_and_derivative(same_key: Path):
+    p = same_key
+    env = _shims(p / "bin")
+    _generate("pipeline.yml", "-d", "override.yml", "--derivative", "B", "--output", "run_array.sh")
+    _submit_from_header(p, "run_array.sh", env)
     assert _artifacts(p) == ["b-out/x.txt@B.message.txt"]
 
 
-def test_flat_tasks_honour_datasets_override(two_datasets: Path):
-    p = two_datasets
+def test_flat_tasks_honour_datasets_override(same_key: Path):
+    p = same_key
     env = _shims(p / "bin")
-    argv = ["slurm-script", "pipeline.yml", "-d", "override.yml", "--derivative", "B"]
-    assert main(["--log-level", "ERROR", *argv, "--pattern", "flat", "--output", "flat.sh"]) == 0
-    header = [
-        line[4:] for line in (p / "flat.sh").read_text().splitlines() if line.startswith("#   ")
-    ]
-    (p / "submit.sh").write_text("set -e\n" + "\n".join(header) + "\n")
-    # The submit lines name the script run_array_per_deriv.sh.
-    shutil.copy(p / "flat.sh", p / "run_array_per_deriv.sh")
-    _bash(p / "submit.sh", env, p)
+    _generate("pipeline.yml", "-d", "override.yml", "--derivative", "B", "--pattern", "flat",
+              "--output", "run_array_per_deriv.sh")  # fmt: skip
+    _submit_from_header(p, "run_array_per_deriv.sh", env)
     assert _artifacts(p) == ["b-out/x.txt@B.message.txt"]
 
 
-def test_chained_submission_honours_datasets_override(two_datasets: Path):
-    p = two_datasets
+def test_chained_submission_honours_datasets_override(same_key: Path):
+    p = same_key
     env = _shims(p / "bin")
-    assert (
-        main(
-            [
-                "--log-level",
-                "ERROR",
-                "slurm-script",
-                "pipeline.yml",
-                "-d",
-                "override.yml",
-                "--pattern",
-                "chained",
-                "--output",
-                "submit_pipeline.sh",
-            ]
-        )
-        == 0
-    )
+    _generate("pipeline.yml", "-d", "override.yml", "--pattern", "chained",
+              "--output", "submit_pipeline.sh")  # fmt: skip
     _bash(p / "submit_pipeline.sh", env, p)
     assert _artifacts(p) == ["b-out/x.txt@A.message.txt", "b-out/x.txt@B.message.txt"]
 
 
-def test_unquoted_heredoc_keeps_shell_metacharacters_in_datasets_path(two_datasets: Path):
-    # flat/chained bodies are unquoted heredocs: backquotes, quotes and backslashes in the
-    # path must reach Python unchanged (``$VARS`` are already expanded by -d itself).
-    p = two_datasets
-    odd = p / "odd `x` 'q' \\ dir"
+def test_chained_submission_honours_derivative_selection(same_key: Path):
+    p = same_key
+    env = _shims(p / "bin")
+    _generate("pipeline.yml", "-d", "override.yml", "--derivative", "B", "--pattern", "chained",
+              "--output", "submit_pipeline.sh")  # fmt: skip
+    _bash(p / "submit_pipeline.sh", env, p)
+    assert [c["derivative"] for c in _calls(env) if "sbatch" in c] == ["B"]
+    assert _artifacts(p) == ["b-out/x.txt@B.message.txt"]
+
+
+# ---------------------------------------------------------------------------
+# Submission selection (override has another dataset key and population)
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_LIST = [["0", "e", "z1.txt"], ["1", "e", "z2.txt"], ["2", "e", "z3.txt"]]
+_OVERRIDE_OUT = [f"b-out/z{i}.txt@{d}.message.txt" for i in (1, 2, 3) for d in ("A", "B")]
+
+
+def _assert_submission_used_override(p: Path, env: dict, tasks: list[int]) -> None:
+    assert _frozen(p) == _OVERRIDE_LIST
+    override = str(p / "override.yml")
+    calls = _calls(env)
+    nd = [c["neurodags"] for c in calls if "neurodags" in c]
+    assert [a[0] for a in nd] == ["inputs", "count-inputs"]
+    for argv in nd:
+        assert argv[argv.index("-d") + 1] == override
+    assert [t for c in calls if "sbatch" in c for t in c["tasks"]] == tasks
+    assert _artifacts(p) == sorted(_OVERRIDE_OUT)
+
+
+def test_per_file_submission_freezes_and_counts_the_override(other_population: Path):
+    p = other_population
+    env = _shims(p / "bin")
+    _generate("pipeline.yml", "-d", "override.yml", "--output", "run_array.sh")
+    _submit_from_header(p, "run_array.sh", env)
+    _assert_submission_used_override(p, env, [0, 1, 2])
+
+
+def test_flat_submission_freezes_and_counts_the_override(other_population: Path):
+    p = other_population
+    env = _shims(p / "bin")
+    _generate("pipeline.yml", "-d", "override.yml", "--pattern", "flat",
+              "--output", "run_array_per_deriv.sh")  # fmt: skip
+    _submit_from_header(p, "run_array_per_deriv.sh", env)
+    _assert_submission_used_override(p, env, list(range(6)))
+
+
+def test_chained_submission_freezes_and_counts_the_override(other_population: Path):
+    p = other_population
+    env = _shims(p / "bin")
+    _generate("pipeline.yml", "-d", "override.yml", "--pattern", "chained",
+              "--output", "submit_pipeline.sh")  # fmt: skip
+    _bash(p / "submit_pipeline.sh", env, p)
+    _assert_submission_used_override(p, env, [0, 1, 2, 0, 1, 2])
+
+
+# ---------------------------------------------------------------------------
+# Unusual pipeline and datasets paths reach the workers unchanged
+# ---------------------------------------------------------------------------
+
+# Spaces, $1 (removed by an unquoted shell), both quotes, backquotes (command
+# substitution) and a backslash followed by "n" (a newline escape in Python source).
+_HAZARDS = "p a$1 \"q\" 'r' `printf X` \\n"
+
+
+@pytest.mark.parametrize("pattern", ["per-file", "flat", "chained"])
+@pytest.mark.parametrize("name", [_HAZARDS + ".yml", "pipeline$1.yml"])
+def test_unusual_pipeline_and_datasets_paths(tmp_path: Path, monkeypatch, pattern, name):
+    p = tmp_path
+    _files(p, "b", ["x.txt"])
+    _files(p, "w", ["x.txt"])
+    odd = p / ("ds " + _HAZARDS)
     odd.mkdir()
-    shutil.copy(p / "override.yml", odd / "override.yml")
+    (odd / "override.yml").write_text(yaml.safe_dump(_dataset(p, "d", "b")))
+    _write_pipeline(p / name, _dataset(p, "d", "w"), param2="INTENDED")
+    # Decoys a mangled path would silently load instead ($1 removed / backquotes run).
+    for decoy in ("pipeline.yml", "p a \"q\" 'r' X \\n.yml"):
+        if decoy != name:
+            _write_pipeline(p / decoy, _dataset(p, "d", "w"), param2="WRONG_PIPELINE")
+    monkeypatch.chdir(p)
     env = _shims(p / "bin")
-    assert (
-        main(
-            [
-                "--log-level",
-                "ERROR",
-                "slurm-script",
-                "pipeline.yml",
-                "-d",
-                str(odd / "override.yml"),
-                "--pattern",
-                "chained",
-                "--output",
-                "submit_pipeline.sh",
-            ]
-        )
-        == 0
+    out = {"per-file": "run_array.sh", "flat": "run_array_per_deriv.sh"}.get(
+        pattern, "submit_pipeline.sh"
     )
-    _bash(p / "submit_pipeline.sh", env, p)
+    _generate(name, "-d", str(odd / "override.yml"), "--pattern", pattern, "--output", out)
+    if pattern == "chained":
+        _bash(p / out, env, p)
+    else:
+        _submit_from_header(p, out, env)
     assert _artifacts(p) == ["b-out/x.txt@A.message.txt", "b-out/x.txt@B.message.txt"]
+    for artifact in _artifacts(p):
+        assert "param2=INTENDED" in (p / artifact).read_text()
+    for argv in (c["neurodags"] for c in _calls(env) if "neurodags" in c):
+        assert argv[1] == name
+        assert argv[argv.index("-d") + 1] == str(odd / "override.yml")

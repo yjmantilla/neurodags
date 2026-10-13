@@ -269,8 +269,10 @@ neurodags status pipeline.yml --derivative Alpha --format indices
 The exit code keeps its meaning in every format: `1` whenever something is missing,
 incomplete or errored (or, with `--inputs`, a listed input is `missing-source`), and also
 when any unit could not be planned (`planning-error`: the report is then not `complete`, and
-the failing units are named on stderr; `--format indices` does not print their indices,
-because rerunning them fails the same way until the configuration is fixed). `neurodags
+the failing units are named on stderr; `--format indices` leaves out every index with a
+planning error in *any* selected derivative, even if another selected derivative is missing
+there, because rerunning that index fails the same way until the configuration is fixed;
+select the other derivative alone, `--derivative B`, to get its indices). `neurodags
 dry-run` likewise saves the plan but exits `1` when a unit could not be planned. Under `set -e`, capturing it with `$(...)`
 would abort the script precisely when there is something to resubmit, so add `--exit-zero`:
 
