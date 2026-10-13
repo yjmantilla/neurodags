@@ -68,6 +68,7 @@ from neurodags.naming import NamingError, error_column, format_column, parse_out
 from neurodags.outputs import (
     build_manifest,
     dataset_derivatives_base,
+    is_staging_name,
     output_prefix,
     output_reference_base,
     unit_state,
@@ -754,6 +755,7 @@ def _scan_tree(root: str, *, recursive: bool, exclude: Iterable[str] = ()) -> It
             d
             for d in dirnames
             if os.path.normcase(os.path.normpath(os.path.join(dirpath, d))) not in excluded
+            and not is_staging_name(d)  # a run's staging folder, never outputs to migrate
         )
         for name in sorted(filenames):
             if "@" in name and not name.startswith("."):

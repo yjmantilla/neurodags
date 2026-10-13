@@ -774,8 +774,8 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
         "missing_indices",
         "incomplete_indices",
         "errored_indices",
-        "locked_indices",
         "unlisted_files",
+        "staging_dirs",
         "inputs",
         "missing_source_indices",
         "not_in_list",
@@ -792,7 +792,6 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
             "missing",
             "errored",
             "missing-source",
-            "locked",
             "migrated",
         }
     assert data["derivatives"]["BasicPrep"] == {
@@ -803,7 +802,6 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
         "missing": 2,
         "errored": 1,
         "missing-source": 0,
-        "locked": 0,
         "migrated": 0,
     }
     assert data["n_files"] == 4
@@ -831,8 +829,8 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "status",
         "label",
         "error_path",
-        "lock_path",
         "unlisted",
+        "staging_dirs",
     }
     rec = next(f for f in files if f["index"] == 4 and f["derivative"] == "Spectrum")
     assert rec == {
@@ -843,8 +841,8 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "status": "errored",
         "label": "errored",
         "error_path": "/o/e.e",
-        "lock_path": None,
         "unlisted": [],
+        "staging_dirs": [],
     }
     assert files[0]["error_path"] is None
 
@@ -905,7 +903,6 @@ def test_status_empty_result_json_is_valid(dummy_pipeline, capsys):
         "missing": 0,
         "errored": 0,
         "missing-source": 0,
-        "locked": 0,
         "migrated": 0,
     }
     assert data["complete"] is True

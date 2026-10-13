@@ -219,11 +219,7 @@ run_pipeline(
 EOF
 ```
 
-> **Note**: When derivatives have inter-dependencies (e.g. `Spectrum` reads `Preprocessed` output), this pattern requires `Preprocessed` to finish before `Spectrum` starts. Use SLURM `--dependency=afterok` between derivative-level job arrays, or use Pattern 1 which respects dependency order automatically. This includes intermediate
-> derivatives that are not in `DerivativeList`: if two tasks of the same file (say `Alpha` and
-> `Beta`, both reading an uncached `Clean`) run at once, the second finds `Clean` locked by the
-> first and fails that task as "locked by another process" (see
-> {ref}`Unit lock <naming-unit-lock>`); resubmit it once the first has finished.
+> **Note**: When derivatives have inter-dependencies (e.g. `Spectrum` reads `Preprocessed` output), this pattern requires `Preprocessed` to finish before `Spectrum` starts. Use SLURM `--dependency=afterok` between derivative-level job arrays, or use Pattern 1 which respects dependency order automatically.
 
 ---
 
@@ -336,16 +332,19 @@ Things to keep in mind:
   the errored files you are trying to retry. Use a copy of the worker without it (the default
   `skip_errors=False` retries files with a `.error` marker), e.g. `retry_array.sh` = `run_array.sh`
   minus the `skip_errors=True` line. Partial outputs left by a failed or killed task have no
-  `.done` manifest, so the retry recomputes them without any cleanup — except for the unit
-  lock (next point).
-- **Killed tasks leave `.lock` files.** Each unit being computed is claimed with
-  `<prefix>.lock` (see {ref}`Unit lock <naming-unit-lock>`), so a duplicate or retried task
-  running the same unit at the same time cannot overwrite it; the second task logs the unit as
-  "locked by another process" and fails it (non-zero exit with `raise_on_error=True`). A task
-  that SLURM kills (time limit, preemption, `scancel`) or that crashes hard cannot remove its
-  lock, and locks are never broken automatically: `neurodags status` then shows those units as
-  `locked` and lists the files. Once no job is running for them, delete them before
-  resubmitting: `find <derivatives_path> -name '*.lock' -delete`.
+  `.done` manifest, so the retry recomputes them without any cleanup.
+- **Killed tasks never block retries.** Artifacts are written in a hidden staging folder and
+  moved into place only when complete (see
+  {ref}`Atomic publication <naming-atomic-publication>`), so a task killed by a time limit,
+  preemption or `scancel` (`SIGTERM` or `SIGKILL`) leaves no partial file at an output name and
+  no `.done`; the retry recomputes the unit. It may leave its staging folder
+  (`.<output prefix>.tmp~<token>/`), which nothing reads; `neurodags status` counts them.
+  Delete them when no job is writing to the tree, e.g.
+  `find <derivatives_path> -name '.*.tmp~*' -prune -mmin +1440 -exec rm -rf {} +`.
+- **Duplicate tasks on the same unit are harmless.** Two tasks computing the same unit at once
+  (a requeued task still running, overlapping arrays, two derivatives sharing an uncached
+  intermediate) both write complete files; the last one to publish wins, and a reader never
+  sees a partial file. The work is just done twice.
 - **Flat-array task IDs are not file indices.** In the flat pattern
   `SLURM_ARRAY_TASK_ID = file_index * N_DERIVATIVES + derivative_index`, so never pass status
   indices straight to `run_array_per_deriv.sh`. Convert them per derivative, using the
@@ -398,7 +397,7 @@ run_pipeline(config, inputs="inputs.tsv", only_index=index, skip_errors=True)
 | Cluster paths differ from local | Set `mount_point: hpc` in `pipeline.yml`; give `source_root`, `file_pattern` and `derivatives_path` an `hpc:` entry each (`neurodags validate` prints the resolved values for the active mount) |
 | Relative dataset paths | Since 0.4.0 they are resolved against the datasets YAML's directory, not the job's working directory; a config passed as a dict needs `base_dir=` (the generated `slurm-script` templates pass it) |
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
-| Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed once their leftover `.lock` files are deleted |
+| Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed; nothing needs to be unlocked or cleaned first |
 | Outputs computed on another mount | Copy the derivatives tree as is: manifests list files relative to their folder, so the copy verifies on the new mount as long as the paths below `source_root` are the same |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
 | `--only-index` errors | An unknown or negative index is an error (exit `2`), never ignored: size the array from `count-inputs --inputs inputs.tsv`, and pass the same `--inputs` list to `status` and the workers |

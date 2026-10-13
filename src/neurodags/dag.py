@@ -38,14 +38,15 @@ from neurodags.naming import (
 )
 from neurodags.nodes import get_node
 from neurodags.outputs import (
-    UnitLockedError,
-    acquire_unit_lock,
     build_manifest,
     check_artifact_ownership,
+    make_staging_dir,
     manifest_artifacts,
     output_prefix,
     publish_marker,
+    publish_staged,
     remove_markers,
+    remove_staging_dir,
     unit_state,
     write_manifest,
     writer_paths,
@@ -437,35 +438,26 @@ def run_derivative(
     When dry_run=True:
       - Do NOT execute any steps.
       - Report, per step, whether the expected artifacts are already present (``state``
-        of the final output: done, error, skipped, locked, incomplete or missing).
+        of the final output: done, error, skipped, incomplete or missing).
       - Return a dict with a 'plan' list (so callers don't confuse it with NodeResult).
 
     Normal mode:
-      - A saving unit that is not cached is claimed with ``<prefix>.lock``
-        (:func:`neurodags.outputs.acquire_unit_lock`) before anything is computed, then its
-        old ``.done`` is deleted. The lock is released after the ``.done``/``.error``/``.skip``
-        is published. Any failure inside the unit (a node, a dependency, argument
-        preparation, artifact selection or writing) writes the unit's ``.error``.
+      - When a saving unit is (re)computed, its old ``.done`` and ``.skip`` are deleted
+        before anything is computed. Any failure inside the unit (a node, a dependency,
+        argument preparation, artifact selection or writing) writes the unit's ``.error``.
       - 'derivative' steps: if cached and overwrite=False, skip compute; else compute or recurse.
         A ``save: false`` child is never read from disk. The referenced artifact is selected
         exactly (:func:`select_artifact`) on every path; a failed selection raises
         :class:`ArtifactSelectionError`.
       - 'node' steps: execute; if it's the last step, validate the artifact suffixes, write
-        every artifact, then publish the ``.done`` manifest atomically from the paths the
-        writers reported.
+        every artifact into a staging folder, move the files into place atomically, then
+        publish the ``.done`` manifest atomically (:func:`_save_final_artifacts`).
 
     Parameters
     ----------
     source_dataset, source_rel : str, optional
         Dataset key and source path relative to ``source_root``, recorded in the
         manifest's ``source``. ``source_rel`` defaults to the source file's basename.
-
-    Raises
-    ------
-    neurodags.outputs.UnitLockedError
-        When this unit (or a dependency it has to compute) is locked by another process.
-        Nothing of the locked unit is touched and no ``.error`` is written for it or for
-        this unit.
     """
     overwrite = bool(derivative_def.get("overwrite", False))
     save = bool(derivative_def.get("save", True))
@@ -504,7 +496,7 @@ def run_derivative(
                 origin=state.origin,
                 manifest_problem=state.problem,
                 unlisted=list(state.unlisted),
-                lock_path=state.lock_path,
+                temps=list(state.temps),
                 has_error_marker=has_error_marker,
                 error_path=error_path if has_error_marker else None,
                 has_skip_marker=has_skip_marker,
@@ -567,23 +559,15 @@ def run_derivative(
         log.debug("Wrote skip marker", path=path)
         return path
 
-    # Claim the unit before touching any of its files (spec 6.2): a second process
-    # running the same unit (a duplicate or retried array task) refuses it instead of
-    # interleaving its writes with ours. Children take their own locks when recursed into.
-    lock = acquire_unit_lock(final_prefix, derivative_name) if save and not dry_run else None
+    # A saving unit is (re)computed from here on (spec 6.2).
+    computing = save and not dry_run
     # What the unit was doing when it failed, for its .error marker.
     step_desc = ""
     try:
-        if lock is not None:
-            # Another process may have finished the unit between our checks and the lock.
-            if not overwrite:
-                if Path(skip_marker_path).exists():
-                    return {"skipped": skip_marker_path}
-                cached = _cached_unit(final_prefix, derivative_name)
-                if cached is not None:
-                    return {"cached": _main_files(cached), "artifacts": cached}
-            # Recomputing: the old completion no longer holds, whatever happens next.
-            remove_markers(final_prefix, "done")
+        if computing:
+            # The previous outcome no longer holds, whatever happens next: a crash from here
+            # on leaves no .done (or stale .skip) over a recompute that did not finish.
+            remove_markers(final_prefix, "done", "skip")
 
         for sid in order:
             step = next(s for s in nodes if s["id"] == sid)
@@ -857,12 +841,11 @@ def run_derivative(
         if last_result is None:
             raise RuntimeError(f"Derivative '{derivative_name}' produced no result")
         return last_result
-    except (SkipDerivative, UnitLockedError):
-        # Skips write their own marker; a locked child leaves this unit untouched
-        # (no .done, no .error) so the next run retries it.
+    except SkipDerivative:
+        # A saving unit wrote its .skip and returned; this propagates save: false skips.
         raise
     except Exception as exc:
-        if lock is not None:
+        if computing:
             # Any failure inside the unit (a node, a dependency, argument preparation,
             # artifact selection or writing) fails the unit.
             where = f" {step_desc}" if step_desc else ""
@@ -881,9 +864,6 @@ def run_derivative(
                     exc_info=True,
                 )
         raise
-    finally:
-        if lock is not None:
-            lock.release()
 
 
 def _save_final_artifacts(
@@ -896,40 +876,53 @@ def _save_final_artifacts(
 ) -> str:
     """Write a unit's artifacts and publish its ``.done`` manifest (spec 3, 6.2).
 
-    The caller holds the unit's lock.
-
     1. Validate every artifact suffix before the first writer runs (an invalid key fails
        the unit and nothing is written).
     2. Delete the old ``.done``, so a crash from here on leaves the unit unfinished.
-    3. Run every writer and record the files it reports (:func:`neurodags.outputs.writer_paths`).
-       A writer whose target another artifact already reported is not run, and two
-       artifacts reporting the same file fail the unit
-       (:func:`neurodags.outputs.check_artifact_ownership`).
-    4. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
+    3. Run every writer on its final basename inside a fresh hidden staging folder next to
+       the outputs (:func:`neurodags.outputs.make_staging_dir`) and record the files it
+       reports (:func:`neurodags.outputs.writer_paths`). A writer whose target another
+       artifact already reported is not run, and two artifacts reporting the same file fail
+       the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
+       untouched in both cases.
+    4. Move every staged file into place with ``os.replace``, continuation parts first and
+       main files last (:func:`neurodags.outputs.publish_staged`). Readers see a complete
+       old file or a complete new one, never a partial one.
+    5. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
+
+    The staging folder is always removed, also on failure; files a writer wrote without
+    reporting them are discarded with it. A process killed before step 5 leaves no
+    ``.done`` (and possibly its staging folder, which nothing reads).
 
     Returns the manifest path. Errors propagate (the caller writes the ``.error`` marker).
     """
     validate_artifact_suffixes(res.artifacts)
     remove_markers(final_prefix, "done")
-    written: dict[str, list[str]] = {}
-    for artifact_name, artifact in res.artifacts.items():
-        artifact_path = final_prefix + artifact_name
-        try:
-            log.debug("Processed artifact", name=artifact_name, file=artifact)
-            # Do not overwrite a file an earlier artifact wrote (e.g. its MNE split part).
-            check_artifact_ownership({**written, artifact_name: [artifact_path]})
-            written[artifact_name] = writer_paths(artifact_path, artifact.writer(artifact_path))
-            check_artifact_ownership(written)
-            log.debug("Saved artifact", file=artifact_path, files=written[artifact_name])
-        except Exception as e:
-            log.error(
-                "Error saving artifact",
-                artifact_name=artifact_name,
-                path=artifact_path,
-                error=str(e),
-                exc_info=True,
-            )
-            raise
+    staging = make_staging_dir(final_prefix)
+    try:
+        staged: dict[str, list[str]] = {}
+        base = os.path.basename(final_prefix)
+        for artifact_name, artifact in res.artifacts.items():
+            artifact_path = os.path.join(staging, base + artifact_name)
+            try:
+                log.debug("Processed artifact", name=artifact_name, file=artifact)
+                # Do not overwrite a file an earlier artifact wrote (e.g. its MNE split part).
+                check_artifact_ownership({**staged, artifact_name: [artifact_path]})
+                staged[artifact_name] = writer_paths(artifact_path, artifact.writer(artifact_path))
+                check_artifact_ownership(staged)
+                log.debug("Saved artifact", file=artifact_path, files=staged[artifact_name])
+            except Exception as e:
+                log.error(
+                    "Error saving artifact",
+                    artifact_name=artifact_name,
+                    path=final_prefix + artifact_name,
+                    error=str(e),
+                    exc_info=True,
+                )
+                raise
+        written = publish_staged(staging, final_prefix, staged)
+    finally:
+        remove_staging_dir(staging)
     manifest = build_manifest(
         final_prefix,
         derivative_name,

@@ -132,11 +132,16 @@ note explaining the columns (omitted above).
 | `incomplete` | Output files (or an invalid `.done`) exist without a valid manifest: an interrupted or partial write, a deleted split part, or 0.3.x outputs not yet migrated with `neurodags migrate`. Recomputed by the next run |
 | `missing` | Nothing on disk for this file — not yet computed |
 | `errored` | A `.error` marker file exists from a previous failed run |
-| `locked` | A `.lock` file exists and there is no valid `.done`: a job is computing the unit right now, or one was killed while computing it. Runs refuse the unit until the lock is gone. Not a table column: the table is followed by the list of lock files, with a hint to delete them once no job is running for those units (see {ref}`Unit lock <naming-unit-lock>`) |
 
 Files that match an output prefix but are not listed in its valid `.done` manifest are ignored;
 the table prints how many there are and `--include-files` lists them per unit (`unlisted`). See
 {ref}`Completion manifest <naming-done-manifest>`.
+
+Hidden staging folders (`.<output prefix>.tmp~<token>/`) belong to a job writing a unit right
+now, or were left by a killed one. They never change a unit's state or the exit code; the
+table prints how many exist with a cleanup hint, and JSON reports `staging_dirs` (and, with
+`--include-files`, the folders per unit). See
+{ref}`Atomic publication <naming-atomic-publication>`.
 
 **Flags:**
 
@@ -184,7 +189,7 @@ of the list; the report then also says how many files on disk are not in the lis
 lists listed files that no longer exist as `missing-source` (they are never part of
 `--format indices`). If an index cannot be determined it is shown as `[idx ?]`.
 
-**Exit codes:** `0` only when all derivatives are complete (no missing, no incomplete, no errored, no locked unit, no `missing-source` input); `1` when any derivative is missing, incomplete, locked or has a `.error` marker, or a listed input is `missing-source`. `--format indices` does not list locked units (resubmitting them would only hit the lock again). `done`, `done (migrated)` and `skipped` units count as complete. This makes `status` usable in shell scripts and CI dependency chains:
+**Exit codes:** `0` only when all derivatives are complete (no missing, no incomplete, no errored, no `missing-source` input); `1` when any derivative is missing or incomplete or has a `.error` marker, or a listed input is `missing-source`. `done`, `done (migrated)` and `skipped` units count as complete. This makes `status` usable in shell scripts and CI dependency chains:
 
 ```bash
 # fail fast if anything is incomplete or errored
@@ -203,16 +208,16 @@ neurodags status pipeline.yml --format json
   "n_files": 42,
   "derivatives": {
     "Alpha": {"total": 42, "done": 29, "skipped": 0, "incomplete": 1, "missing": 10,
-              "errored": 2, "missing-source": 0, "locked": 0, "migrated": 20}
+              "errored": 2, "missing-source": 0, "migrated": 20}
   },
   "grand_total": {"total": 42, "done": 29, "skipped": 0, "incomplete": 1, "missing": 10,
-                  "errored": 2, "missing-source": 0, "locked": 0, "migrated": 20},
+                  "errored": 2, "missing-source": 0, "migrated": 20},
   "complete": false,
   "missing_indices": [3, 7, 12, 15, 18, 21, 25, 30, 33, 40],
   "incomplete_indices": [5],
   "errored_indices": [0, 9],
-  "locked_indices": [],
   "unlisted_files": 0,
+  "staging_dirs": 0,
   "inputs": null,
   "missing_source_indices": [],
   "not_in_list": 0
@@ -242,16 +247,15 @@ neurodags status pipeline.yml --format json --include-files
     {"index": 0, "dataset": "my_dataset", "file_path": "/data/sub-01/ses-01/sub-01_task-rest.vhdr",
      "derivative": "Alpha", "status": "errored", "label": "errored",
      "error_path": "/derivatives/sub-01/ses-01/sub-01_task-rest.vhdr@Alpha.error",
-     "unlisted": []},
+     "unlisted": [], "staging_dirs": []},
     {"index": 1, "dataset": "my_dataset", "file_path": "/data/sub-02/ses-01/sub-02_task-rest.vhdr",
      "derivative": "Alpha", "status": "done", "label": "done (migrated)", "error_path": null,
-     "unlisted": []}
+     "unlisted": [], "staging_dirs": []}
   ]
 ```
 
 `label` is `status`, except `done (migrated)` for a done unit certified by `neurodags migrate`
-(`status` stays `done`, so consumers counting `done` keep working). `lock_path` is the unit's
-`.lock` file when one exists, else `null`. `status` is one of `done`, `skipped`, `incomplete`, `missing`, `errored`, `locked`, `no-save`, `unknown`, or
+(`status` stays `done`, so consumers counting `done` keep working). `status` is one of `done`, `skipped`, `incomplete`, `missing`, `errored`, `no-save`, `unknown`, or
 `missing-source` (with `--inputs`: listed, but no longer on disk). When no
 input files are found, `--format json` still emits a valid document (zero counts, empty
 index lists, `"complete": true`).

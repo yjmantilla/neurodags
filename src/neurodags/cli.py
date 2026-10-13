@@ -393,7 +393,6 @@ _STATE_TO_STATUS = {
     "error": "errored",
     "incomplete": "incomplete",
     "missing": "missing",
-    "locked": "locked",
 }
 
 
@@ -414,9 +413,7 @@ def _status_classify(plan: list) -> str:
     - 'errored': a ``.error`` marker exists;
     - 'incomplete': output files exist without a valid ``.done`` (a partial or
       interrupted write, or 0.3.x outputs not yet migrated); recomputed by the next run;
-    - 'missing': nothing exists for the unit;
-    - 'locked': a ``.lock`` exists (a job is writing the unit, or one was killed while
-      writing it); runs refuse the unit until the lock is gone.
+    - 'missing': nothing exists for the unit.
     """
     final = _status_final(plan)
     if final is None:
@@ -447,9 +444,10 @@ def _status_unlisted(plan: list) -> list[str]:
     return list(final.get("unlisted") or []) if final else []
 
 
-def _status_lock_path(plan: list) -> str | None:
+def _status_temps(plan: list) -> list[str]:
+    """Staging folders of the unit (a running job's, or left by a killed one)."""
     final = _status_final(plan)
-    return final.get("lock_path") if final else None
+    return list(final.get("temps") or []) if final else []
 
 
 def _status_error_path(plan: list) -> str | None:
@@ -499,8 +497,8 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
                 "label": "done (migrated)" if migrated else status,
                 "migrated": migrated,
                 "error_path": _status_error_path(plan),
-                "lock_path": None if missing_source else _status_lock_path(plan),
                 "unlisted": [] if missing_source else _status_unlisted(plan),
+                "staging_dirs": [] if missing_source else _status_temps(plan),
             }
         )
     return rows
@@ -546,7 +544,6 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "missing": 0,
         "errored": 0,
         "missing-source": 0,
-        "locked": 0,
     }
     per_deriv: dict[str, dict[str, int]] = {}
     all_derivs = sorted({r["derivative"] for r in rows})
@@ -567,9 +564,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         and grand["incomplete"] == 0
         and grand["errored"] == 0
         and grand["missing-source"] == 0
-        and grand["locked"] == 0
     )
     n_unlisted = sum(len(r["unlisted"]) for r in rows)
+    n_staging = sum(len(r["staging_dirs"]) for r in rows)
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
     missing_source_indices = _status_indices(rows, ("missing-source",))
     n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
@@ -596,8 +593,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "missing_indices": _status_indices(rows, ("missing",)),
             "incomplete_indices": _status_indices(rows, ("incomplete",)),
             "errored_indices": _status_indices(rows, ("errored",)),
-            "locked_indices": _status_indices(rows, ("locked",)),
             "unlisted_files": n_unlisted,
+            "staging_dirs": n_staging,
             "inputs": inputs_file,
             "missing_source_indices": missing_source_indices,
             "not_in_list": n_not_in_list,
@@ -612,8 +609,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "status": r["status"],
                     "label": r["label"],
                     "error_path": r["error_path"],
-                    "lock_path": r["lock_path"],
                     "unlisted": r["unlisted"],
+                    "staging_dirs": r["staging_dirs"],
                 }
                 for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
             ]
@@ -693,19 +690,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
             f"\n{n_unlisted} file(s) match an output prefix but are not listed in its .done "
             "manifest; they are ignored (see --format json --include-files)."
         )
-    _print_input_list_report()
-
-    locked_rows = sorted((r for r in rows if r["status"] == "locked"), key=_status_index_key)
-    if locked_rows:
+    if n_staging:
         print(
-            f"\n{len(locked_rows)} unit(s) locked (not in the table): a job is writing them, "
-            "or one was killed while writing them; runs refuse a locked unit. If no job is "
-            "running for them any more, delete the lock file(s):"
+            f"\n{n_staging} staging folder(s) ('.<output prefix>.tmp~<token>') exist: a job is "
+            "writing those units right now, or one was killed while writing them. They are "
+            "ignored and never cleaned up automatically; once no job is running, delete "
+            "them, e.g. find <derivatives_path> -name '.*.tmp~*' -prune -exec rm -rf {} + "
+            "(see --format json --include-files)."
         )
-        for r in locked_rows[:10]:
-            print(f"  {r['lock_path']}")
-        if len(locked_rows) > 10:
-            print(f"  ... and {len(locked_rows) - 10} more (see --format json --include-files)")
+    _print_input_list_report()
 
     if grand["errored"]:
         print(f"\n{grand['errored']} error(s) found.", end="")

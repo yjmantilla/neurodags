@@ -120,10 +120,8 @@ ENTITY_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 #: Reserved reference to the input file itself; not usable as a derivative name (any case).
 RESERVED_NAME = "SourceFile"
 
-#: Last suffix segments reserved for a unit's own bookkeeping files: the completion markers
-#: (``done``, ``error``, ``skip``) and the per-unit write lock (``lock``). Artifact suffixes
-#: may not end in one of them (any case).
-MARKER_SEGMENTS = frozenset({"done", "error", "skip", "lock"})
+#: Last suffix segments that denote completion markers; reserved for artifacts (any case).
+MARKER_SEGMENTS = frozenset({"done", "error", "skip"})
 
 #: Names longer than this produce a warning in :func:`check_derivative_names`.
 NAME_LENGTH_WARNING = 64
@@ -560,7 +558,7 @@ def _suffix_problem(suffix: Any) -> str | None:
     if last.lower() in MARKER_SEGMENTS:
         return (
             f"Artifact suffix {suffix!r} ends in {last!r}, which is reserved for completion "
-            "markers and the unit lock (.done, .error, .skip, .lock, any case)."
+            "markers (.done, .error, .skip, any case)."
         )
     return None
 
@@ -700,9 +698,9 @@ def output_basename(source_basename: str, name: str, suffix: str) -> str:
 
 
 def marker_basename(source_basename: str, name: str, marker: str) -> str:
-    """Return the basename of a marker (``marker`` is done, error, skip or lock)."""
+    """Return the basename of a completion marker (``marker`` is done, error or skip)."""
     if marker not in MARKER_SEGMENTS:
-        raise NamingError(f"Unknown marker {marker!r}; expected one of done, error, skip, lock.")
+        raise NamingError(f"Unknown marker {marker!r}; expected one of done, error, skip.")
     return output_prefix_basename(source_basename, name) + "." + marker
 
 
