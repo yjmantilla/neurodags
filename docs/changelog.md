@@ -176,7 +176,7 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   YAML's directory; files are edited in place (comments kept) and written last, with
   `.bak-0.3` backups. Existing outputs are found by scanning each `derivatives_path` (0.3.x
   CamelCase tokens, pilot-era flat trees, the pre-0.3.3 `<derivatives_path>@Deriv.*` form,
-  `&` source names, matched by their 0.3.x spelling) and moved with `os.replace` to the
+  `&` source names, matched by their 0.3.x spelling) and moved (`os.link` + `os.unlink`) to the
   verbatim 0.4.0 names and folders (`x.vhdr&A.fif@B.nc` becomes `x.vhdr@A.fif@B.nc`);
   `.error`/`.skip` markers move with their unit; orphans are left in place, but chained
   outputs whose upstream source is not discovered are refused (*unresolved*) rather than
@@ -316,6 +316,30 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   (single files too) are loaded in full before their `.done`; a unit's `.done` lists all its artifacts; a split
   rewrite into a new folder works; re-running after keeping an identical duplicate (also a
   split recording whose kept copy was re-saved) is a no-op.
+- **0.4.0 release-candidate integration fixes** (review of c823337):
+  - `migrate` no longer re-certifies a unit from a *completed* migration's journal: a
+    migrated unit later overwritten by `neurodags run` and interrupted (or edited) stayed
+    `done` after the next `migrate --apply`. Each successful `--apply` now ends with an
+    `apply-complete` journal record, and only an unfinished (interrupted) migration's
+    records grant ownership of files at their new names; `move` records (and a new
+    `move-start` record written before each move) carry the file's `[size, mtime_ns]`, which
+    must still match.
+  - `migrate` no longer combines disjoint artifacts from different runs (e.g. a partial
+    pilot copy with `.a.txt` and a partial full-run copy with `.b.txt`) into one unit
+    certified complete; without journal proof that an interrupted migration was moving one
+    unit, such groups are refused, listing every location.
+  - `.done` fingerprints compare size and `mtime_ns` **exactly**: the one-second tolerance
+    accepted a same-size replacement made right after publication. Copies must keep
+    nanosecond mtimes (`cp -a`/`rsync -a` on Linux do); a filesystem that truncates
+    timestamps causes recomputes, never false hits.
+  - The 0.3.x-output guard treated a real recording-container source named with `&`
+    (`rec&run.ds`, `.mff`, a directory) as absent, so after an `.error` (or an interrupted
+    publication) `run` and `status` demanded `neurodags migrate`; it now uses discovery's
+    input predicate.
+  - `migrate` compares trees, candidates, journal records, targets and locks with
+    `lexical_path_key`: output roots spelled `/x/out` and `//x/out` (distinct
+    `derivatives_subdir`) are one tree, scanned and locked once, instead of two plans and a
+    refusal on the run's own lock.
 
 - **`slurm-script` ignored `-d` and, for `per-file`, `--derivative`**: the generated jobs froze,
   counted and ran the pipeline's own datasets, and the per-file worker ran the whole

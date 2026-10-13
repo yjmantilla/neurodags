@@ -12,6 +12,7 @@ import yaml
 from neurodags import migrate
 from neurodags._legacy import snake_to_camel
 from neurodags.cli import main
+from neurodags.definitions import Artifact, NodeResult
 from neurodags.loaders import load_pipeline_configuration
 from neurodags.migrate import (
     MigrationRefused,
@@ -20,6 +21,7 @@ from neurodags.migrate import (
     plan_migration,
     read_journal,
 )
+from neurodags.nodes import register_node
 from neurodags.outputs import manifest_artifacts, unit_state
 from neurodags.utils import find_unique_root
 
@@ -882,13 +884,37 @@ def test_interrupted_between_configuration_files_resumes(
     assert not again.has_work
 
 
-def test_unit_half_moved_by_an_interrupted_run_is_completed(tmp_path):
-    """One artifact already renamed, the other still 0.3.x: one unit, one manifest."""
+@pytest.mark.parametrize("crash", ["after-link", "after-unlink"])
+def test_unit_half_moved_by_an_interrupted_run_is_completed(tmp_path, monkeypatch, crash):
+    """One artifact already renamed by an interrupted --apply (its journal), the other
+    still 0.3.x: one unit, one manifest. Also when interrupted right after the first move,
+    before its ``move`` record (the ``move-start`` record owns the file)."""
     pipe = _project(tmp_path)
     sources = _sources(tmp_path / "raw", RELS)
     _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".nc", ".json"]})
     base = tmp_path / "derivatives" / RELS[0]
-    os.replace(f"{base}@BandPower.nc", f"{base}@band_power.nc")
+    plan = _plan(pipe, tmp_path)
+    assert len(plan.moves) == 6
+    real_move, real_unlink = migrate._publish_move, os.unlink
+
+    def interrupted(old, new):
+        real_move(old, new)
+        raise _Crash("after the first move")
+
+    def unlink(path, *args, **kwargs):
+        if "@BandPower." in os.fspath(path):
+            raise _Crash("between link and unlink")
+        return real_unlink(path, *args, **kwargs)
+
+    if crash == "after-unlink":
+        monkeypatch.setattr(migrate, "_publish_move", interrupted)
+    else:
+        monkeypatch.setattr(migrate.os, "unlink", unlink)
+    with pytest.raises(_Crash):
+        apply_migration(plan)
+    monkeypatch.undo()
+    assert len(list(base.parent.glob("*@band_power.*"))) == 1
+    assert len(list(base.parent.glob("*@BandPower.*"))) == (2 if crash == "after-link" else 1)
 
     plan = _plan(pipe, tmp_path)
     assert plan.refusals == []
@@ -896,6 +922,23 @@ def test_unit_half_moved_by_an_interrupted_run_is_completed(tmp_path):
     state = unit_state(f"{base}@band_power", "band_power")
     assert state.state == "done"
     assert set(state.artifacts) == {".nc", ".json"}
+
+
+def test_unit_half_renamed_by_hand_is_refused(tmp_path, capsys):
+    """Without an unfinished migration's journal, a file at the new name and another at
+    the 0.3.x name are not one unit (they may come from different runs)."""
+    pipe = _project(tmp_path)
+    sources = _sources(tmp_path / "raw", RELS)
+    _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".nc", ".json"]})
+    base = tmp_path / "derivatives" / RELS[0]
+    os.replace(f"{base}@BandPower.nc", f"{base}@band_power.nc")
+
+    plan = _plan(pipe, tmp_path)
+    assert len(plan.refusals) == 1
+    assert f"{base}@BandPower* (.json)" in plan.refusals[0]
+    assert f"{base}@band_power* (.nc)" in plan.refusals[0]
+    with pytest.raises(MigrationRefused):
+        apply_migration(plan)
 
 
 def test_mne_rewrite_started_but_not_staged_is_redone(tmp_path, monkeypatch):
@@ -2233,3 +2276,232 @@ def test_unterminated_split_move_start_survives_two_interruptions(
     _assert_recording(small_split, str(tmp_path / "out/sub/x.txt@Clean"), "Clean", 3)
     assert not any(os.path.exists(p) for p in old)
     assert not _plan(pipe, tmp_path).has_work
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0 release-candidate integration review (c823337)
+# ---------------------------------------------------------------------------
+
+#: What the ``rc_pair`` node writes (``.a.txt`` and ``.b.txt``) and how often it ran.
+_RC = {"text": "v", "calls": 0}
+
+
+@register_node(name="rc_pair", override=True)
+def _rc_pair():
+    _RC["calls"] += 1
+    text = _RC["text"]
+    return NodeResult(
+        {
+            ".a.txt": Artifact(text, lambda p: Path(p).write_text(text)),
+            ".b.txt": Artifact(text, lambda p: Path(p).write_text(text)),
+        }
+    )
+
+
+RC_PIPELINE = """\
+datasets: ds.yml
+DerivativeDefinitions:
+  band_power:
+    for_dataframe: true
+    nodes:
+      - {id: 0, node: rc_pair}
+DerivativeList:
+  - band_power
+"""
+
+
+def _interrupt_second_publication(monkeypatch) -> None:
+    """KeyboardInterrupt at the second final ``os.replace`` of a run's artifacts (the first
+    artifact already published)."""
+    from neurodags import outputs
+
+    real = os.replace
+    calls = []
+
+    def replace(src, dst, *args, **kwargs):
+        if not os.fspath(dst).endswith(".done"):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(outputs.os, "replace", replace)
+
+
+@pytest.mark.parametrize("manifest", ["absent", "invalid"])
+def test_completed_migration_journal_never_recertifies_a_runtime_overwrite(
+    tmp_path, monkeypatch, manifest
+):
+    """Review c823337 P1: migrate -> successful overwrite -> interrupted (or modified)
+    overwrite -> migrate again: the historical journal grants no manifest."""
+    from neurodags.dag import run_derivative
+
+    pipe = _project(tmp_path, pipeline=RC_PIPELINE)
+    sources = _sources(tmp_path / "raw", RELS[:1])
+    _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".a.txt", ".b.txt"]})
+    apply_migration(_plan(pipe, tmp_path))
+    base = tmp_path / "derivatives" / RELS[0]
+    prefix = f"{base}@band_power"
+    assert unit_state(prefix, "band_power").state == "done"
+
+    definition = {"nodes": [{"id": 0, "node": "rc_pair"}], "overwrite": True}
+    _RC["text"] = "2"
+    run_derivative(definition, "band_power", sources[0], base)
+    assert unit_state(prefix, "band_power").state == "done"
+    if manifest == "absent":
+        _RC["text"] = "3"
+        _interrupt_second_publication(monkeypatch)
+        with pytest.raises(KeyboardInterrupt):
+            run_derivative(definition, "band_power", sources[0], base)
+        monkeypatch.undo()
+        assert not os.path.exists(prefix + ".done")
+        texts = sorted(Path(prefix + t).read_text() for t in (".a.txt", ".b.txt"))
+        assert texts == ["2", "3"]  # mixed generations
+    else:
+        Path(prefix + ".a.txt").write_text("33")  # .done stays, no longer matches
+        assert os.path.exists(prefix + ".done")
+    assert unit_state(prefix, "band_power").state == "incomplete"
+
+    plan = _plan(pipe, tmp_path)
+    assert plan.mode == "tree-only"
+    assert plan.refusals == []
+    assert plan.manifests == []
+    apply_migration(plan)
+    assert unit_state(prefix, "band_power").state == "incomplete"
+
+
+def test_interrupted_migration_still_owns_its_moves_until_apply_complete(tmp_path, monkeypatch):
+    """The other side of P1: a migrate interrupted after moving every file (before its
+    manifest) is still completed by the next run (tree-only), from its unfinished journal;
+    a successful apply ends the transaction (``apply-complete``)."""
+    pipe = _project(tmp_path, pipeline=RC_PIPELINE)
+    sources = _sources(tmp_path / "raw", RELS[:1])
+    _legacy_tree(tmp_path / "derivatives", sources, {"band_power": [".a.txt", ".b.txt"]})
+    plan = _plan(pipe, tmp_path)
+
+    def crash(*args, **kwargs):
+        raise _Crash("before the manifest")
+
+    monkeypatch.setattr(migrate, "write_manifest", crash)
+    with pytest.raises(_Crash):
+        apply_migration(plan)
+    monkeypatch.undo()
+    journal = tmp_path / "derivatives/.neurodags/migrate-journal.json"
+    assert "apply-complete" not in [e["op"] for e in read_journal(str(journal))]
+    # Configurations as a fully migrated project has them (tree-only planning).
+    pipe.write_text("naming_version: 1\n" + RC_PIPELINE)
+    (tmp_path / "ds.yml").write_text(
+        DATASETS_TEXT.replace("  file_pattern", "  source_root: raw\n  file_pattern")
+    )
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.mode == "tree-only"
+    assert resumed.refusals == []
+    assert len(resumed.manifests) == 1
+    apply_migration(resumed)
+    prefix = str(tmp_path / "derivatives" / f"{RELS[0]}@band_power")
+    assert unit_state(prefix, "band_power").state == "done"
+    assert [e["op"] for e in read_journal(str(journal))][-2:] == ["apply-complete", "end"]
+
+
+def test_disjoint_pilot_and_full_run_artifacts_are_refused(tmp_path, capsys):
+    """Review c823337 P1: a pilot run's .a.txt and a different full run's .b.txt (disjoint
+    suffixes, no unfinished migration) are never merged into one complete unit."""
+    pipe = _project(tmp_path, pipeline=RC_PIPELINE)
+    sources = _sources(tmp_path / "raw", ["sub/x.txt"])
+    derivs = tmp_path / "derivatives"
+    pilot = _legacy_write(
+        derivs, str(tmp_path / "raw/sub"), sources[0], "band_power", ".a.txt", "pilot run A"
+    )
+    full = _legacy_write(
+        derivs, str(tmp_path / "raw"), sources[0], "band_power", ".b.txt", "full run B"
+    )
+    assert pilot == derivs / "x.txt@BandPower.a.txt"
+    assert full == derivs / "sub/x.txt@BandPower.b.txt"
+    before = _snapshot(tmp_path)
+
+    plan = _plan(pipe, tmp_path)
+    assert len(plan.refusals) == 1
+    message = plan.refusals[0]
+    assert str(derivs / "x.txt@BandPower") in message
+    assert str(derivs / "sub/x.txt@BandPower") in message
+    with pytest.raises(MigrationRefused):
+        apply_migration(plan)
+    assert "x.txt@BandPower" in _refused_cli(pipe, tmp_path, capsys)
+    assert _snapshot(tmp_path) == before
+    assert unit_state(str(derivs / "sub/x.txt@band_power"), "band_power").state == "missing"
+
+
+def test_aliased_output_roots_are_one_tree_and_one_lock(tmp_path):
+    """Review c823337 P2: '/x/out' and '//x/out' (POSIX: the same folder) with distinct
+    derivatives_subdir are one output tree, scanned and locked once."""
+    if os.name == "nt":
+        pytest.skip("POSIX '//' alias")
+    out = str(tmp_path / "derivatives")
+    datasets = (
+        f"study:\n  name: Study A\n  file_pattern: raw/**/*.txt\n  derivatives_path: {out}\n"
+        "  derivatives_subdir: a\n"
+        f"other:\n  name: Other\n  file_pattern: raw2/**/*.txt\n  derivatives_path: /{out}\n"
+        "  derivatives_subdir: b\n"
+    )
+    pipe = _project(tmp_path, datasets=datasets)
+    a = _sources(tmp_path / "raw", RELS[:1])
+    b = _sources(tmp_path / "raw2", ["sub-09/eeg/x.txt"])
+    _legacy_tree(tmp_path / "derivatives", a, {"band_power": [".nc"]})
+    _legacy_tree(tmp_path / "derivatives", b, {"band_power": [".nc"]})
+
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    trees = [t for t in plan.trees if t.kind == "derivatives"]
+    assert [t.root for t in trees] == [out]
+    assert sorted(trees[0].datasets) == ["other", "study"]
+    assert len(plan.moves) == 2
+    apply_migration(plan)
+    for rel in (f"a/{RELS[0]}", "b/sub-09/eeg/x.txt"):
+        state = unit_state(str(tmp_path / "derivatives" / f"{rel}@band_power"), "band_power")
+        assert state.state == "done"
+    assert not (tmp_path / "derivatives/.neurodags" / migrate.LOCK_NAME).exists()
+    assert not _plan(pipe, tmp_path).has_work
+
+
+def test_upgrade_journey_from_0_3_to_0_4(tmp_path, monkeypatch, capsys):
+    """Astra's user journey: 0.3.x tree -> migrate preview/apply -> status all done -> run
+    computes nothing -> dataframe -> overwrite -> status."""
+    from neurodags.orchestrators import build_derivative_dataframe
+
+    monkeypatch.chdir(tmp_path)
+    pipe = _project(tmp_path, pipeline=RC_PIPELINE)
+    sources = _sources(tmp_path / "raw", RELS)
+    root = find_unique_root(sources, mode="maximal")
+    for source in sources:
+        for tail in (".a.txt", ".b.txt"):
+            _legacy_write(tmp_path / "derivatives", root, source, "band_power", tail, "legacy")
+    before = _snapshot(tmp_path)
+    assert main(["migrate", str(pipe)]) == 0
+    assert _snapshot(tmp_path) == before
+    assert main(["migrate", str(pipe), "--apply"]) == 0
+    capsys.readouterr()
+
+    assert main(["status", str(pipe), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["grand_total"]["done"] == data["grand_total"]["migrated"] == 3
+
+    _RC["calls"] = 0
+    assert main(["run", str(pipe)]) == 0
+    assert _RC["calls"] == 0  # every unit reused
+
+    frame = build_derivative_dataframe(str(pipe))
+    assert len(frame) == 3
+    assert set(frame["band_power.a.txt"]) == {"legacy"}
+
+    config = yaml.safe_load(pipe.read_text())
+    config["DerivativeDefinitions"]["band_power"]["overwrite"] = True
+    pipe.write_text(yaml.safe_dump(config))
+    _RC["text"] = "new"
+    assert main(["run", str(pipe)]) == 0
+    assert _RC["calls"] == 3
+    capsys.readouterr()
+    assert main(["status", str(pipe), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["grand_total"]["done"] == 3
+    assert data["grand_total"]["migrated"] == 0
+    assert set(build_derivative_dataframe(str(pipe))["band_power.a.txt"]) == {"new"}

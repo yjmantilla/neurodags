@@ -798,6 +798,69 @@ def test_migrated_unit_claims_its_leftover_copies_but_not_other_folders(tmp_path
     assert "move them out of the output tree" in message
 
 
+#: How the ``rc_retry`` node behaves: "fail", "skip" or "ok".
+_RETRY = {"mode": "ok"}
+
+
+@register_node(name="rc_retry", override=True)
+def _rc_retry():
+    from neurodags.definitions import SkipDerivative
+
+    if _RETRY["mode"] == "fail":
+        raise ValueError("wrong arguments")
+    if _RETRY["mode"] == "skip":
+        raise SkipDerivative("not applicable")
+    return NodeResult({".txt": Artifact("ok", lambda p: Path(p).write_text("ok"))})
+
+
+@pytest.mark.parametrize("layout", ["tree", "next-to-sources"])
+@pytest.mark.parametrize("ext", [".ds", ".mff"])
+def test_ampersand_recording_container_source_owns_its_outputs(tmp_path, capsys, ext, layout):
+    """Review c823337 P2: a real 'rec&run.ds' (or .mff) container directory owns its
+    0.4.0 outputs: an .error is retried, .skip and interrupted outputs are its own, no
+    pointer to migrate."""
+    container = tmp_path / "raw" / f"rec&run{ext}"
+    container.mkdir(parents=True)
+    (container / "data.bin").write_text("x")
+    dataset = {"name": "d", "source_root": "raw", "file_pattern": f"raw/*{ext}"}
+    out = tmp_path / "raw"
+    if layout == "tree":
+        dataset["derivatives_path"] = "out"
+        out = tmp_path / "out"
+    prefix = str(out / f"rec&run{ext}@A")
+    definition = {"nodes": [{"id": 0, "node": "rc_retry"}]}
+    pipe = _project(tmp_path, {"A": definition}, dataset=dataset)
+
+    _RETRY["mode"] = "fail"
+    run_pipeline(str(pipe))
+    assert unit_state(prefix, "A").state == "error"
+    capsys.readouterr()
+    assert main(["status", str(pipe), "--format", "json"]) == 1  # 1: not complete
+    assert json.loads(capsys.readouterr().out)["grand_total"]["errored"] == 1
+
+    _RETRY["mode"] = "ok"  # fixed: the retry recomputes the errored unit
+    assert main(["run", str(pipe)]) == 0
+    assert "neurodags migrate" not in capsys.readouterr().err
+    assert unit_state(prefix, "A").state == "done"
+
+    # Interrupted publication: outputs without their .done.
+    os.unlink(prefix + ".done")
+    assert unit_state(prefix, "A").state == "incomplete"
+    run_pipeline(str(pipe), dry_run=True)
+    capsys.readouterr()
+    assert main(["status", str(pipe)]) == 1
+    assert "neurodags migrate" not in capsys.readouterr().err
+
+    _RETRY["mode"] = "skip"
+    pipe = _project(tmp_path, {"A": {**definition, "overwrite": True}}, dataset=dataset)
+    assert main(["run", str(pipe)]) == 0
+    assert unit_state(prefix, "A").state == "skipped"
+    pipe = _project(tmp_path, {"A": definition}, dataset=dataset)
+    assert main(["run", str(pipe)]) == 0
+    assert unit_state(prefix, "A").state == "skipped"
+    _RETRY["mode"] = "ok"
+
+
 def test_legacy_outputs_next_to_sources_are_refused(tmp_path):
     _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif"])
     dataset = {k: v for k, v in CHAINED.items() if k != "derivatives_path"}

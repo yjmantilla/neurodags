@@ -135,7 +135,8 @@ way (every `@` written as `&`), equals the old source part. Every historical 0.3
 or below `source_root`, so this works for full runs, pilot runs, `max_files_per_dataset` runs
 and the pre-0.3.3 single-file form (`<derivatives_path>@Deriv.*` next to the tree).
 
-- One candidate: the unit moves (`os.replace`) to the 0.4.0 name, with the source basename
+- One candidate: the unit moves (`os.link` then `os.unlink`, never replacing a file) to
+  the 0.4.0 name, with the source basename
   verbatim: `x.vhdr&CleanPrep.fif@BandPower.nc` becomes `x.vhdr@CleanPrep.fif@band_power.nc`.
   `.error` and `.skip` markers move with it. A source really named with `&` matches its own
   name and keeps the `&`; `&` is never decoded on its own.
@@ -206,9 +207,12 @@ for most derivatives) is complete for the unit. That set only decides completene
 - FIF artifacts (single or split) that do not load completely with MNE (a missing,
   truncated or broken file);
 - when the configuration already declares `naming_version: 1`, units whose files already
-  have their 0.4.0 names and that this migration did not move itself (its journal): they may
-  be an interrupted `neurodags run` with some artifacts new and some old. Recompute them with
-  `neurodags run`.
+  have their 0.4.0 names and that an **interrupted** migration did not move itself (its
+  journal, unchanged since): they may be an interrupted `neurodags run` with some artifacts
+  new and some old. Recompute them with `neurodags run`. Files moved by a migration that
+  finished never count: each successful `--apply` closes its journal records
+  (`apply-complete`), so a later `neurodags run` that replaced or half-replaced them is never
+  certified by a later migrate.
 
 A synthesized `.done` records the size and modification time of each file as found
 (`fingerprints`), like a run's.
@@ -330,6 +334,7 @@ Nothing is applied while any of these remains:
 | Unresolved chained outputs (`x&A.fif@B.nc` with no discovered `x@A.fif`) | Fix the downstream `file_pattern`, pass `--upstream-map OLDTOKEN=NEWNAME` when the upstream name changed, or move the listed outputs out of the tree to recompute them. |
 | A target exists with different content | Keep one of the two files (delete or move the other) and run again. Identical files are not refused: the old one is left as a duplicate. |
 | Two old outputs map to one target with different content (e.g. a pilot-era copy and a full-run copy of the same unit) | Keep one: see [Pilot copy and full-run copy](#pilot-duplicates). If they are identical, the deeper one is used and the other is left as a duplicate. |
+| Two sets of outputs map to one target with **different artifacts** (e.g. a partial pilot copy with `.a.txt` and a partial full-run copy with `.b.txt`), and no interrupted migration moved them | Keep one set, as for a [pilot copy](#pilot-duplicates); the missing artifacts are recomputed. They are never combined into one unit: two partial runs do not make a complete one. Only a unit an interrupted `--apply` was moving (its unfinished journal) is completed across its old and new names. |
 | The configuration already declares `naming_version: 1` but the tree still has 0.3.x outputs, and there is no `pipeline.yml.bak-0.3` | Restore the 0.3.x configuration and migrate it, or (if it was migrated on another mount) keep the backup next to the pipeline. |
 | A folder to write is not writable | Fix the permissions. |
 | A move would cross filesystems | Copy the tree onto one filesystem first; cross-filesystem migration is out of scope. |
@@ -374,7 +379,8 @@ Nothing is applied while any of these remains:
   a run is interrupted (an exception, Ctrl-C or a killed process; power loss is not
   tested), at any point and any number of times, run the same command again: it scans the tree, continues
   the remaining moves (a file left with both its old and its new name finishes its move),
-  completes half-moved units, rejoins split recordings from the journal and publishes or
+  completes units it half moved (every file at the new name must be recorded by the
+  interrupted run's journal, with the fingerprint it had when moved), rejoins split recordings from the journal and publishes or
   redoes an interrupted MNE rewrite. Files
   already moved to a chained 0.4.0 name (`x@A.fif@B.nc`, which the 0.3.x parser rejects) are
   recognized as the planned target of their discovered source and join their unit, which then

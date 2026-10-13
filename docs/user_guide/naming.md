@@ -97,17 +97,19 @@ The manifest:
   a tree moved or copied to another mount (local ↔ HPC) still verifies.
 - `fingerprints` records `[size, mtime_ns]` of every listed file as this run wrote it (taken
   from the staged file before it was moved into place). Copy derivative trees with tools that
-  keep modification times (`rsync -a`, `cp -a`): a plain `cp` gives the copies new mtimes, so
-  their units no longer verify and are recomputed.
+  keep modification times to the nanosecond (`cp -a` and `rsync -a` on Linux do): a plain `cp`
+  gives the copies new mtimes, so their units no longer verify and are recomputed. A copy onto
+  a filesystem that truncates timestamps (e.g. to whole seconds) also makes its units
+  recompute; a changed timestamp never makes a unit `done`.
 - `source.rel` is the source path relative to `source_root` with its original spelling
   (including any `@`).
 
 **A unit is done** (a cache hit) when its `.done` parses, its `naming_version` and `derivative`
 match, every file it lists exists and, when the manifest has `fingerprints`, every file still
-has the recorded size and a modification time within one second of the recorded one (so
-filesystems that keep whole seconds and `rsync -a` / `cp -a` copies verify). A file changed
-after publication (replaced by another process, edited, copied without its mtime) makes the
-unit `incomplete` ("modified after publication") and it is recomputed. Manifests without
+has exactly the recorded size and modification time (`mtime_ns`, compared to the
+nanosecond). A file changed after publication (replaced by another process, edited, even with
+the same size a moment later, or copied without its exact mtime) makes the unit `incomplete`
+("modified after publication") and it is recomputed. Manifests without
 `fingerprints` (written before 0.4.0 was released) are checked by existence only. Files that
 match the prefix but are not listed are
 ignored (and reported by `neurodags status`). There is no other cache check: a file named like

@@ -30,7 +30,13 @@ One pass converts both the configuration and the existing output tree:
   recognized by the planned targets: a file ``<b>@<name><suffix>`` that the 0.3.x parser
   rejects counts only when ``<dir>/<b>`` is the new reference base of a discovered source.
   It is an ``identity`` unit and joins the remaining old files of the same unit, so the
-  unit gets its ``.done``.
+  unit gets its ``.done``, only when the unfinished transaction's journal moved every one
+  of them from that unit (``move-start``/``move`` records with the file's fingerprint);
+  disjoint sets of files without that proof (a partial pilot and a partial full run) are
+  refused. Each successful ``--apply`` ends with an ``apply-complete`` record: earlier
+  records never grant ownership or a manifest again.
+- **Identity** of trees, candidates, journal records, targets and locks is
+  :func:`~neurodags.utils.lexical_path_key` (``/out`` and ``//out`` are one tree).
 - **MNE split recordings** (spec 10.3.5; ``-<n>.fif`` and compressed ``.fif-<n>.gz`` parts,
   the rule of :func:`neurodags.iterators.neuromag_split_part`) are re-saved with MNE into a
   private staging folder (``.neurodags/staging/<txn>``), verified sample for sample,
@@ -84,6 +90,7 @@ from neurodags.naming import NamingError, error_column, format_column, parse_out
 from neurodags.outputs import (
     build_manifest,
     dataset_derivatives_base,
+    file_fingerprint,
     is_staging_name,
     output_prefix,
     output_reference_base,
@@ -94,6 +101,7 @@ from neurodags.utils import (
     DatasetConfigError,
     expand_path,
     inspect_dataset_paths,
+    lexical_path_key,
     resolve_dataset_field,
     suggest_source_root,
 )
@@ -120,6 +128,8 @@ __all__ = [
 BACKUP_SUFFIX = ".bak-0.3"
 #: Journal of completed operations, under ``<derivatives_path>/.neurodags/`` (JSON Lines).
 JOURNAL_NAME = "migrate-journal.json"
+#: Journal record closing a successful ``--apply`` on a tree (see :func:`_unfinished_entries`).
+APPLY_COMPLETE = "apply-complete"
 #: Lock held by ``--apply`` for its whole run, next to the journal (one migrate per tree).
 LOCK_NAME = "migrate.lock"
 #: Version of the ``--report`` JSON document.
@@ -935,9 +945,28 @@ def read_journal(path: str) -> list[dict[str, Any]]:
     return entries
 
 
+def _path_key(path: str) -> str:
+    """Identity of *path* for comparisons: :func:`~neurodags.utils.lexical_path_key`
+    (``/x`` and ``//x`` are one folder on POSIX), case-folded where the OS folds case."""
+    return os.path.normcase(lexical_path_key(path))
+
+
+def _unfinished_entries(journal: str) -> list[dict[str, Any]]:
+    """Journal entries of the migration transaction that has not finished yet.
+
+    Every successful ``--apply`` ends its work on a tree with an ``apply-complete``
+    record; only the entries after the last one (an interrupted ``--apply``) may still
+    grant ownership of files at their new names. Entries of completed migrations never
+    do: those files may since have been replaced by ``neurodags run``.
+    """
+    entries = read_journal(journal)
+    last = max((i for i, e in enumerate(entries) if e.get("op") == APPLY_COMPLETE), default=-1)
+    return entries[last + 1 :]
+
+
 def _txn_id(kind: str, *paths: str) -> str:
     """Stable id of one migration transaction (journal key and staging folder name)."""
-    key = "\0".join([kind, *(os.path.normcase(os.path.normpath(p)) for p in paths)])
+    key = "\0".join([kind, *(_path_key(p) for p in paths)])
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -962,7 +991,7 @@ def _unfinished_split_moves(journal: str) -> dict[str, dict[str, Any]]:
         if txn not in open_moves:  # the first record is the original part list
             entry = dict(entry)
             entry["parts"] = [
-                [os.path.normpath(str(o)), os.path.normpath(str(n))] for o, n in parts
+                [lexical_path_key(str(o)), lexical_path_key(str(n))] for o, n in parts
             ]
             open_moves[txn] = entry
     return open_moves
@@ -1423,18 +1452,24 @@ def _plan_trees(
     # new reference base (to recognize already moved, 0.4.0-named files).
     by_tree: dict[str, dict[str, list[_Candidate]]] = {}
     by_base: dict[str, dict[str, list[_Candidate]]] = {}
-    pipeline_journal = os.path.join(os.path.dirname(plan.pipeline), ".neurodags", JOURNAL_NAME)
+    pipeline_journal = os.path.join(
+        os.path.dirname(lexical_path_key(os.path.abspath(plan.pipeline))),
+        ".neurodags",
+        JOURNAL_NAME,
+    )
     derivatives_paths: dict[str, str | None] = {}
     for name, cfg in configs.items():
         if not cfg.skip:
             raw = resolve_dataset_field(cfg, "derivatives_path", mount)
-            derivatives_paths[name] = os.path.normpath(raw) if raw else None
+            # Lexical identity (spec 4.1): '/out' and '//out' are one tree, scanned,
+            # journaled and locked once.
+            derivatives_paths[name] = lexical_path_key(os.path.abspath(raw)) if raw else None
     # Every active dataset's output tree is scanned, even with zero discovered sources
     # (e.g. a chained pattern that no longer matches): its 0.3.x outputs must still be
     # reported (orphan / unresolved), never silently left behind.
     for name, root in derivatives_paths.items():
         if root:
-            key = os.path.abspath(root)
+            key = root
             tree = trees.setdefault(
                 key,
                 TreePlan(key, "derivatives", [], os.path.join(key, ".neurodags", JOURNAL_NAME)),
@@ -1445,19 +1480,21 @@ def _plan_trees(
             by_base.setdefault(key, {})
     for entry in entries:
         cfg = configs[entry.dataset]
-        base = os.path.abspath(
-            output_reference_base(entry.rel, entry.path, dataset_derivatives_base(cfg, mount))
+        base = lexical_path_key(
+            os.path.abspath(
+                output_reference_base(entry.rel, entry.path, dataset_derivatives_base(cfg, mount))
+            )
         )
         candidate = _Candidate(entry.dataset, entry.rel, entry.path, base)
         root = derivatives_paths.get(entry.dataset)
         if root:
-            key = os.path.abspath(root)
+            key = root
             tree = trees.setdefault(
                 key,
                 TreePlan(key, "derivatives", [], os.path.join(key, ".neurodags", JOURNAL_NAME)),
             )
         else:
-            key = os.path.dirname(os.path.abspath(entry.path))
+            key = os.path.dirname(lexical_path_key(os.path.abspath(entry.path)))
             tree = trees.setdefault(key, TreePlan(key, "sources", [], pipeline_journal))
         if entry.dataset not in tree.datasets:
             tree.datasets.append(entry.dataset)
@@ -1474,7 +1511,7 @@ def _plan_trees(
         source_root = resolve_dataset_field(configs[name], "source_root", mount)
         if not source_root:
             continue
-        rest_root = os.path.abspath(source_root)
+        rest_root = lexical_path_key(os.path.abspath(source_root))
         key = "\0rest\0" + rest_root
         tree = trees.setdefault(
             key, TreePlan(rest_root, "sources", [], pipeline_journal, recursive=True)
@@ -1503,15 +1540,13 @@ def _plan_trees(
         # counts at its original location, so the recording is rejoined across folders.
         split_txns = _unfinished_split_moves(tree.journal)
         plan._split_txns.update(split_txns)
-        relocated = {
-            os.path.normcase(new): old for t in split_txns.values() for old, new in t["parts"]
-        }
+        relocated = {_path_key(new): old for t in split_txns.values() for old, new in t["parts"]}
         for scan_root, recursive in scans:
             single_form = scan_root != tree.root
             for path in _scan_tree(scan_root, recursive=recursive, exclude=nested):
                 if tree.skip_dirs and os.path.normcase(os.path.dirname(path)) in tree.skip_dirs:
                     continue
-                logical = relocated.get(os.path.normcase(os.path.normpath(path)), path)
+                logical = relocated.get(_path_key(path), path)
                 if logical != path and os.path.lexists(logical):
                     if _same_entry(logical, path) and _two_names(logical, path):
                         continue  # interrupted between link and unlink: the old name counts
@@ -1652,10 +1687,10 @@ def _resume_from_journals(plan: MigrationPlan) -> None:
             if op == "duplicate":
                 prefix, files = entry.get("new_prefix"), entry.get("files")
                 if isinstance(prefix, str) and isinstance(files, dict):
-                    key = os.path.normcase(os.path.normpath(prefix))
+                    key = _path_key(prefix)
                     known = plan._duplicates.setdefault(key, {})
                     for path, fingerprint in files.items():
-                        known[os.path.normcase(os.path.normpath(path))] = fingerprint
+                        known[_path_key(path)] = fingerprint
                 continue
             if op in ("mne-start", "mne-staged", "mne-done", "mne-failed") and isinstance(
                 entry.get("txn"), str
@@ -1737,8 +1772,9 @@ def _strip_resumed_mne(plan: MigrationPlan, group: list[Unit]) -> list[Unit]:
 def _plan_targets(plan: MigrationPlan) -> None:
     """Group units by target, resolve duplicates, compute per-file moves and MNE rewrites."""
     groups: dict[str, list[Unit]] = {}
+    owned: dict[str, dict[str, Any]] | None = None
     for unit in plan.units("move", "identity"):
-        groups.setdefault(os.path.normcase(unit.new_prefix), []).append(unit)
+        groups.setdefault(_path_key(unit.new_prefix or ""), []).append(unit)
     for group in groups.values():
         if len(group) > 1:
             group = _strip_resumed_mne(plan, _drop_link_leftovers(group))
@@ -1746,7 +1782,28 @@ def _plan_targets(plan: MigrationPlan) -> None:
             continue
         tails = [u.tails for u in group]
         if sum(len(t) for t in tails) == len(set().union(*tails)):
-            # Disjoint files (a unit half moved by an interrupted run): one unit, one manifest.
+            # Disjoint files: one unit only when the unfinished migration's journal shows a
+            # unit half moved by that interrupted run. Otherwise (e.g. a pilot run and a
+            # different full run, each partial) they are not combined into one "complete"
+            # unit: refused like differing copies.
+            if owned is None:
+                owned = _unfinished_ownership(plan)
+            if not _interrupted_move(owned, group):
+                for u in group:
+                    u.status = "conflict"
+                plan.refusals.append(
+                    f"{len(group)} sets of outputs map to the same new outputs "
+                    f"{group[0].new_prefix}* with different artifacts: "
+                    + ", ".join(
+                        f"{u.label} ({' '.join(sorted(u.tails))})"
+                        for u in sorted(group, key=lambda u: u.label)
+                    )
+                    + ". No unfinished migration moved them, so they may come from different "
+                    "runs (e.g. a pilot and a full run) and are not combined into one unit. "
+                    "Keep one (delete or move the others away) and run migrate again; the "
+                    "missing artifacts are then recomputed by neurodags run."
+                )
+                continue
             group.sort(key=lambda u: u.status != "identity")
             group[0].members = list(group)
             for other in group[1:]:
@@ -1983,12 +2040,12 @@ def _recorded_duplicate(plan: MigrationPlan, keeper: Unit, other: Unit) -> bool:
     The keeper may have been re-saved since (MNE rewrite), so its bytes cannot be compared
     again; *other*'s files must still match the fingerprints recorded then.
     """
-    known = plan._duplicates.get(os.path.normcase(os.path.normpath(keeper.new_prefix or "")))
+    known = plan._duplicates.get(_path_key(keeper.new_prefix or ""))
     if not known or not (keeper.status == "identity" or _in_transaction(plan, keeper)):
         return False
     files = other.files
     for path in files:
-        fingerprint = known.get(os.path.normcase(os.path.normpath(path)))
+        fingerprint = known.get(_path_key(path))
         if not isinstance(fingerprint, list) or len(fingerprint) != 2:
             return False
         if not _matches(path, *fingerprint):
@@ -2030,12 +2087,14 @@ def _add_move(plan: MigrationPlan, unit: Unit, old: str, new: str, all_old: set[
 def _journal_new_paths(entry: Mapping[str, Any]) -> list[str]:
     """Paths at their new names that a journal entry says this migration produced.
 
-    ``move`` (``new``), ``mne-staged`` (``parts`` ``[name, size, sha256]`` next to ``new``),
-    ``mne-done`` (``new_parts``) and ``split-move-start`` (``parts`` ``[old, new]``).
+    ``move`` and ``move-start`` (``new``; the file must still match the record's
+    ``fingerprint``, see :func:`_owns`), ``mne-staged`` (``parts`` ``[name, size, sha256]``
+    next to ``new``), ``mne-done`` (``new_parts``) and ``split-move-start`` (``parts``
+    ``[old, new]``).
     """
     op = entry.get("op")
     out: list[Any] = []
-    if op == "move":
+    if op in ("move", "move-start"):
         out = [entry.get("new")]
     elif op == "mne-done":
         out = list(entry.get("new_parts") or [])
@@ -2051,17 +2110,65 @@ def _journal_new_paths(entry: Mapping[str, Any]) -> list[str]:
     return [p for p in out if isinstance(p, str)]
 
 
+def _unfinished_ownership(plan: MigrationPlan) -> dict[str, dict[str, Any]]:
+    """Files at their new names the unfinished migration transaction produced, by
+    :func:`_path_key`: ``{"old": 0.3.x path or None, "fingerprint": [size, mtime_ns] or
+    None}`` (``move`` records carry both)."""
+    owned: dict[str, dict[str, Any]] = {}
+    for journal in {t.journal for t in plan.trees}:
+        for entry in _unfinished_entries(journal):
+            moved = entry.get("op") in ("move", "move-start")
+            old = entry.get("old") if moved else None
+            fingerprint = entry.get("fingerprint") if moved else None
+            for path in _journal_new_paths(entry):
+                owned[_path_key(path)] = {
+                    "old": old if isinstance(old, str) else None,
+                    "fingerprint": fingerprint if isinstance(fingerprint, list) else None,
+                }
+    return owned
+
+
+def _owns(owned: Mapping[str, Mapping[str, Any]], path: str, old_prefix: str | None = None) -> bool:
+    """*path* was produced by the unfinished migration and is unchanged since (its recorded
+    fingerprint, when the record has one); with *old_prefix*, moved from that 0.3.x unit."""
+    record = owned.get(_path_key(path))
+    if record is None:
+        return False
+    fingerprint = record.get("fingerprint")
+    if fingerprint is not None:
+        try:
+            if list(file_fingerprint(path)) != fingerprint:
+                return False
+        except OSError:
+            return False
+    old = record.get("old")
+    if old_prefix is not None and old is not None:
+        # Its tail starts with '.' (suffix, marker) or '-' (split part): not a longer token.
+        rest = _path_key(old)[len(_path_key(old_prefix)) :]
+        return _path_key(old).startswith(_path_key(old_prefix)) and rest[:1] in (".", "-")
+    return True
+
+
+def _interrupted_move(owned: Mapping[str, Mapping[str, Any]], group: list[Unit]) -> bool:
+    """*group* (units with disjoint files sharing a target) is one 0.3.x unit an unfinished
+    migration was moving: its files at the new name (``identity``) were all moved by that
+    transaction from the one 0.3.x unit still in place (``move``)."""
+    movers = [u for u in group if u.status == "move"]
+    placed = [u for u in group if u.status == "identity"]
+    if len(movers) > 1 or not placed:
+        return False  # several 0.3.x locations: never one interrupted move
+    old_prefix = movers[0].old_prefix if movers else None
+    return all(_owns(owned, path, old_prefix) for unit in placed for path in unit.files)
+
+
 def _plan_manifests(plan: MigrationPlan) -> None:
     # With a configuration already at naming_version 1, files at their 0.4.0 names without a
     # .done may be an interrupted `neurodags run` (some artifacts new, some old): never
     # certify those. Only units with 0.3.x-named files (moved now) or files an interrupted
     # `migrate --apply` itself moved (its journal) can still be legacy output.
-    journaled: set[str] | None = None
-    if plan.mode == "tree-only":
-        journaled = set()
-        for journal in {t.journal for t in plan.trees}:
-            for entry in read_journal(journal):
-                journaled.update(os.path.normpath(p) for p in _journal_new_paths(entry))
+    # Only the unfinished transaction counts (never a completed migration's records: its
+    # files may since have been replaced by an interrupted `neurodags run`).
+    owned = _unfinished_ownership(plan) if plan.mode == "tree-only" else None
     for unit in _primaries(plan):
         artifacts, markers = _group_view(unit)
         unit.manifest_suffixes = None
@@ -2078,13 +2185,9 @@ def _plan_manifests(plan: MigrationPlan) -> None:
             continue
         if "skip" in markers:
             continue  # .skip is its own state
-        if journaled is not None and not all(
+        if owned is not None and not all(
             member.status == "move"
-            or all(
-                os.path.normpath(p) in journaled
-                for paths in member.artifacts.values()
-                for p in paths
-            )
+            or all(_owns(owned, p) for paths in member.artifacts.values() for p in paths)
             for member in unit.members or [unit]
         ):
             unit.manifest_reason = (
@@ -2684,12 +2787,13 @@ def _config_lock_path(config: str) -> str:
 
 def _lock_dirs(plan: MigrationPlan) -> list[str]:
     """Folders of every tree's lock (an output tree that does not exist yet has none)."""
-    dirs = []
+    dirs: dict[str, str] = {}
     for tree in plan.trees:
         if tree.kind == "derivatives" and not os.path.isdir(tree.root):
             continue
-        dirs.append(os.path.dirname(tree.journal))
-    return list(dict.fromkeys(dirs))
+        directory = os.path.dirname(tree.journal)
+        dirs.setdefault(_path_key(directory), directory)  # one lock per folder, however spelled
+    return list(dirs.values())
 
 
 # -- publication without replacing ----------------------------------------------------
@@ -3084,11 +3188,16 @@ def _apply_member(
         journal.sync()
     for old, new in unit.moves:
         os.makedirs(os.path.dirname(new), exist_ok=True)
+        # Recorded before and after the move, with the file's fingerprint (a hard link
+        # keeps it): a run interrupted right after the move still owns the file, and a
+        # resumed run tells it from a later replacement.
+        record = {"old": old, "new": new, "fingerprint": list(file_fingerprint(old))}
+        journal.write({"op": "move-start", **record})
         try:
             _publish_move(old, new)
         except FileExistsError:
             raise _appeared(new) from None
-        journal.write({"op": "move", "old": old, "new": new})
+        journal.write({"op": "move", **record})
         result.moved.append((old, new))
     for split in unit.split_moves:
         journal.write({"op": "split-move-done", "txn": split["txn"]})
@@ -3197,8 +3306,10 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
     try:
         # The configuration's own lock first (held even when no output tree exists yet),
         # then every tree's.
-        configs = [plan.pipeline] + [c.path for c in plan.config_changes]
-        for config in dict.fromkeys(configs):
+        configs: dict[str, str] = {}
+        for config in [plan.pipeline] + [c.path for c in plan.config_changes]:
+            configs.setdefault(_path_key(config), config)
+        for config in configs.values():
             locks.append(_acquire_lock(os.path.dirname(config), _config_lock_path(config)))
         for directory in _lock_dirs(plan):
             locks.append(_acquire_lock(directory))
@@ -3226,6 +3337,10 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
                 journal.sync()
                 for unit in units:
                     _apply_unit(unit, journal, result)
+                # Every unit of this tree applied: its transaction is finished, and its
+                # records no longer grant ownership (only an interrupted run's do).
+                journal.write({"op": APPLY_COMPLETE})
+                journal.sync()
             finally:
                 journal.close()
         # A separate datasets YAML first, the pipeline (which declares naming_version: 1)
