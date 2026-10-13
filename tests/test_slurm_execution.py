@@ -3,8 +3,8 @@
 Text checks cannot tell a selection that is honoured from one that only appears in a
 comment, so these tests run the generated scripts unchanged with ``bash``. Small shims on
 ``PATH`` stand in for the cluster: ``sbatch`` runs every array task in turn (in submission
-order, which respects ``--dependency=afterok``; scheduler semantics such as ``--export``
-environment filtering are not modelled), ``neurodags`` and ``python`` run this checkout,
+order, which respects ``--dependency=afterok``; ``--export`` without ``ALL`` replaces the
+task environment, as on SLURM), ``neurodags`` and ``python`` run this checkout,
 and ``activate`` is an empty file for ``source activate myenv``. Both shims log their
 arguments so the tests can check what was frozen, counted and submitted.
 """
@@ -36,8 +36,15 @@ for arg in args[:-1]:
     if arg.startswith("--array="):
         lo, hi = (int(x) for x in arg.split("=", 1)[1].split("-"))
     elif arg.startswith("--export="):
-        key, value = arg.split("=", 1)[1].split("=", 1)
-        env[key] = value
+        # SLURM semantics: without ALL, the listed variables *replace* the environment
+        # (PATH and the activated environment are lost).
+        items = arg.split("=", 1)[1].split(",")
+        if "ALL" not in items:
+            env = {}
+        for item in items:
+            if "=" in item:
+                key, value = item.split("=", 1)
+                env[key] = value
 with open(os.environ["SHIM_LOG"], "a") as log:
     log.write(json.dumps({"sbatch": args, "tasks": list(range(lo, hi + 1)),
                           "derivative": env.get("DERIVATIVE")}) + "\\n")
@@ -211,6 +218,20 @@ def test_chained_submission_honours_datasets_override(same_key: Path):
               "--output", "submit_pipeline.sh")  # fmt: skip
     _bash(p / "submit_pipeline.sh", env, p)
     assert _artifacts(p) == ["b-out/x.txt@A.message.txt", "b-out/x.txt@B.message.txt"]
+
+
+def test_chained_sbatch_keeps_the_job_environment(same_key: Path):
+    # --export=DERIVATIVE=X alone would replace the environment (PATH, modules, venv).
+    p = same_key
+    env = _shims(p / "bin")
+    _generate("pipeline.yml", "-d", "override.yml", "--pattern", "chained",
+              "--output", "submit_pipeline.sh")  # fmt: skip
+    _bash(p / "submit_pipeline.sh", env, p)
+    sbatch = [c["sbatch"] for c in _calls(env) if "sbatch" in c]
+    assert [[a for a in argv if a.startswith("--export=")] for argv in sbatch] == [
+        ["--export=ALL,DERIVATIVE=A"],
+        ["--export=ALL,DERIVATIVE=B"],
+    ]
 
 
 def test_chained_submission_honours_derivative_selection(same_key: Path):

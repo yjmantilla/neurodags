@@ -245,17 +245,17 @@ N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv)
 ARRAY="0-$((N - 1))"
 
 JOB1=$(sbatch --parsable --array=$ARRAY \
-    --export=DERIVATIVE=Preprocessed \
+    --export=ALL,DERIVATIVE=Preprocessed \
     run_one_derivative.sh)
 
 JOB2=$(sbatch --parsable --array=$ARRAY \
     --dependency=afterok:$JOB1 \
-    --export=DERIVATIVE=Spectrum \
+    --export=ALL,DERIVATIVE=Spectrum \
     run_one_derivative.sh)
 
 sbatch --array=$ARRAY \
     --dependency=afterok:$JOB2 \
-    --export=DERIVATIVE=BandPower \
+    --export=ALL,DERIVATIVE=BandPower \
     run_one_derivative.sh
 ```
 

@@ -379,12 +379,13 @@ def _slurm_chained(
         is_last = i == len(derivatives) - 1
         if is_last:
             submit_lines.append(
-                f"sbatch --array=$ARRAY {dep}" f"--export=DERIVATIVE={deriv} run_one_derivative.sh"
+                f"sbatch --array=$ARRAY {dep}"
+                f"--export=ALL,DERIVATIVE={deriv} run_one_derivative.sh"
             )
         else:
             submit_lines.append(
                 f"{var}=$(sbatch --parsable --array=$ARRAY {dep}"
-                f"--export=DERIVATIVE={deriv} run_one_derivative.sh)"
+                f"--export=ALL,DERIVATIVE={deriv} run_one_derivative.sh)"
             )
         prev_var = var
 

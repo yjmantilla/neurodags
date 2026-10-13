@@ -294,7 +294,9 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   inputs`/`count-inputs` and as `datasets_configuration=`, and the per-file worker passes
   `derivatives=[...]`. Pipeline and datasets paths are now shell-quoted and reach the
   workers as arguments of a quoted heredoc (never interpolated into shell or Python source),
-  so a name with spaces, quotes, `$` or backquotes runs the intended pipeline. Regenerate
+  so a name with spaces, quotes, `$` or backquotes runs the intended pipeline. The chained
+  submit script exports `--export=ALL,DERIVATIVE=...` (without `ALL`, SLURM replaced the job
+  environment, dropping `PATH` and the activated environment). Regenerate
   scripts made with `-d` or `--derivative`, or for such paths.
 - **The TUI showed one datasets YAML and ran another**: a relative override typed in the Config
   tab was read against the current directory for the summary but against the pipeline's
