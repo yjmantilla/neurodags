@@ -14,7 +14,9 @@ Summary of the grammar
   ``SourceFile`` is reserved (any case).
 - Artifact suffix: ``^(?:\\.[A-Za-z0-9][A-Za-z0-9_-]*)+$``; the last segment is never
   ``done``, ``error`` or ``skip`` (any case), which mark completion markers.
-- Output basename: ``<source basename with @ -> &>@<name><suffix>``.
+- Output basename: ``<source basename verbatim>@<name><suffix>``; parsed at the last ``@``
+  (names and suffixes never contain ``@``), so chained names such as
+  ``sub-1.fif@Clean.fif@Power.nc`` nest.
 - Reference: ``SourceFile`` | ``name`` | ``name`` + ``suffix``.
 - Wide dataframe column: ``name suffix ["@" dim-value ("_" dim-value)*]`` with dims and
   values percent-encoded, or ``name.error`` for the error column.
@@ -136,7 +138,7 @@ _DECIMAL_STR_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?
 _CHAR_HINTS = {
     ".": "'.' starts an artifact suffix (as in Name.nc) and cannot appear in a name",
     "@": "'@' separates the source file from the derivative name in output files",
-    "&": "'&' replaces '@' in output file names and is not allowed in names",
+    "&": "'&' is not allowed in names",
     ",": "commas are not allowed (write decimals with 'p', e.g. 0p5)",
     "/": "path separators are not allowed",
     "\\": "path separators are not allowed",
@@ -619,7 +621,7 @@ class ParsedOutput(NamedTuple):
     """An output basename split into its parts (see :func:`parse_output_basename`)."""
 
     source_part: str
-    """Source basename as written in the output name (``@`` already replaced by ``&``)."""
+    """Source basename, verbatim (everything before the last ``@``)."""
     name: str
     """Derivative name."""
     suffix: str
@@ -633,9 +635,9 @@ class ParsedOutput(NamedTuple):
 def output_prefix_basename(source_basename: str, name: str) -> str:
     """Return the basename prefix shared by all outputs of one (source, derivative) unit.
 
-    Every ``@`` in the source basename becomes ``&`` so the result contains exactly one
-    ``@``. The source part is otherwise kept verbatim (neurodags is agnostic to input naming
-    conventions).
+    The source basename is kept verbatim, including any ``@`` or ``&`` it contains
+    (neurodags is agnostic to input naming conventions). The separator is the last ``@``
+    of the result, because derivative names and suffixes never contain ``@``.
 
     Parameters
     ----------
@@ -647,7 +649,7 @@ def output_prefix_basename(source_basename: str, name: str) -> str:
     Returns
     -------
     str
-        ``<source with @ -> &>@<name>``; append an artifact suffix or a marker suffix.
+        ``<source>@<name>``; append an artifact suffix or a marker suffix.
 
     Raises
     ------
@@ -656,8 +658,8 @@ def output_prefix_basename(source_basename: str, name: str) -> str:
 
     Examples
     --------
-    >>> output_prefix_basename("sub-01@rest.vhdr", "Clean")
-    'sub-01&rest.vhdr@Clean'
+    >>> output_prefix_basename("sub-01.fif@Clean.fif", "Power")
+    'sub-01.fif@Clean.fif@Power'
     """
     if not isinstance(source_basename, str) or source_basename in ("", ".", ".."):
         raise NamingError(f"Invalid source basename {source_basename!r}.")
@@ -666,7 +668,7 @@ def output_prefix_basename(source_basename: str, name: str) -> str:
             f"Source basename {source_basename!r} must not contain a path separator or NUL."
         )
     validate_derivative_name(name)
-    return source_basename.replace("@", "&") + "@" + name
+    return source_basename + "@" + name
 
 
 def output_basename(source_basename: str, name: str, suffix: str) -> str:
@@ -689,9 +691,10 @@ def parse_output_basename(basename: str) -> ParsedOutput | None:
     """Split an output basename into source part, derivative name and suffix.
 
     The split is ``source_part, rest = basename.rsplit("@", 1)`` and
-    ``name, _, s = rest.partition(".")``. The source part is opaque: it is never split on
-    ``&`` (inputs may contain ``&``); recover the original source name from the ``.done``
-    manifest instead.
+    ``name, _, s = rest.partition(".")``. The source part is the immediate source basename,
+    verbatim; it may itself contain ``@`` (a chained output parses again the same way). Treat
+    it as opaque: the ``.done`` manifest, not the file name, records the dataset-relative
+    source path and completion.
 
     Note that an MNE split part ``src@Clean-1.fif`` parses as name ``Clean-1``; the
     split-file rule of :func:`check_derivative_names` keeps that unambiguous.

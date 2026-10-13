@@ -16,20 +16,20 @@ from neurodags.outputs import entry_reference_base, output_reference_base
 # ---------------------------------------------------------------------------
 
 
-def test_reference_base_replaces_at_in_basename_only():
+def test_reference_base_keeps_at_verbatim():
     result = output_reference_base("with@dir/sub-01.vhdr@BasicPrep.fif", "/unused", "/derivs")
-    assert result == "/derivs/with@dir/sub-01.vhdr&BasicPrep.fif"
+    assert result == "/derivs/with@dir/sub-01.vhdr@BasicPrep.fif"
 
 
 def test_reference_base_multiple_at_signs():
     result = output_reference_base("sub-01.vhdr@First@Second.fif", "/unused", "/derivs")
-    assert result == "/derivs/sub-01.vhdr&First&Second.fif"
+    assert result == "/derivs/sub-01.vhdr@First@Second.fif"
 
 
 def test_reference_base_without_derivatives_path_is_next_to_source(tmp_path):
     source = str(tmp_path / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
     result = output_reference_base("sub-01/sub-01.vhdr@BasicPrep.fif", source, None)
-    assert result == str(tmp_path / "sub-01" / "sub-01.vhdr&BasicPrep.fif")
+    assert result == str(tmp_path / "sub-01" / "sub-01.vhdr@BasicPrep.fif")
 
 
 @pytest.mark.parametrize("rel", ["", "/abs/x.fif", "../x.fif", "a//b.fif", "./x.fif"])
@@ -53,7 +53,7 @@ def test_entry_reference_base_uses_source_root_and_subdir(tmp_path):
     )
     entry = InputEntry(0, "test", "sub-01/sub-01.vhdr@BasicPrep.fif", str(raw_dir / "sub-01" / "x"))
     assert entry_reference_base(entry, ds_config) == str(
-        deriv_dir / "stage1" / "sub-01" / "sub-01.vhdr&BasicPrep.fif"
+        deriv_dir / "stage1" / "sub-01" / "sub-01.vhdr@BasicPrep.fif"
     )
 
 

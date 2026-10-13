@@ -23,16 +23,16 @@ Derivatives mirror the directory structure below each dataset's `source_root` (i
 
 ### Chaining pipelines (neurodags output as source)
 
-When a derivative produced by one pipeline run is used as the source file in a subsequent pipeline run, its filename already contains `@` (e.g. `sub-1.fif@CleanedEEG.fif`). NeuroDAGs automatically replaces that `@` with `&` when building the reference base, so the one-`@`-per-filename invariant is preserved:
+When a derivative produced by one pipeline run is used as the source file in a subsequent pipeline run, its filename already contains `@` (e.g. `sub-1.fif@CleanedEEG.fif`). The source name is kept verbatim, so chained names nest:
 
 ```
-sub-1.fif@CleanedEEG.fif      → source (a previous derivative)
-sub-1.fif&CleanedEEG.fif@PowerSpectrum.nc  → new derivative
+sub-1.fif@CleanedEEG.fif                    → source (a previous derivative)
+sub-1.fif@CleanedEEG.fif@PowerSpectrum.nc   → new derivative
 ```
 
-This means downstream tooling can always split on the single `@` (`basename.rsplit("@", 1)`) to separate the source identity from the derivative name; the original source name is kept in the unit's `.done` manifest. Set the downstream dataset's `source_root` to the upstream `derivatives_path` (or a folder of it): discovery never returns the dataset's own output tree, nor the `code/` and `.neurodags/` folders (see {ref}`Output layout <naming-output-layout>`).
+Derivative names and artifact suffixes never contain `@`, so the **last** `@` always separates the source from the derivative: `basename.rsplit("@", 1)` gives the source basename and `name + suffix` ({func}`neurodags.naming.parse_output_basename`), and the source part parses again the same way. Scripts that split on the *first* `@` get the wrong source for chained names. The `.done` manifest records the dataset-relative source path.
 
-Avoid `@` and `&` in raw source file names: two sources that differ only by `@`/`&` (`a@b.vhdr`, `a&b.vhdr` in one folder) map to the same outputs and are refused before running.
+Select upstream outputs with a pattern anchored on the full artifact suffix (`*@CleanedEEG.fif`): a broad pattern such as `*@CleanedEEG*` also matches downstream outputs like `sub-1.fif@CleanedEEG.fif@PowerSpectrum.nc` when they share a tree. Set the downstream dataset's `source_root` to the upstream `derivatives_path` (or a folder of it): discovery skips the `code/` and `.neurodags/` folders and the dataset's own output tree when that tree lies strictly below its `source_root`; it does not skip outputs written next to the sources or other pipelines' trees (see {ref}`Output layout <naming-output-layout>`).
 
 ## Node
 

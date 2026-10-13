@@ -133,7 +133,7 @@ def test_manifest_keeps_original_source_name(tmp_path):
     pipe = _project(tmp_path, {"Fit": _chain()})
     run_pipeline(str(pipe), raise_on_error=True)
 
-    done = tmp_path / "out" / "sub-01" / "a&b.txt@Fit.done"
+    done = tmp_path / "out" / "sub-01" / "a@b.txt@Fit.done"
     assert json.loads(done.read_text())["source"]["rel"] == "sub-01/a@b.txt"
 
 
@@ -201,8 +201,9 @@ def test_unit_state_precedence(tmp_path):
     assert unit_state(prefix, "Fit").state == "skipped"
 
 
-def test_output_prefix_validates_name_and_rewrites_at():
-    assert output_prefix("/d/a@b.vhdr", "Fit") == "/d/a&b.vhdr@Fit"
+def test_output_prefix_validates_name_and_keeps_source_verbatim():
+    assert output_prefix("/d/a@b.vhdr", "Fit") == "/d/a@b.vhdr@Fit"
+    assert output_prefix("/d/a&b.vhdr", "Fit") == "/d/a&b.vhdr@Fit"
     with pytest.raises(ValueError, match=r"Fit\.v2"):
         output_prefix("/d/a.vhdr", "Fit.v2")
 
@@ -492,21 +493,41 @@ def test_tree_copied_to_another_mount_verifies_via_manifest(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_sources_mapping_to_same_prefix_fail_before_running(tmp_path, capsys):
+def test_at_and_ampersand_sources_are_distinct_units(tmp_path, capsys):
+    """Source basenames are verbatim: a@b.txt and a&b.txt in one folder do not collide."""
     _inputs(tmp_path / "raw", ["sub-01/a@b.txt", "sub-01/a&b.txt"])
     pipe = _project(tmp_path, {"Fit": _chain()})
+    run_pipeline(str(pipe), raise_on_error=True)
 
+    out = tmp_path / "out" / "sub-01"
+    for source in ("a@b.txt", "a&b.txt"):
+        manifest = json.loads((out / f"{source}@Fit.done").read_text())
+        assert manifest["source"]["rel"] == f"sub-01/{source}"
+        assert (out / f"{source}@Fit.message.txt").read_text() != ""
+        assert unit_state(str(out / f"{source}@Fit"), "Fit").state == "done"
+
+    assert main(["status", str(pipe), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["derivatives"]["Fit"]["done"] == 2
+    df = build_derivative_dataframe(str(pipe))
+    assert len(df) == 2
+    # Both are cache hits on the next run (nothing rewritten).
+    before = {p: p.stat().st_mtime_ns for p in out.iterdir()}
+    run_pipeline(str(pipe), raise_on_error=True)
+    assert {p: p.stat().st_mtime_ns for p in out.iterdir()} == before
+
+
+def test_sources_mapping_to_same_reference_base_are_refused():
+    """Genuine layout collisions (same normalized base) are still refused (spec 4.3)."""
+    from neurodags.outputs import check_output_collisions
+
+    check_output_collisions([("d: a@b.vhdr", "/o/a@b.vhdr"), ("d: a&b.vhdr", "/o/a&b.vhdr")])
     with pytest.raises(DatasetConfigError) as excinfo:
-        run_pipeline(str(pipe))
+        check_output_collisions([("d1: x.vhdr", "/o/x.vhdr"), ("d2: x.vhdr", "/o/./x.vhdr")])
     message = str(excinfo.value)
-    assert "d: sub-01/a@b.txt" in message
-    assert "d: sub-01/a&b.txt" in message
-    assert not (tmp_path / "out").exists()
-
-    assert main(["dry-run", str(pipe)]) == 2
-    assert "same outputs" in capsys.readouterr().err
-    with pytest.raises(DatasetConfigError):
-        build_derivative_dataframe(str(pipe))
+    assert "'d1: x.vhdr' and 'd2: x.vhdr'" in message
+    assert "same outputs" in message
+    assert "'&'" not in message
 
 
 def test_chained_stage_does_not_discover_its_own_outputs(tmp_path, capsys):
@@ -590,3 +611,113 @@ def test_status_reports_incomplete(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "incomplete" in out
     assert "not listed in its .done" in out
+
+
+# ---------------------------------------------------------------------------
+# Chained names: verbatim sources, last '@'
+# ---------------------------------------------------------------------------
+
+CHAINED = {
+    "name": "d",
+    "source_root": "raw",
+    "file_pattern": "raw/**/*@Clean.fif",
+    "derivatives_path": "out",
+}
+
+
+def test_chained_outputs_keep_upstream_name_and_cache(tmp_path, capsys):
+    _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif", "sub-02/x1.txt@Clean.fif"])
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=CHAINED)
+    run_pipeline(str(pipe), raise_on_error=True)
+    out = tmp_path / "out"
+    assert _files(out / "sub-01") == [
+        "x0.txt@Clean.fif@Fit.done",
+        "x0.txt@Clean.fif@Fit.message.txt",
+    ]
+    manifest = json.loads((out / "sub-01" / "x0.txt@Clean.fif@Fit.done").read_text())
+    assert manifest["source"]["rel"] == "sub-01/x0.txt@Clean.fif"
+
+    plan = run_pipeline(str(pipe), dry_run=True)
+    final = _final(plan, "Fit", "x0.txt@Clean.fif")
+    assert final["cached"] is True
+    assert main(["status", str(pipe), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["derivatives"]["Fit"]["done"] == 2
+    df = build_derivative_dataframe(str(pipe))
+    assert len(df) == 2
+
+
+def test_status_ignores_downstream_outputs_in_the_same_folder(tmp_path, capsys):
+    """For prefix x@Fit, x@Fit.message.txt@Power.nc matches the glob but is another unit."""
+    _inputs(tmp_path / "raw")
+    pipe = _project(tmp_path, {"Fit": _chain()})
+    run_pipeline(str(pipe), raise_on_error=True)
+    sub1 = tmp_path / "out" / "sub-01"
+    sub2 = tmp_path / "out" / "sub-02"
+    for folder, source in ((sub1, "x0.txt"), (sub2, "x1.txt")):
+        for tail in (".nc", ".done", ".error", ".report.html"):
+            (folder / f"{source}@Fit.message.txt@Power{tail}").write_text("downstream")
+    # The upstream unit of sub-02 is gone: only its downstream outputs remain.
+    for p in sub2.glob("x1.txt@Fit.*"):
+        if "@Power" not in p.name:
+            p.unlink()
+
+    done = unit_state(str(sub1 / "x0.txt@Fit"), "Fit")
+    assert done.state == "done"
+    assert done.unlisted == ()
+    missing = unit_state(str(sub2 / "x1.txt@Fit"), "Fit")
+    assert missing.state == "missing"  # never done, never incomplete
+
+    assert main(["status", str(pipe), "--format", "json", "--include-files"]) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["derivatives"]["Fit"]["done"] == 1
+    assert data["derivatives"]["Fit"]["missing"] == 1
+    assert data["derivatives"]["Fit"]["incomplete"] == 0
+    assert data["unlisted_files"] == 0
+    # A truly unrecognized leftover of the unit is still reported.
+    (sub1 / "x0.txt@Fit.old.txt").write_text("stray")
+    assert unit_state(str(sub1 / "x0.txt@Fit"), "Fit").unlisted == (
+        str(sub1 / "x0.txt@Fit.old.txt"),
+    )
+
+
+def test_unmigrated_ampersand_outputs_stop_with_a_pointer_to_migrate(tmp_path, capsys):
+    """Outputs at the pre-0.4.0 '&' prefix and none at the verbatim one: loud, no recompute."""
+    _inputs(tmp_path / "raw", ["sub-01/x0.txt@Clean.fif"])
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=CHAINED)
+    legacy = tmp_path / "out" / "sub-01" / "x0.txt&Clean.fif@Fit.message.txt"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("0.3.x output")
+
+    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
+        run_pipeline(str(pipe))
+    assert _files(tmp_path / "out") == ["sub-01/x0.txt&Clean.fif@Fit.message.txt"]
+    assert main(["dry-run", str(pipe)]) == 2
+    assert "neurodags migrate" in capsys.readouterr().err
+    assert main(["status", str(pipe)]) == 2
+    assert "neurodags migrate" in capsys.readouterr().err
+    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
+        build_derivative_dataframe(str(pipe))
+
+    # The 0.3.x on-disk token of a snake_case name is checked too.
+    pipe = _project(tmp_path, {"fit_x": _chain()}, dataset=CHAINED)
+    legacy.rename(legacy.parent / "x0.txt&Clean.fif@FitX.message.txt")
+    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
+        run_pipeline(str(pipe))
+
+    # Once something exists at the verbatim prefix, the guard is quiet.
+    pipe = _project(tmp_path, {"Fit": _chain()}, dataset=CHAINED)
+    (legacy.parent / "x0.txt&Clean.fif@Fit.message.txt").write_text("0.3.x output")
+    (legacy.parent / "x0.txt@Clean.fif@Fit.message.txt").write_text("partial")
+    run_pipeline(str(pipe), raise_on_error=True)
+    assert unit_state(str(legacy.parent / "x0.txt@Clean.fif@Fit"), "Fit").state == "done"
+
+
+def test_legacy_guard_ignores_real_ampersand_sources(tmp_path):
+    from neurodags.outputs import check_legacy_chained_outputs
+
+    (tmp_path / "a&b.vhdr@Fit.nc").write_text("output of the real a&b.vhdr")
+    bases = [str(tmp_path / "a@b.vhdr"), str(tmp_path / "a&b.vhdr")]
+    check_legacy_chained_outputs(bases, ["Fit"])  # owned by the '&' source: no error
+    with pytest.raises(DatasetConfigError, match="neurodags migrate"):
+        check_legacy_chained_outputs(bases[:1], ["Fit"])
+    check_legacy_chained_outputs(bases[:1], [])  # no derivatives: nothing to check

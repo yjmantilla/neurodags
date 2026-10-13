@@ -8,8 +8,8 @@ runs.
 
 NeuroDAGs is **agnostic to your file-naming convention**: it keeps your source file names (BIDS or
 not) and only appends its own markers — `@` (source/derivative separator), the derivative name
-and the artifact suffix — plus `&`, which replaces `@` when a source file name already contains
-one.
+and the artifact suffix. Source file names are kept verbatim, including any `@` or `&` they
+contain.
 
 ```{important}
 **Changed in 0.4.0.** Derivative names are used **verbatim** on disk (no CamelCase conversion),
@@ -44,10 +44,12 @@ Every saved artifact of a *unit* (one source file × one derivative) is written 
 
 - **`<reference_base>`** identifies the source file (see [Output layout](#naming-output-layout)).
   It keeps the source's own extension: `sub-01_task-rest_eeg.vhdr@...`.
-- **`@`** separates the source from the derivative. There is exactly one `@` per output file
-  name (an `@` in the source name is written as `&`), so `basename.rsplit("@", 1)` gives
-  `(source part, name + suffix)`, and `name, _, s = rest.partition(".")` gives the name and
-  suffix `"." + s` ({func}`neurodags.naming.parse_output_basename`).
+- **`@`** separates the source from the derivative: it is the **last** `@` of the file name.
+  The source part is the source basename verbatim and may itself contain `@` (a chained output
+  such as `sub-1.fif@CleanedEEG.fif@PowerSpectrum.nc`), but names and suffixes never do, so
+  `basename.rsplit("@", 1)` gives `(source part, name + suffix)`, and
+  `name, _, s = rest.partition(".")` gives the name and suffix `"." + s`
+  ({func}`neurodags.naming.parse_output_basename`). Do not split on the first `@`.
 - **`<name>`** is the derivative name exactly as written in `DerivativeDefinitions`.
 - **`<artifact suffix>`** is the key of each artifact the last node returns, appended verbatim:
   `.fif`, `.nc`, `.json`, `.report.html`, `.EO_baseline.fif`, `.fif.gz`. It must match
@@ -165,7 +167,7 @@ value. All problems are reported together (exit code `2` on the command line):
 | Problem | Why |
 |---------|-----|
 | Not a YAML string (`Yes`, `On`, `No`, `1_000`, `0x1F`, `~` unquoted) | YAML loads them as booleans, numbers or null; quote the key. |
-| Does not match the grammar | `.` starts the artifact suffix, `@`/`&` delimit the source, path and glob characters break paths, `,`/`:`/spaces break YAML lists, CSV and the TUI filter. |
+| Does not match the grammar | `.` starts the artifact suffix, `@` delimits the source, `&` and path and glob characters break shells and paths, `,`/`:`/spaces break YAML lists, CSV and the TUI filter. |
 | `SourceFile` (any case) | `derivative: SourceFile` always means the input file. |
 | Two names differ only in case (`Clean` / `clean`) | Same files on case-insensitive filesystems (macOS, Windows). |
 | `X` and `X-<digits>` both defined (`Clean` / `Clean-1`) | MNE writes split recordings as `X-1.fif`, so `X-1`'s files would look like parts of `X`. |
@@ -254,7 +256,7 @@ For a source file `f` discovered in dataset `D` on the active mount:
 
 ```text
 rel    = f relative to D's source_root            (lexical, POSIX separators, no "..")
-base   = basename(rel) with every "@" replaced by "&"
+base   = basename(rel)                         (verbatim, including any "@" or "&")
 outdir = derivatives_path / [derivatives_subdir] / dirname(rel)    with derivatives_path
 outdir = dirname(f)                                                 without (next to the source)
 prefix = outdir / (base + "@" + name)
@@ -270,18 +272,25 @@ prefix = outdir / (base + "@" + name)
 - **`derivatives_subdir`**: datasets sharing a `derivatives_path` must use different
   `derivatives_subdir` values (see [datasets.yml](datasets_yaml.md)), so adding a dataset never
   moves another one's outputs.
-- **`@` in the source basename becomes `&`**: when the source file name already contains `@`
-  (typically a NeuroDAGs output used as the input of another pipeline), every `@` in the
-  basename (not in folder names) is replaced by `&`, keeping a single `@` per output name. The
-  manifest keeps the original name in `source.rel`.
-- **Collisions are refused before running**: two sources mapping to the same prefix (for example
-  `a@b.vhdr` and `a&b.vhdr` in one folder) stop `run`, `dry-run`, `status` and `dataframe` with
-  an error naming both.
+- **Source basenames are verbatim**: a source whose name already contains `@` (typically a
+  NeuroDAGs output used as the input of another pipeline) keeps it, so its outputs have several
+  `@` (`x.vhdr@clean_prep.fif@Entropy.json`); the last one is the separator. `a@b.vhdr` and
+  `a&b.vhdr` in one folder are two distinct units. Before 0.4.0 every `@` of the source basename
+  was written as `&`; `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to
+  `neurodags migrate` when a unit's files exist only at that old `&` prefix.
+- **Collisions are refused before running**: two sources mapping to the same reference base
+  (datasets sharing an output tree, or names differing only in case on a case-insensitive
+  filesystem) stop `run`, `dry-run`, `status` and `dataframe` with an error naming both.
 - **Chained pipelines**: a dataset whose `source_root` is an upstream `derivatives_path` mirrors
-  the upstream tree. Discovery never returns the dataset's own output tree
-  (`derivatives_path[/derivatives_subdir]` below its `source_root`), nor files in `code/` or
-  `.neurodags/` under any `derivatives_path` of the configuration. `validate` warns when a
-  dataset's `source_root` contains its own outputs without an `exclude_pattern` covering them.
+  the upstream tree. Discovery skips files in `code/` or `.neurodags/` under any
+  `derivatives_path` of the configuration, and the dataset's own output tree
+  (`derivatives_path[/derivatives_subdir]`) when it lies strictly below its `source_root`. It
+  does not skip outputs written next to the sources, an output tree equal to or above
+  `source_root`, or other pipelines' trees. `validate` warns when a dataset's `source_root`
+  contains its own outputs without an `exclude_pattern` covering them. Anchor chained patterns
+  on the full artifact suffix (`*@clean_prep.fif`): a broad `*@clean_prep*` or `*@clean_prep.*`
+  also matches downstream outputs such as `x.vhdr@clean_prep.fif@Entropy.json` in the same
+  tree.
 - **`code/`**: `neurodags run` copies the pipeline YAML, `new_definitions` files and datasets YAML,
   plus `neurodags_env.json`, into `<derivatives_path>/code/` (not under `derivatives_subdir`; see
   [Usage](usage.md)). Without `derivatives_path` there is no snapshot.
@@ -369,13 +378,13 @@ derivatives/
 A second pipeline uses the cleaned files as its sources (`source_root: derivatives`,
 `file_pattern: derivatives/**/*@clean_prep.fif`, `derivatives_path: derivatives2`) with a
 derivative `Entropy`. The tree below `source_root` is mirrored (`code/` is never discovered)
-and the `@` of the source becomes `&`:
+and the source name is kept verbatim, so the last `@` separates it from `Entropy`:
 
 ```text
 derivatives2/
 └── sub-01/eeg/
-    ├── sub-01_task-rest_eeg.vhdr&clean_prep.fif@Entropy.json
-    └── sub-01_task-rest_eeg.vhdr&clean_prep.fif@Entropy.done
+    ├── sub-01_task-rest_eeg.vhdr@clean_prep.fif@Entropy.json
+    └── sub-01_task-rest_eeg.vhdr@clean_prep.fif@Entropy.done
 ```
 
 Dataframe columns from the first pipeline (wide format, `band_power` with `for_dataframe: true`;

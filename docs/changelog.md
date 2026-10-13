@@ -52,15 +52,28 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `.report.html`, `.EO_baseline.fif`), must not end in `.done`/`.error`/`.skip`, and two keys
   must not differ only in case. An invalid key fails the unit with an `.error` marker and
   nothing is written.
+- **Source file names are kept verbatim in output names; the last `@` separates source and
+  derivative.** 0.3.x wrote every `@` of a source basename as `&`, so a chained output was
+  `sub-1.fif&CleanedEEG.fif@PowerSpectrum.nc`; it is now
+  `sub-1.fif@CleanedEEG.fif@PowerSpectrum.nc`. `a@b.vhdr` and `a&b.vhdr` in one folder are
+  distinct units (no longer refused as a collision). Parse output names at the last `@`
+  (`neurodags.naming.parse_output_basename`, `rsplit("@", 1)`); scripts that split on the
+  first `@` get the wrong source for chained names. A broad chained pattern such as
+  `*@CleanedEEG*` now also matches downstream outputs in the same tree; anchor it on the
+  artifact suffix (`*@CleanedEEG.fif`). `neurodags migrate` renames 0.3.x `&` outputs; until
+  then `run`, `dry-run`, `status` and `dataframe` stop with an error pointing to it when a
+  unit's files exist only at the old `&` prefix. `status` no longer counts a downstream
+  unit's files (`x@Clean.fif@Power.nc`) as unlisted or incomplete files of the upstream unit
+  `x@Clean`.
 - **Output folders are computed from `source_root`** (#50):
-  `<derivatives_path>[/<derivatives_subdir>]/<dirname(rel)>/<basename with @ -> &>@<name><suffix>`
+  `<derivatives_path>[/<derivatives_subdir>]/<dirname(rel)>/<basename>@<name><suffix>`
   where `rel` is the source path below `source_root` (next to the source without
   `derivatives_path`). Locations no longer depend on the common root of the discovered files
   (`find_unique_root`), so adding files, narrowing `file_pattern`, limits, indices or input
   lists never move outputs; a single-file dataset keeps its folders below `source_root`. Trees
   written by 0.3.x may sit at other folders (pilot-era roots; `neurodags migrate` moves them).
-  Two sources mapping to the same outputs (`a@b.vhdr` and `a&b.vhdr` in one folder) are
-  refused before running (`DatasetConfigError`). `InputEnumeration.common_roots` is replaced
+  Two sources mapping to the same outputs (datasets sharing a tree, names differing only in
+  case) are refused before running (`DatasetConfigError`). `InputEnumeration.common_roots` is replaced
   by `source_roots`, and the third value returned by `get_all_files_across_datasets` /
   `get_all_files_from_pipeline_configuration` is now the resolved `source_root` per dataset.
   `neurodags.utils.find_unique_root` remains as a utility but no longer decides the layout.
@@ -160,8 +173,11 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   YAML's directory; files are edited in place (comments kept) and written last, with
   `.bak-0.3` backups. Existing outputs are found by scanning each `derivatives_path` (0.3.x
   CamelCase tokens, pilot-era flat trees, the pre-0.3.3 `<derivatives_path>@Deriv.*` form,
-  `&` source names) and moved with `os.replace` to the verbatim 0.4.0 names and folders;
-  `.error`/`.skip` markers move with their unit; orphans are left in place. MNE split
+  `&` source names, matched by their 0.3.x spelling) and moved with `os.replace` to the
+  verbatim 0.4.0 names and folders (`x.vhdr&A.fif@B.nc` becomes `x.vhdr@A.fif@B.nc`);
+  `.error`/`.skip` markers move with their unit; orphans are left in place, but chained
+  outputs whose upstream source is not discovered are refused (*unresolved*) rather than
+  recomputed. MNE split
   recordings are re-saved with MNE under the new name and verified before the old parts are
   deleted. Units whose artifact set is known get a `.done` with `"origin": "migrate"`.
   Ambiguous mappings, occupied targets, two old copies of one unit with different content
