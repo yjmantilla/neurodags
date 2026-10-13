@@ -84,6 +84,13 @@ size the array from it, and the workers read it (`inputs=os.path.abspath("inputs
 submit from the directory that holds `inputs.tsv`). Keep `inputs.tsv` until every array of
 the run, including resubmissions, has finished.
 
+The selection given to `slurm-script` is carried into every generated command and worker:
+`-d datasets.yml` (resolved against the directory you run `slurm-script` from, and written
+into the script as an absolute path) is passed to `neurodags inputs`/`count-inputs` and as
+`datasets_configuration=` to `run_pipeline`, and `--derivative` limits what the workers run
+(per-file workers pass `derivatives=[...]`; flat and chained arrays only list the selected
+derivatives).
+
 ### Counting source files
 
 `neurodags count-inputs` prints the number of input entries the pipeline will process, i.e. the size of the index range `--only-index` accepts (`0` to `N-1`). A file listed under two dataset entries counts twice, because it has two indices. With `--inputs`, it prints the number of entries in the list (`missing-source` ones included, so the array covers every index of the list). Useful in submission scripts:

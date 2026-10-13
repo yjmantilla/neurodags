@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -231,16 +232,45 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _slurm_per_file(config_path: str, derivatives: list[str]) -> str:
+def _slurm_datasets_flag(datasets: str | None) -> str:
+    """`` -d <path>`` for the shell lines of a SLURM template (empty without an override)."""
+    return f" -d {shlex.quote(datasets)}" if datasets else ""
+
+
+def _slurm_py_literal(value: object, *, unquoted_heredoc: bool) -> str:
+    """A Python literal for *value*, safe inside the template's ``python - <<EOF`` body.
+
+    In an unquoted heredoc the shell still expands ``$``, backquotes and backslashes (the
+    flat/chained bodies rely on it to inject ``$DERIVATIVE``/``$FILE_INDEX``), so those
+    characters are escaped.
+    """
+    text = repr(value)
+    if unquoted_heredoc:
+        text = text.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
+    return text
+
+
+def _slurm_datasets_kwarg(datasets: str | None, *, unquoted_heredoc: bool) -> str:
+    """The ``datasets_configuration=`` line of a generated ``run_pipeline`` call."""
+    if not datasets:
+        return ""
+    literal = _slurm_py_literal(datasets, unquoted_heredoc=unquoted_heredoc)
+    return f"\n    datasets_configuration={literal},  # -d given to slurm-script"
+
+
+def _slurm_per_file(config_path: str, derivatives: list[str], datasets: str | None = None) -> str:
     deriv_names = ", ".join(derivatives)
+    d_flag = _slurm_datasets_flag(datasets)
+    d_kwarg = _slurm_datasets_kwarg(datasets, unquoted_heredoc=False)
+    deriv_literal = _slurm_py_literal(list(derivatives), unquoted_heredoc=False)
     return f"""\
 #!/bin/bash
 # per-file: one array task per file — all derivatives run in dependency order per task.
 # Derivatives: {deriv_names}
 #
 # Submit (freeze the input list once; every task reads the same list, see the HPC guide):
-#   neurodags inputs {config_path} -o inputs.tsv
-#   N=$(neurodags count-inputs {config_path} --inputs inputs.tsv)
+#   neurodags inputs {config_path}{d_flag} -o inputs.tsv
+#   N=$(neurodags count-inputs {config_path}{d_flag} --inputs inputs.tsv)
 #   sbatch --array=0-$((N - 1)) run_array.sh
 #
 #SBATCH --job-name=neurodags
@@ -261,8 +291,9 @@ config_path = os.path.abspath("{config_path}")
 config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
-    base_dir=os.path.dirname(config_path),
+    base_dir=os.path.dirname(config_path),{d_kwarg}
     inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
+    derivatives={deriv_literal},
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
     skip_errors=True,
@@ -271,8 +302,10 @@ EOF
 """
 
 
-def _slurm_flat(config_path: str, derivatives: list[str]) -> str:
+def _slurm_flat(config_path: str, derivatives: list[str], datasets: str | None = None) -> str:
     n = len(derivatives)
+    d_flag = _slurm_datasets_flag(datasets)
+    d_kwarg = _slurm_datasets_kwarg(datasets, unquoted_heredoc=True)
     deriv_arr = "(" + " ".join(f'"{d}"' for d in derivatives) + ")"
     return f"""\
 #!/bin/bash
@@ -280,8 +313,8 @@ def _slurm_flat(config_path: str, derivatives: list[str]) -> str:
 # WARNING: use only when derivatives are independent (no inter-derivative dependencies).
 #
 # Submit (freeze the input list once; every task reads the same list, see the HPC guide):
-#   neurodags inputs {config_path} -o inputs.tsv
-#   N=$(neurodags count-inputs {config_path} --inputs inputs.tsv)
+#   neurodags inputs {config_path}{d_flag} -o inputs.tsv
+#   N=$(neurodags count-inputs {config_path}{d_flag} --inputs inputs.tsv)
 #   TOTAL=$(( N * {n} ))
 #   sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
 #
@@ -309,7 +342,7 @@ config_path = os.path.abspath("{config_path}")
 config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
-    base_dir=os.path.dirname(config_path),
+    base_dir=os.path.dirname(config_path),{d_kwarg}
     inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
     derivatives=["$DERIVATIVE"],
     only_index=$FILE_INDEX,
@@ -319,8 +352,12 @@ EOF
 """
 
 
-def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
+def _slurm_chained(
+    config_path: str, derivatives: list[str], datasets: str | None = None
+) -> tuple[str, str]:
     """Return (submit_script, worker_script) for chained per-derivative arrays."""
+    d_flag = _slurm_datasets_flag(datasets)
+    d_kwarg = _slurm_datasets_kwarg(datasets, unquoted_heredoc=True)
     submit_lines = [
         "#!/bin/bash",
         "# chained: per-derivative sequential arrays chained via --dependency=afterok.",
@@ -329,8 +366,8 @@ def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
         "# Usage: bash submit_pipeline.sh",
         "",
         "# Freeze the input list once; every task reads the same list (see the HPC guide).",
-        f"neurodags inputs {config_path} -o inputs.tsv",
-        f"N=$(neurodags count-inputs {config_path} --inputs inputs.tsv)",
+        f"neurodags inputs {config_path}{d_flag} -o inputs.tsv",
+        f"N=$(neurodags count-inputs {config_path}{d_flag} --inputs inputs.tsv)",
         'ARRAY="0-$((N - 1))"',
         "",
     ]
@@ -375,7 +412,7 @@ config_path = os.path.abspath("{config_path}")
 config = load_pipeline_configuration(config_path)
 run_pipeline(
     config,
-    base_dir=os.path.dirname(config_path),
+    base_dir=os.path.dirname(config_path),{d_kwarg}
     inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
     derivatives=["$DERIVATIVE"],
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
@@ -478,7 +515,14 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
         dataset = _status_scalar(row.get("dataset"))
         # Listed in a frozen input list (--inputs) but gone from disk (spec §8.6).
         missing_source = _status_scalar(row.get("source_status")) == "missing-source"
-        status = "missing-source" if missing_source else _status_classify(plan)
+        # The dry run could not plan this unit (its error is kept on the row).
+        planning_error = _status_scalar(row.get("planning_error"))
+        if missing_source:
+            status = "missing-source"
+        elif planning_error is not None:
+            status = "planning-error"
+        else:
+            status = _status_classify(plan)
         migrated = status == "done" and _status_origin(plan) == "migrate"
         rows.append(
             {
@@ -492,9 +536,28 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
                 "migrated": migrated,
                 "error_path": _status_error_path(plan),
                 "unlisted": [] if missing_source else _status_unlisted(plan),
+                "planning_error": None if planning_error is None else str(planning_error),
             }
         )
     return rows
+
+
+def _planning_error_message(rows: list[dict]) -> str | None:
+    """One message naming the units a dry run could not plan (``None`` when there are none)."""
+    failed = sorted(
+        (r for r in rows if r["status"] == "planning-error"),
+        key=lambda r: (*_status_index_key(r), r["derivative"]),
+    )
+    if not failed:
+        return None
+    lines = [
+        f"{len(failed)} unit(s) could not be planned, so their status is unknown and the "
+        "inspection is not complete (fix the configuration; see the log for tracebacks):"
+    ]
+    for r in failed:
+        idx = r["index"] if r["index"] is not None else "?"
+        lines.append(f"  [{r['derivative']}] [idx {idx}] {r['file_path']}: {r['planning_error']}")
+    return "\n".join(lines)
 
 
 def _status_index_key(row: dict) -> tuple[bool, int]:
@@ -537,6 +600,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "missing": 0,
         "errored": 0,
         "missing-source": 0,
+        "planning-error": 0,
     }
     per_deriv: dict[str, dict[str, int]] = {}
     all_derivs = sorted({r["derivative"] for r in rows})
@@ -557,7 +621,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         and grand["incomplete"] == 0
         and grand["errored"] == 0
         and grand["missing-source"] == 0
+        and grand["planning-error"] == 0
     )
+    planning_error_message = _planning_error_message(rows)
     n_unlisted = sum(len(r["unlisted"]) for r in rows)
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
     missing_source_indices = _status_indices(rows, ("missing-source",))
@@ -573,6 +639,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         else:
             wanted = ("missing", "incomplete", "errored")
         print(" ".join(str(i) for i in _status_indices(rows, wanted)))
+        if planning_error_message:
+            print(f"neurodags: error: {planning_error_message}", file=sys.stderr)
         return exit_code
 
     if fmt == "json":
@@ -589,6 +657,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "inputs": inputs_file,
             "missing_source_indices": missing_source_indices,
             "not_in_list": n_not_in_list,
+            "planning_error_indices": _status_indices(rows, ("planning-error",)),
         }
         if include_files:
             payload["files"] = [
@@ -601,10 +670,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "label": r["label"],
                     "error_path": r["error_path"],
                     "unlisted": r["unlisted"],
+                    "planning_error": r["planning_error"],
                 }
                 for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
             ]
         print(json.dumps(payload, indent=2))
+        if planning_error_message:
+            print(f"neurodags: error: {planning_error_message}", file=sys.stderr)
         return exit_code
 
     def _print_input_list_report() -> None:
@@ -681,6 +753,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "manifest; they are ignored (see --format json --include-files)."
         )
     _print_input_list_report()
+
+    if planning_error_message:
+        print(f"\n{planning_error_message}")
 
     if grand["errored"]:
         print(f"\n{grand['errored']} error(s) found.", end="")
@@ -978,8 +1053,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Output format: 'table' (default), 'json', or 'indices' (only the sorted, "
             "space-separated file indices that are missing, incomplete or errored — narrow "
             "with --list-missing / --list-errors — ready for --only-index or sbatch --array). "
-            "The exit code is 1 whenever anything is missing, incomplete or errored, in "
-            "every format (unless --exit-zero)."
+            "The exit code is 1 whenever anything is missing, incomplete or errored, or "
+            "could not be planned, in every format (unless --exit-zero)."
         ),
     )
     status_parser.add_argument(
@@ -1244,6 +1319,12 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     if dry_run and result is not None:
         output_path = _save_dataframe(result, args.output, "dry_run_results.csv")
         print(f"saved dry run results to {output_path}")
+        if not result.empty:
+            message = _planning_error_message(_status_rows(result))
+            if message:
+                # The saved plan lacks these units: a failed inspection, not a plan.
+                print(f"neurodags: error: {message}", file=sys.stderr)
+                return 1
     return 0
 
 
@@ -1331,21 +1412,21 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
     ordered = _derivative_topo_order(config, derivatives)
 
     if args.pattern == "per-file":
-        script = _slurm_per_file(args.config, ordered)
+        script = _slurm_per_file(args.config, ordered, args.datasets)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     elif args.pattern == "flat":
-        script = _slurm_flat(args.config, ordered)
+        script = _slurm_flat(args.config, ordered, args.datasets)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     else:
-        submit, worker = _slurm_chained(args.config, ordered)
+        submit, worker = _slurm_chained(args.config, ordered, args.datasets)
         if args.output:
             submit_path = Path(args.output)
             worker_path = submit_path.parent / "run_one_derivative.sh"

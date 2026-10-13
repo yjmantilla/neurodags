@@ -288,6 +288,31 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `a_b` and `a|b`, produced the same column; the new encoding is reversible.
 - `datasets_psycho.yml`'s `fir` `file_pattern` was a bare directory and is now a `**/*.vhdr`
   glob.
+- **`slurm-script` ignored `-d` and, for `per-file`, `--derivative`**: the generated jobs froze,
+  counted and ran the pipeline's own datasets, and the per-file worker ran the whole
+  `DerivativeList`. Every template now passes the resolved `-d` (absolute) to `neurodags
+  inputs`/`count-inputs` and as `datasets_configuration=`, and the per-file worker passes
+  `derivatives=[...]`. Regenerate scripts made with `-d` or `--derivative`.
+- **The TUI showed one datasets YAML and ran another**: a relative override typed in the Config
+  tab was read against the current directory for the summary but against the pipeline's
+  directory when running. It is now resolved like `-d` (current directory), stored absolute and
+  summarized with the loader the runs use; a missing file is an error.
+- **`status` reported `complete` (exit `0`) when units could not be planned**: a per-file
+  planning error (for example an argument naming a node id that does not exist) dropped the
+  unit from the dry run. Such units are now reported as `planning-error` (JSON
+  `planning_error_indices`, message on stderr), the report is not complete and `status` exits
+  `1` (`0` with `--exit-zero`); `dry-run` saves the plan with a `planning_error` column and
+  exits `1`. The TUI Status tab counts them as errored. Empty discovery still succeeds.
+- **Discovery fixes** (spec §8): a pattern matching a file more than once (`raw/**/**/*.fif`)
+  no longer drops the entry file of a BIDS split recording; `exclude_pattern` now matches other
+  spellings of the same path (`raw/./**`, `//`, `..`; lexical, symlinks are not resolved); and
+  only files are inputs: directories matched by a broad pattern (`raw/**/*`), including the
+  dataset's own output folder, are no longer enumerated. **This changes indices** for
+  configurations whose pattern matched directories; regenerate frozen lists (`neurodags
+  inputs`) for them. Directory-format recordings (such as CTF `.ds`, EGI `.mff`) are not
+  discovered as inputs.
+- **TUI DataFrame filter**: derivative names are whitespace-separated as specified (`A B`);
+  commas are still accepted.
 
 ## 0.3.6 — 2026-10-12
 

@@ -219,8 +219,13 @@ contributes no files (and no indices), but must still declare `source_root`.
 
 ## Discovery and file order
 
-For each active dataset, neurodags globs `file_pattern`, removes `exclude_pattern` matches, drops
-MNE split continuations, removes duplicates and the pipeline's own output trees (the dataset's
+For each active dataset, neurodags globs `file_pattern` and keeps only files (a broad pattern
+such as `raw/**/*` also matches directories, which are never inputs; a symbolic link to a file
+is kept under its own path), normalizes each path lexically (`raw/./sub//x` is `raw/sub/x`;
+symbolic links are not resolved) and removes duplicates (a pattern with several `**` can match a
+file more than once), removes `exclude_pattern` matches (normalized the same way, so another
+spelling of the same path is still excluded), drops MNE split continuations, removes the
+pipeline's own output trees (the dataset's
 `derivatives_path[/derivatives_subdir]` when it lies inside `source_root`, and `code/` /
 `.neurodags/` under any `derivatives_path`), checks that every file lies below `source_root`, and
 **sorts the files by their path relative to `source_root`** (`/` separators, code-point order:

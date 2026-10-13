@@ -104,6 +104,9 @@ def find_split_continuations(files: list[str]) -> set[str]:
     set of str
         The paths in ``files`` that should be dropped as continuations.
     """
+    # The same pathname can be returned several times (e.g. by a pattern with several
+    # ``**`` components); repeated occurrences are one file, never extra split members.
+    files = list(dict.fromkeys(files))
     fileset = set(files)
     drop: set[str] = set()
 
@@ -165,17 +168,33 @@ def get_files_from_pattern(
     Returns
     -------
     list of str
-        A list of file paths matching the pattern.
+        The matching *files* (directories are never returned; symbolic links to files
+        are, under their own path), lexically normalized (:func:`os.path.normpath`, no
+        symlink resolution) and without duplicates, in glob order.
     """
 
     log.debug("get_files_from_pattern: called", pattern=pattern, recursive=recursive)
-    files = glob.glob(pattern, recursive=recursive)
-    log.debug("get_files_from_pattern: found files", count=len(files))
+    # Normalize lexically and deduplicate before anything compares paths: a pattern
+    # such as ``raw/./**`` or ``raw/**/**/*`` returns other spellings of, or repeated,
+    # pathnames for the same file. ``realpath`` is never used: the lexical path is the
+    # input's identity (spec 4.1).
+    matches = list(
+        dict.fromkeys(os.path.normpath(f) for f in glob.glob(pattern, recursive=recursive))
+    )
+    # Inputs are files: a broad pattern (``raw/**/*``) also matches directories.
+    files = [f for f in matches if os.path.isfile(f)]
+    log.debug(
+        "get_files_from_pattern: found files",
+        count=len(files),
+        skipped_non_files=len(matches) - len(files),
+    )
 
-    # Apply exclude filter if provided
+    # Apply exclude filter if provided (both sides normalized the same way)
     if exclude_filter:
         log.debug("get_files_from_pattern: applying exclude filter", exclude_filter=exclude_filter)
-        excluded_files = set(glob.glob(exclude_filter, recursive=recursive))
+        excluded_files = {
+            os.path.normpath(f) for f in glob.glob(exclude_filter, recursive=recursive)
+        }
         files = [f for f in files if f not in excluded_files]
         log.debug("get_files_from_pattern: files after exclusion", count=len(files))
 
@@ -479,7 +498,7 @@ def _discover_dataset(
     n_excluded = 0
     for f in files:
         path = os.path.normpath(f)
-        if any(_is_below(path, d) for d in excluded_dirs):
+        if any(path == d or _is_below(path, d) for d in excluded_dirs):
             n_excluded += 1
             continue
         try:

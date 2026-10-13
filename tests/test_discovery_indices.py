@@ -103,6 +103,72 @@ def test_discovery_deduplicates_identical_paths(tree: Path, monkeypatch):
     assert len(enum.entries) == len(_NAMES)
 
 
+def _rels(datasets) -> list[str]:
+    return [e.rel for e in discover_inputs(datasets).entries]
+
+
+def test_duplicate_glob_hits_keep_bids_split_entry(tmp_path: Path):
+    # A pattern with several ``**`` returns the same pathname more than once; the repeated
+    # entry file must not count as a second split member (and so drop itself).
+    raw = tmp_path / "raw"
+    for name in ("x_split-01_meg.fif", "x_split-02_meg.fif"):
+        _touch(raw / "sub" / name)
+    assert _rels({"d": _dataset(raw, "**/*.fif")}) == ["sub/x_split-01_meg.fif"]
+    assert _rels({"d": _dataset(raw, "**/**/*.fif")}) == ["sub/x_split-01_meg.fif"]
+
+
+@pytest.mark.parametrize(
+    "file_pattern, exclude_pattern",
+    [("./**/*.txt", "**/*.txt"), ("**/*.txt", "./**/*.txt"), ("**/*.txt", "sub//../sub/*.txt")],
+)
+def test_exclude_pattern_matches_equivalent_spellings(
+    tmp_path: Path, file_pattern, exclude_pattern
+):
+    raw = tmp_path / "raw"
+    _touch(raw / "sub" / "x.txt")
+    ds = DatasetConfig(
+        name="d",
+        source_root=str(raw),
+        file_pattern=str(raw) + "/" + file_pattern,
+        exclude_pattern=str(raw) + "/" + exclude_pattern,
+    )
+    assert _rels({"d": ds}) == []
+
+
+def test_discovery_returns_files_only_and_excludes_output_root(tmp_path: Path):
+    raw = tmp_path / "raw"
+    _touch(raw / "sub" / "x.txt")
+    ds = DatasetConfig(
+        name="d",
+        source_root=str(raw),
+        file_pattern=str(raw / "**" / "*"),
+        derivatives_path=str(raw / "out"),
+    )
+    before = [(e.index, e.rel) for e in discover_inputs({"d": ds}).entries]
+    assert before == [(0, "sub/x.txt")]
+    # Creating the output tree (with an output in it) must not shift source indices.
+    _touch(raw / "out" / "generated.txt")
+    assert [(e.index, e.rel) for e in discover_inputs({"d": ds}).entries] == before
+    assert discover_inputs({"d": ds}, max_files_per_dataset=1).entries[0].rel == "sub/x.txt"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_discovery_keeps_symlinked_files_under_their_lexical_path(tmp_path: Path):
+    raw = tmp_path / "raw"
+    target = _touch(tmp_path / "elsewhere" / "real.txt")
+    (raw / "sub").mkdir(parents=True)
+    os.symlink(target, raw / "sub" / "link.txt")
+    os.symlink(tmp_path / "elsewhere", raw / "dirlink")
+    ds = DatasetConfig(name="d", source_root=str(raw), file_pattern=str(raw / "*" / "*.txt"))
+    entries = discover_inputs({"d": ds}).entries
+    # Files behind a directory symlink keep their lexical path below source_root.
+    assert [e.rel for e in entries] == ["dirlink/real.txt", "sub/link.txt"]
+    assert entries[1].path == str(raw / "sub" / "link.txt")
+    # A symlink to a directory is not an input itself.
+    ds.file_pattern = str(raw / "*")
+    assert _rels({"d": ds}) == []
+
+
 def test_limit_after_sort_is_a_prefix_per_dataset(tmp_path: Path):
     r1, r2 = tmp_path / "one", tmp_path / "two"
     for i in (3, 1, 2, 10):
