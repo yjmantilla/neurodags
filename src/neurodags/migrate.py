@@ -31,10 +31,22 @@ One pass converts both the configuration and the existing output tree:
   rejects counts only when ``<dir>/<b>`` is the new reference base of a discovered source.
   It is an ``identity`` unit and joins the remaining old files of the same unit, so the
   unit gets its ``.done``.
-- **MNE split recordings** (spec 10.3.5) are re-saved with MNE under the new name (the first
-  part stores the next part's file name) and verified before the old parts are deleted.
+- **MNE split recordings** (spec 10.3.5; ``-<n>.fif`` and compressed ``.fif-<n>.gz`` parts,
+  the rule of :func:`neurodags.iterators.neuromag_split_part`) are re-saved with MNE into a
+  private staging folder (``.neurodags/staging/<txn>``), verified sample for sample,
+  fingerprinted in the journal and published with ``os.link`` (never replacing a file);
+  only then are the old parts deleted. A split whose names do not change (folder only) is
+  moved part by part, its part list and data shape journaled once so any number of
+  interrupted runs rejoin it, and loaded in full before its ``.done`` is written.
 - **Manifests** (spec 10.4). Moved units get a ``.done`` with ``"origin": "migrate"`` when the
-  derivative's set of artifact suffixes is known.
+  derivative's set of artifact suffixes is known (the set decides completeness; the manifest
+  lists every artifact of the unit).
+- **No overwrites, one run at a time.** Moves are ``os.link`` + ``os.unlink``; hard links are
+  required (probed before any change, no fallback). ``--apply`` holds a lock next to the
+  pipeline and ``migrate.lock`` next to each tree's journal for its whole run; a lock is
+  never taken over automatically.
+- **FIF artifacts** that were not re-saved, single files included, are loaded in full
+  before their ``.done``; any failure withholds it.
 
 Use :func:`plan_migration` (read-only), :func:`format_preview` and :func:`apply_migration`.
 The CLI wrapper is ``neurodags migrate``.
@@ -42,14 +54,18 @@ The CLI wrapper is ``neurodags migrate``.
 
 from __future__ import annotations
 
+import errno
 import filecmp
+import hashlib
 import json
 import ntpath
 import os
 import posixpath
 import re
 import shutil
+import socket
 import tempfile
+import uuid
 import warnings
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -61,7 +77,7 @@ import yaml
 
 from neurodags._legacy import snake_to_camel
 from neurodags.definitions import DatasetConfig
-from neurodags.iterators import discover_inputs
+from neurodags.iterators import discover_inputs, neuromag_split_name, neuromag_split_part
 from neurodags.loaders import UniqueKeySafeLoader, check_pipeline_names, load_configuration
 from neurodags.loggers import get_logger
 from neurodags.naming import NamingError, error_column, format_column, parse_output_basename
@@ -86,6 +102,7 @@ log = get_logger(__name__)
 __all__ = [
     "BACKUP_SUFFIX",
     "JOURNAL_NAME",
+    "LOCK_NAME",
     "ApplyResult",
     "MigrationError",
     "MigrationPlan",
@@ -102,12 +119,13 @@ __all__ = [
 BACKUP_SUFFIX = ".bak-0.3"
 #: Journal of completed operations, under ``<derivatives_path>/.neurodags/`` (JSON Lines).
 JOURNAL_NAME = "migrate-journal.json"
+#: Lock held by ``--apply`` for its whole run, next to the journal (one migrate per tree).
+LOCK_NAME = "migrate.lock"
 #: Version of the ``--report`` JSON document.
 REPORT_VERSION = 1
 
 _PATH_FIELDS = ("file_pattern", "exclude_pattern", "derivatives_path")
 _MARKER_TAILS = {".error": "error", ".skip": "skip", ".done": "done"}
-_SPLIT_TAIL = re.compile(r"^(.*)-(\d+)(\.fif)$")
 _SPLIT_START = re.compile(r"^-\d+\.")
 _SPLIT_NAME = re.compile(r"(.+)-(\d+)")
 _WINDOWS_ABS = re.compile(r"^[A-Za-z]:[\\/]")
@@ -163,9 +181,37 @@ class MneRewrite:
     suffix: str
     old_parts: list[str]
     new_path: str
-    #: Set when a previous, interrupted ``--apply`` already wrote and verified the new
-    #: files (journal): only the old parts remain to be deleted.
-    finished_parts: list[str] | None = None
+    #: Transaction id (journal and staging folder name).
+    txn: str = ""
+    #: Private folder the new recording is saved and verified in before publication
+    #: (``<journal folder>/staging/<txn>``).
+    staging: str = ""
+    #: Set when a previous, interrupted ``--apply`` already saved and verified the new
+    #: recording in its staging folder (journal ``mne-staged``): ``[name, size, sha256]``
+    #: per part; it is published (never overwriting) and the old parts are deleted.
+    staged: list[list[Any]] | None = None
+
+
+def _is_fif_tail(tail: str) -> bool:
+    low = tail.lower()
+    return low.endswith((".fif", ".fif.gz"))
+
+
+def _split_tail(tail: str) -> tuple[str, int] | None:
+    """``(main_tail, index)`` of a split continuation tail (``-2.fif``, ``.fif-1.gz``).
+
+    Same rule as discovery (:func:`neurodags.iterators.neuromag_split_part`), applied to
+    the tail after the derivative token.
+    """
+    part = neuromag_split_part("x" + tail)
+    if part is None:
+        return None
+    return part[0][1:], part[1]
+
+
+def _split_names(target: str, count: int) -> list[str]:
+    """*target* and the names of its first *count* continuation parts (MNE naming)."""
+    return [target] + [neuromag_split_name(target, i) for i in range(1, count + 1)]
 
 
 @dataclass
@@ -191,6 +237,12 @@ class Unit:
     #: Where each old file ends up (moved, already there, or identical duplicate).
     targets: dict[str, str] = field(default_factory=dict)
     mne: list[MneRewrite] = field(default_factory=list)
+    #: Split recordings moved part by part (only the folder changes): ``txn``, every
+    #: part's original ``(old, new)`` and the recording's ``shape``; journaled before the
+    #: first move so any number of interrupted runs rejoin the parts.
+    split_moves: list[dict[str, Any]] = field(default_factory=list)
+    #: Scanned path -> original 0.3.x path, for parts an interrupted run already moved.
+    logical: dict[str, str] = field(default_factory=dict)
     duplicate_files: list[str] = field(default_factory=list)
     manifest_suffixes: list[str] | None = None
     manifest_reason: str | None = None
@@ -256,10 +308,11 @@ class MigrationPlan:
     notes: list[str] = field(default_factory=list)
     chained_patterns: list[str] = field(default_factory=list)
     column_map: dict[str, Any] = field(default_factory=dict)
-    #: Journal entries of an interrupted ``--apply``: MNE rewrites started / verified,
-    #: keyed by the old first part.
-    _mne_started: set[tuple[str, str]] = field(default_factory=set, repr=False)
-    _mne_verified: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    #: Journal state of an interrupted ``--apply``: the last ``mne-*`` entry per rewrite
+    #: transaction, open split moves, and recorded duplicates (by target prefix).
+    _mne_txns: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    _split_txns: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    _duplicates: dict[str, dict[str, list[Any]]] = field(default_factory=dict, repr=False)
 
     def units(self, *statuses: str) -> list[Unit]:
         return [u for t in self.trees for u in t.units if not statuses or u.status in statuses]
@@ -327,7 +380,7 @@ class MigrationPlan:
                     **unit_info(u),
                     "old_parts": r.old_parts,
                     "new": r.new_path,
-                    "resume": r.finished_parts is not None,
+                    "resume": r.staged is not None,
                 }
                 for u in self.units("move")
                 for r in u.mne
@@ -749,11 +802,13 @@ def _scan_tree(root: str, *, recursive: bool, exclude: Iterable[str] = ()) -> It
         return
     for dirpath, dirnames, filenames in os.walk(root):
         if dirpath == root:
-            dirnames[:] = [d for d in dirnames if d not in ("code", ".neurodags")]
+            dirnames[:] = [d for d in dirnames if d != "code"]
+        # .neurodags/ (journal, lock, migration staging) is never output, at any level.
         dirnames[:] = sorted(
             d
             for d in dirnames
-            if os.path.normcase(os.path.normpath(os.path.join(dirpath, d))) not in excluded
+            if d != ".neurodags"
+            and os.path.normcase(os.path.normpath(os.path.join(dirpath, d))) not in excluded
         )
         for name in sorted(filenames):
             if "@" in name and not name.startswith("."):
@@ -809,14 +864,21 @@ def _is_path_suffix(old_dir: str, new_dir: str) -> bool:
 
 
 def _same_files(a: Unit, b: Unit) -> bool:
-    if set(a.artifacts) != set(b.artifacts) or set(a.markers) != set(b.markers):
+    """Same artifacts and same 0.3.x ``.error``/``.skip`` markers (byte for byte).
+
+    A ``.done`` is not old output content: the keeper of an earlier migration has one (it
+    was written by that migration), its identical duplicate does not.
+    """
+    markers_a = {m: p for m, p in a.markers.items() if m != "done"}
+    markers_b = {m: p for m, p in b.markers.items() if m != "done"}
+    if set(a.artifacts) != set(b.artifacts) or set(markers_a) != set(markers_b):
         return False
     pairs = [
         (x, y) for t in a.artifacts for x, y in zip(a.artifacts[t], b.artifacts[t], strict=False)
     ]
     if any(len(a.artifacts[t]) != len(b.artifacts[t]) for t in a.artifacts):
         return False
-    pairs += [(a.markers[m], b.markers[m]) for m in a.markers]
+    pairs += [(markers_a[m], markers_b[m]) for m in markers_a]
     try:
         return all(filecmp.cmp(x, y, shallow=False) for x, y in pairs)
     except OSError:
@@ -834,20 +896,94 @@ def _existing_ancestor(path: str) -> str:
 
 
 def read_journal(path: str) -> list[dict[str, Any]]:
-    """Entries of a migration journal (JSON Lines; a truncated last line is ignored)."""
-    entries: list[dict[str, Any]] = []
+    """Entries of a migration journal (JSON Lines).
+
+    Read as bytes and decoded per line. Only the last line may be incomplete (an append
+    interrupted mid-write, possibly inside a multi-byte character): it is ignored. Any
+    other unreadable line means the journal is damaged, and :class:`MigrationError` is
+    raised naming the file, since its history (which files a migration owns) cannot be
+    trusted.
+    """
     try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(entry, dict):
-                    entries.append(entry)
-    except OSError:
-        pass
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise MigrationError(f"cannot read the migration journal {path}: {exc}") from exc
+    lines = data.split(b"\n")
+    complete = data.endswith(b"\n")
+    entries: list[dict[str, Any]] = []
+    for number, raw in enumerate(lines, 1):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+        except ValueError:  # UnicodeDecodeError and JSONDecodeError
+            if number == len(lines) and not complete:
+                continue  # an interrupted final append
+            raise MigrationError(
+                f"the migration journal {path} is damaged at line {number} (not its last "
+                "line), so the files an interrupted migration owns cannot be told apart. "
+                "Restore the journal from a backup; move it away only when no migration of "
+                "this tree was interrupted."
+            ) from None
+        if isinstance(entry, dict):
+            entries.append(entry)
     return entries
+
+
+def _txn_id(kind: str, *paths: str) -> str:
+    """Stable id of one migration transaction (journal key and staging folder name)."""
+    key = "\0".join([kind, *(os.path.normcase(os.path.normpath(p)) for p in paths)])
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _unfinished_split_moves(journal: str) -> dict[str, dict[str, Any]]:
+    """Split recordings an interrupted ``--apply`` was moving, by transaction id.
+
+    The ``split-move-start`` entry (written once per transaction, with the original part
+    list) of every transaction without a later ``split-move-done``.
+    """
+    open_moves: dict[str, dict[str, Any]] = {}
+    for entry in read_journal(journal):
+        op, txn, parts = entry.get("op"), entry.get("txn"), entry.get("parts")
+        if op not in ("split-move-start", "split-move-done") or not isinstance(txn, str):
+            continue
+        if op == "split-move-done":
+            open_moves.pop(txn, None)
+            continue
+        if not isinstance(parts, list) or not all(
+            isinstance(p, list) and len(p) == 2 for p in parts
+        ):
+            continue
+        if txn not in open_moves:  # the first record is the original part list
+            entry = dict(entry)
+            entry["parts"] = [
+                [os.path.normpath(str(o)), os.path.normpath(str(n))] for o, n in parts
+            ]
+            open_moves[txn] = entry
+    return open_moves
+
+
+def _same_entry(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _two_names(a: str, b: str) -> bool:
+    """*a* and *b* are two directory entries (hard links), not one name seen twice.
+
+    On a case-insensitive filesystem ``x@Clean.nc`` and ``x@clean.nc`` are the same entry.
+    """
+    try:
+        return os.path.basename(a) in os.listdir(os.path.dirname(a) or ".") and (
+            os.path.basename(b) in os.listdir(os.path.dirname(b) or ".")
+        )
+    except OSError:
+        return False
 
 
 def plan_migration(
@@ -956,6 +1092,8 @@ def plan_migration(
             )
         old_to_new = {n: n for n in names}
         old_to_new.update({o: n for o, n in rename_map.items() if n in names})
+    if _refuse_collapsing_renames(plan, mode, old_to_new, rename_map):
+        return plan  # the renamed configuration would lose a definition: nothing to plan
     token_map: dict[str, set[str]] = {}
     for old, new in old_to_new.items():
         token_map.setdefault(snake_to_camel(old), set()).add(new)
@@ -1094,6 +1232,41 @@ def plan_migration(
     _plan_chained(plan, config, old_datasets, source)
     plan.column_map = _column_map(plan, old_to_new, defs)
     return plan
+
+
+def _refuse_collapsing_renames(
+    plan: MigrationPlan,
+    mode: str,
+    old_to_new: Mapping[str, str],
+    rename_map: Mapping[str, str],
+) -> bool:
+    """Refuse ``--map`` renames that are not injective (also ignoring case).
+
+    Legacy mode: every definition's new name (renamed or kept) must stay distinct, or two
+    definitions collapse into one and one's outputs become the other's cache hits.
+    Tree-only mode: two 0.3.x names cannot both be the same current name. Names that
+    already collide without any rename are left to :func:`check_pipeline_names`.
+    """
+    if mode == "legacy":
+        pairs = old_to_new.items()
+    else:
+        pairs = rename_map.items()
+    by_new: dict[str, list[str]] = {}
+    for old, new in pairs:
+        by_new.setdefault(new.casefold(), []).append(old)
+    found = False
+    for olds in by_new.values():
+        if len(olds) < 2 or all(old_to_new.get(o, o) == o for o in olds):
+            continue
+        found = True
+        news = sorted({old_to_new.get(o, rename_map.get(o, o)) for o in olds})
+        plan.refusals.append(
+            f"--map would give the derivatives {', '.join(repr(o) for o in sorted(olds))} the "
+            f"same name {' / '.join(repr(n) for n in news)} (names must stay distinct, also "
+            "ignoring case): their definitions and outputs would collapse into one. Choose "
+            "another NEW name."
+        )
+    return found
 
 
 def _plan_source_root(
@@ -1324,15 +1497,27 @@ def _plan_trees(
         nested = [
             r for r in derivative_roots if r != tree.root and r.startswith(tree.root + os.sep)
         ]
+        # Parts of a split recording an interrupted run was moving (folder-only): each
+        # counts at its original location, so the recording is rejoined across folders.
+        split_txns = _unfinished_split_moves(tree.journal)
+        plan._split_txns.update(split_txns)
+        relocated = {
+            os.path.normcase(new): old for t in split_txns.values() for old, new in t["parts"]
+        }
         for scan_root, recursive in scans:
             single_form = scan_root != tree.root
             for path in _scan_tree(scan_root, recursive=recursive, exclude=nested):
                 if tree.skip_dirs and os.path.normcase(os.path.dirname(path)) in tree.skip_dirs:
                     continue
-                basename = os.path.basename(path)
+                logical = relocated.get(os.path.normcase(os.path.normpath(path)), path)
+                if logical != path and os.path.lexists(logical):
+                    if _same_entry(logical, path) and _two_names(logical, path):
+                        continue  # interrupted between link and unlink: the old name counts
+                    logical = path  # a different file at the old name: not ours to rejoin
+                basename = os.path.basename(logical)
                 if single_form and not basename.startswith(os.path.basename(tree.root) + "@"):
                     continue
-                directory = os.path.dirname(path)
+                directory = os.path.dirname(logical)
                 parsed = _parse_legacy(basename, tokens)
                 canonical = False
                 if parsed is None and not single_form:
@@ -1361,6 +1546,8 @@ def _plan_trees(
                     unit = Unit(key, directory, old_dir, source_part, token, derivative)
                     unit.canonical = canonical
                     units[ukey] = unit
+                if logical != path:
+                    unit.logical[path] = logical
                 if tail in _MARKER_TAILS:
                     unit.markers[_MARKER_TAILS[tail]] = path
                 else:
@@ -1376,15 +1563,19 @@ def _plan_trees(
 
 
 def _group_split_parts(unit: Unit, tree: TreePlan) -> None:
-    """Attach ``<main>-<n>.fif`` split parts to their ``<main>.fif`` artifact."""
+    """Attach split continuations to their first part's artifact.
+
+    ``<main>-<n>.fif`` joins ``<main>.fif`` and ``.fif-<n>.gz`` joins ``.fif.gz`` (MNE's
+    neuromag naming, the rule discovery uses).
+    """
     parts: dict[str, list[tuple[int, str]]] = {}
     for tail in list(unit.artifacts):
-        match = _SPLIT_TAIL.match(tail)
-        if not match:
+        split = _split_tail(tail)
+        if split is None:
             continue
-        main = match.group(1) + match.group(3)
-        if main in unit.artifacts or not match.group(1):
-            parts.setdefault(main, []).append((int(match.group(2)), unit.artifacts.pop(tail)[0]))
+        main, index = split
+        if main in unit.artifacts or main.lower() in (".fif", ".fif.gz"):
+            parts.setdefault(main, []).append((index, unit.artifacts.pop(tail)[0]))
     for main, found in parts.items():
         if main not in unit.artifacts:
             # Continuation parts without their first part: never a usable recording.
@@ -1447,19 +1638,27 @@ def _match_unit(
 
 
 def _resume_from_journals(plan: MigrationPlan) -> None:
-    """MNE rewrites an interrupted ``--apply`` started or verified (from the journals)."""
+    """State an interrupted ``--apply`` left in the journals.
+
+    The last ``mne-*`` entry of each MNE rewrite transaction (``mne-start``,
+    ``mne-staged``, ``mne-done``, ``mne-failed``) and the duplicates recorded with their
+    content fingerprints (``duplicate``), by target prefix.
+    """
     for journal in {t.journal for t in plan.trees}:
         for entry in read_journal(journal):
-            old_parts = entry.get("old_parts")
-            if not isinstance(old_parts, list) or not old_parts:
+            op = entry.get("op")
+            if op == "duplicate":
+                prefix, files = entry.get("new_prefix"), entry.get("files")
+                if isinstance(prefix, str) and isinstance(files, dict):
+                    key = os.path.normcase(os.path.normpath(prefix))
+                    known = plan._duplicates.setdefault(key, {})
+                    for path, fingerprint in files.items():
+                        known[os.path.normcase(os.path.normpath(path))] = fingerprint
                 continue
-            first = os.path.normpath(old_parts[0])
-            if entry.get("op") == "mne-start":
-                plan._mne_started.add((first, os.path.normpath(str(entry.get("new", "")))))
-            elif entry.get("op") == "mne-verified":
-                plan._mne_verified[first] = entry
-            elif entry.get("op") in ("mne-done", "mne-failed"):
-                plan._mne_verified.pop(first, None)
+            if op in ("mne-start", "mne-staged", "mne-done", "mne-failed") and isinstance(
+                entry.get("txn"), str
+            ):
+                plan._mne_txns[entry["txn"]] = entry
 
 
 def _plan_artifact_sets(plan: MigrationPlan) -> None:
@@ -1500,19 +1699,24 @@ def _group_view(unit: Unit) -> tuple[dict[str, list[str]], dict[str, str]]:
     return artifacts, markers
 
 
+def _staged_txn(plan: MigrationPlan, old_first: str, target: str) -> dict[str, Any] | None:
+    """The ``mne-staged`` journal entry of the rewrite ``old_first -> target``, if open."""
+    entry = plan._mne_txns.get(_txn_id("mne", old_first, target))
+    return entry if entry is not None and entry.get("op") == "mne-staged" else None
+
+
 def _strip_resumed_mne(plan: MigrationPlan, group: list[Unit]) -> list[Unit]:
-    """Drop the new ``.fif`` parts an interrupted rewrite already wrote from in-place units."""
+    """Drop the parts an interrupted rewrite already published from in-place units.
+
+    Only a rewrite whose verified copy was staged (journal ``mne-staged``) publishes
+    anything; the published files are checked against its fingerprints when it resumes.
+    """
     in_progress: set[str] = set()
     for unit in group:
         if unit.status != "move":
             continue
         for tail, paths in unit.artifacts.items():
-            key = os.path.normpath(paths[0])
-            target = os.path.normpath((unit.new_prefix or "") + tail)
-            verified = plan._mne_verified.get(key)
-            if (key, target) in plan._mne_started or (
-                verified is not None and os.path.normpath(str(verified.get("new", ""))) == target
-            ):
+            if _staged_txn(plan, paths[0], (unit.new_prefix or "") + tail) is not None:
                 in_progress.add(tail)
     if not in_progress:
         return group
@@ -1535,7 +1739,7 @@ def _plan_targets(plan: MigrationPlan) -> None:
         groups.setdefault(os.path.normcase(unit.new_prefix), []).append(unit)
     for group in groups.values():
         if len(group) > 1:
-            group = _strip_resumed_mne(plan, group)
+            group = _strip_resumed_mne(plan, _drop_link_leftovers(group))
         if len(group) == 1:
             continue
         tails = [u.tails for u in group]
@@ -1547,8 +1751,13 @@ def _plan_targets(plan: MigrationPlan) -> None:
                 other.secondary = True
             continue
         identity = [u for u in group if u.status == "identity"]
+        # A unit whose verified rewrite is being published or whose old parts are being
+        # deleted (journal mne-staged) is the keeper an earlier run chose.
+        active = [u for u in group if u.status == "move" and _in_transaction(plan, u)]
         if identity:
             keeper = identity[0]
+        elif active:
+            keeper = active[0]
         else:
             ranked = sorted(group, key=lambda u: len(u.old_dir or ""), reverse=True)
             keeper = ranked[0]
@@ -1557,7 +1766,9 @@ def _plan_targets(plan: MigrationPlan) -> None:
             ):
                 keeper = None  # type: ignore[assignment]
         others = [u for u in group if u is not keeper]
-        if keeper is not None and all(_same_files(keeper, u) for u in others):
+        if keeper is not None and all(
+            _same_files(keeper, u) or _recorded_duplicate(plan, keeper, u) for u in others
+        ):
             for u in others:
                 u.status = "duplicate"
                 u.duplicate_of = keeper.old_prefix
@@ -1572,38 +1783,49 @@ def _plan_targets(plan: MigrationPlan) -> None:
         )
 
     all_old = {os.path.normcase(p) for u in plan.units("move") for p in u.files}
+    staging_roots = {
+        id(u): os.path.join(os.path.dirname(t.journal), "staging")
+        for t in plan.trees
+        for u in t.units
+    }
     for unit in plan.units("move"):
         new_prefix = unit.new_prefix or ""
         for tail, paths in unit.artifacts.items():
             target = new_prefix + tail
             first = os.path.normpath(paths[0])
-            done = plan._mne_verified.get(first) if tail.endswith(".fif") else None
-            if done and os.path.normpath(str(done.get("new", ""))) == os.path.normpath(target):
-                new_parts = [str(p) for p in done.get("new_parts") or []]
-                if new_parts and all(os.path.isfile(p) for p in new_parts):
-                    # Interrupted after verification: only the old parts remain to delete.
-                    unit.mne.append(MneRewrite(tail, list(paths), target, new_parts))
+            txn = _txn_id("mne", first, target)
+            staging = os.path.join(staging_roots[id(unit)], txn)
+            staged = _staged_txn(plan, first, target) if _is_fif_tail(tail) else None
+            if staged is not None:
+                rewrite = MneRewrite(
+                    tail,
+                    [str(p) for p in staged.get("old_parts") or paths],
+                    target,
+                    txn,
+                    staging,
+                    [list(p) for p in staged.get("parts") or []],
+                )
+                if _plan_staged(plan, rewrite):
+                    unit.mne.append(rewrite)
                     continue
             if len(paths) > 1 and os.path.basename(target) == os.path.basename(paths[0]):
-                # Split recording whose file names do not change (only the folder): the
-                # parts reference each other by base name, so plain moves keep it valid.
-                for old in paths:
-                    new = os.path.join(os.path.dirname(target), os.path.basename(old))
-                    _add_move(plan, unit, old, new, all_old)
+                _plan_split_move(plan, unit, paths, target, all_old)
                 continue
-            if len(paths) > 1:  # MNE split recording (main + "-<n>.fif" parts)
-                stem = target[:-4]
-                occupied = [
-                    p
-                    for p in [target] + [f"{stem}-{i}.fif" for i in range(1, len(paths) + 3)]
-                    if os.path.exists(p)
-                ]
-                if occupied and (first, os.path.normpath(target)) not in plan._mne_started:
+            if len(paths) > 1:  # MNE split recording (main + "-<n>.fif" / ".fif-<n>.gz")
+                occupied = [p for p in _split_names(target, len(paths) + 2) if os.path.lexists(p)]
+                aliases = [p for p in occupied if any(_same_entry(p, o) for o in paths)]
+                if aliases:
+                    plan.refusals.append(
+                        f"the new name of the MNE split recording {paths[0]} differs only in "
+                        f"case and this filesystem ignores case ({aliases[0]} is the old "
+                        "file): rename it with a --map name that differs beyond case."
+                    )
+                elif occupied:
                     plan.refusals.append(
                         f"targets of the MNE split recording {paths[0]} already exist: "
                         f"{', '.join(occupied)}. Remove them (or the old recording) first."
                     )
-                unit.mne.append(MneRewrite(tail, list(paths), target))
+                unit.mne.append(MneRewrite(tail, list(paths), target, txn, staging))
                 continue
             _add_move(plan, unit, paths[0], target, all_old)
         for marker, old in unit.markers.items():
@@ -1611,6 +1833,165 @@ def _plan_targets(plan: MigrationPlan) -> None:
                 plan.notes.append(f"left in place (0.4.0 manifest at an old location): {old}")
                 continue
             _add_move(plan, unit, old, f"{new_prefix}.{marker}", all_old)
+
+
+def _plan_split_move(
+    plan: MigrationPlan, unit: Unit, paths: list[str], target: str, all_old: set[str]
+) -> None:
+    """A split recording whose file names do not change (only the folder): moved part by
+    part (the parts reference each other by base name).
+
+    The transaction is keyed by the original first part, and its part list is the one
+    journaled by the first attempt, so any number of interrupted runs rejoin the same
+    recording (parts already moved are scanned at their original location).
+    """
+    logical = [unit.logical.get(p, p) for p in paths]
+    txn = _txn_id("split", logical[0], target)
+    journaled = plan._split_txns.get(txn)
+    if journaled is not None:
+        pairs = [(str(o), str(n)) for o, n in journaled["parts"]]
+    else:
+        pairs = [(o, os.path.join(os.path.dirname(target), os.path.basename(o))) for o in logical]
+    for old in paths:
+        new = os.path.join(os.path.dirname(target), os.path.basename(old))
+        _add_move(plan, unit, old, new, all_old)
+    unit.split_moves.append(
+        {
+            "txn": txn,
+            "parts": pairs,
+            "kind": journaled.get("kind") if journaled else None,
+            "shape": journaled.get("shape") if journaled else None,
+            "journaled": journaled is not None,
+        }
+    )
+
+
+def _plan_staged(plan: MigrationPlan, rewrite: MneRewrite) -> bool:
+    """Check a resumed rewrite's staged copy and published parts; ``False``: start over.
+
+    A file at a new name belongs to this transaction only when it *is* its staged file
+    (hard link) or matches the size and SHA-256 recorded in the journal; anything else is
+    refused, never overwritten.
+    """
+    if not rewrite.staged:
+        return False
+    directory = os.path.dirname(rewrite.new_path)
+    missing = False
+    for name, size, digest in rewrite.staged:
+        dest, staged = os.path.join(directory, name), os.path.join(rewrite.staging, name)
+        if os.path.lexists(dest):
+            if not (
+                (os.path.lexists(staged) and _same_entry(dest, staged))
+                or _matches(dest, size, digest)
+            ):
+                plan.refusals.append(
+                    f"{dest} exists and is not the verified new recording of "
+                    f"{rewrite.old_parts[0]} (kept in {rewrite.staging}); move it away and "
+                    "run migrate again."
+                )
+        elif not _matches(staged, size, digest):
+            missing = True
+    if missing:
+        if all(os.path.isfile(p) for p in rewrite.old_parts) and not any(
+            os.path.lexists(os.path.join(directory, n)) for n, _, _ in rewrite.staged
+        ):
+            return False  # nothing published and the staged copy is gone: redo it
+        plan.refusals.append(
+            f"the verified new recording of {rewrite.old_parts[0]} is incomplete in "
+            f"{rewrite.staging} and in {directory}; restore the old recording or remove "
+            "the partial new parts by hand."
+        )
+    return True
+
+
+def _file_digest(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _fingerprint(path: str) -> list[Any]:
+    return [os.path.getsize(path), _file_digest(path)]
+
+
+def _matches(path: str, size: Any, digest: Any) -> bool:
+    """*path* is a regular file with this size and SHA-256."""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) != size:
+            return False
+        return _file_digest(path) == digest
+    except OSError:
+        return False
+
+
+def _drop_link_leftovers(group: list[Unit]) -> list[Unit]:
+    """Undo the double count of a move interrupted between ``os.link`` and ``os.unlink``.
+
+    The file then has its old and its new name (one inode). The new name is dropped from
+    the in-place unit; the old unit's move finishes by removing the old name.
+    """
+    inodes: set[tuple[int, int]] = set()
+    for unit in group:
+        if unit.status == "move":
+            for path in unit.files:
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                inodes.add((st.st_dev, st.st_ino))
+    if not inodes:
+        return group
+    kept = []
+    for unit in group:
+        if unit.status == "identity":
+            for tail, paths in list(unit.artifacts.items()):
+                try:
+                    st = os.stat(paths[0])
+                except OSError:
+                    continue
+                if len(paths) == 1 and (st.st_dev, st.st_ino) in inodes and st.st_nlink > 1:
+                    del unit.artifacts[tail]
+            for marker, path in list(unit.markers.items()):
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                if (st.st_dev, st.st_ino) in inodes and st.st_nlink > 1:
+                    del unit.markers[marker]
+            if not unit.artifacts and not unit.markers:
+                unit.status = "resumed"
+                continue
+        kept.append(unit)
+    return kept
+
+
+def _in_transaction(plan: MigrationPlan, unit: Unit) -> bool:
+    """*unit* has an MNE rewrite whose verified copy was staged (journal ``mne-staged``)."""
+    return any(
+        _staged_txn(plan, paths[0], (unit.new_prefix or "") + tail) is not None
+        for tail, paths in unit.artifacts.items()
+    )
+
+
+def _recorded_duplicate(plan: MigrationPlan, keeper: Unit, other: Unit) -> bool:
+    """*other* was found identical to *keeper* by an earlier run (journal ``duplicate``).
+
+    The keeper may have been re-saved since (MNE rewrite), so its bytes cannot be compared
+    again; *other*'s files must still match the fingerprints recorded then.
+    """
+    known = plan._duplicates.get(os.path.normcase(os.path.normpath(keeper.new_prefix or "")))
+    if not known or not (keeper.status == "identity" or _in_transaction(plan, keeper)):
+        return False
+    files = other.files
+    for path in files:
+        fingerprint = known.get(os.path.normcase(os.path.normpath(path)))
+        if not isinstance(fingerprint, list) or len(fingerprint) != 2:
+            return False
+        if not _matches(path, *fingerprint):
+            return False
+    return bool(files)
 
 
 def _add_move(plan: MigrationPlan, unit: Unit, old: str, new: str, all_old: set[str]) -> None:
@@ -1623,6 +2004,11 @@ def _add_move(plan: MigrationPlan, unit: Unit, old: str, new: str, all_old: set[
         )
         return
     if os.path.lexists(new):
+        if _same_entry(old, new):
+            # One file: a move interrupted between link and unlink, or a case-only
+            # rename on a case-insensitive filesystem; the move finishes it.
+            unit.moves.append((old, new))
+            return
         try:
             same = filecmp.cmp(old, new, shallow=False)
         except OSError:
@@ -1665,7 +2051,9 @@ def _plan_manifests(plan: MigrationPlan) -> None:
         if missing:
             unit.manifest_reason = f"missing artifact(s) {' '.join(missing)} (partial unit)"
             continue
-        unit.manifest_suffixes = list(known)
+        # The common set only decides completeness; the manifest lists every artifact of
+        # the unit (a unit with an extra artifact keeps it, spec 6).
+        unit.manifest_suffixes = list(known) + sorted(s for s in artifacts if s not in known)
         unit.manifest_reason = None
 
 
@@ -1942,7 +2330,7 @@ def format_preview(plan: MigrationPlan, *, apply: bool = False) -> str:
                 [
                     f"{_rel(r.old_parts[0], tree.root)} (+{len(r.old_parts) - 1} part(s)) -> "
                     f"{_rel(r.new_path, tree.root)}"
-                    + (" [resume: delete old parts]" if r.finished_parts is not None else "")
+                    + (" [resume: publish the verified copy]" if r.staged is not None else "")
                     for r in mne
                 ],
             )
@@ -2065,12 +2453,48 @@ class ApplyResult:
         }
 
 
+def _drop_torn_tail(path: str) -> None:
+    """Repair an unterminated last line before appending (under the lock).
+
+    The same rule as :func:`read_journal`: a last line that decodes as a complete record
+    was accepted by the plan (it may be the ownership record of a transaction being
+    resumed), so it is kept and only its newline is added; an undecodable one (an append
+    cut short) is cut. Otherwise the next record would be glued onto it. Durable (fsync)
+    before anything else is written or published.
+    """
+    try:
+        with open(path, "r+b") as handle:
+            data = handle.read()
+            if not data or data.endswith(b"\n"):
+                return
+            start = data.rfind(b"\n") + 1
+            if _decodes(data[start:]):
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+            else:
+                handle.truncate(start)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileNotFoundError:
+        return
+
+
+def _decodes(raw: bytes) -> bool:
+    """*raw* is one complete JSON record (the rule :func:`read_journal` applies)."""
+    try:
+        json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return False
+    return True
+
+
 class _Journal:
     """Append-only JSON Lines record of completed operations (resume after interruption)."""
 
     def __init__(self, path: str, plan: MigrationPlan):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
+        _drop_torn_tail(path)
         self.handle = open(path, "a", encoding="utf-8")
         from neurodags import __version__
 
@@ -2098,6 +2522,13 @@ class _Journal:
         self.handle.close()
 
 
+def _occupied(old: str, new: str) -> bool:
+    """*new* exists and is not *old* itself (a case-only rename on a case-insensitive FS)."""
+    if not os.path.lexists(new):
+        return False
+    return not _same_entry(old, new)
+
+
 def _recheck(plan: MigrationPlan) -> list[str]:
     """Preconditions of every planned operation, right before applying (spec 10.5)."""
     problems: list[str] = []
@@ -2105,30 +2536,255 @@ def _recheck(plan: MigrationPlan) -> list[str]:
         for old, new in unit.moves:
             if not os.path.lexists(old):
                 problems.append(f"{old} no longer exists")
-            elif os.path.lexists(new):
+            elif _occupied(old, new):
                 problems.append(f"{new} appeared since the plan was made")
         for rewrite in unit.mne:
+            if rewrite.staged is not None:
+                continue  # resume: checked against its fingerprints when published
             missing = [p for p in rewrite.old_parts if not os.path.isfile(p)]
-            if missing and rewrite.finished_parts is None:
+            if missing:
                 problems.append(f"MNE split part(s) {', '.join(missing)} no longer exist")
+            for new in _split_names(rewrite.new_path, len(rewrite.old_parts) + 2):
+                if os.path.lexists(new):
+                    problems.append(f"{new} appeared since the plan was made")
     for change in plan.config_changes:
         if _read_text(change.path) != change.original:
             problems.append(f"{change.path} changed since the plan was made")
     return problems
 
 
-def _read_fif(path: str) -> tuple[str, Any]:
+# -- lock ---------------------------------------------------------------------------
+
+
+def _hostname() -> str:
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
+def _acquire_lock(directory: str, path: str | None = None) -> tuple[str, str]:
+    """Create ``<directory>/migrate.lock`` exclusively (or the lock file *path*); refuse
+    when it exists.
+
+    Serializes ``--apply`` runs on one output tree. A lock is never taken over: a lock
+    left by a killed run must be deleted by hand (the refusal says so). Returns the lock
+    path and this run's token (only a lock with this token is released).
+    """
+    os.makedirs(directory, exist_ok=True)
+    path = path or os.path.join(directory, LOCK_NAME)
+    token = uuid.uuid4().hex
+    info = {
+        "pid": os.getpid(),
+        "host": _hostname(),
+        "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "token": token,
+    }
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        holder = _read_lock(path)
+        who = (
+            f"pid {holder.get('pid')} on host {holder.get('host') or '?'}, started "
+            f"{holder.get('time') or '?'}"
+            if holder
+            else "holder unknown"
+        )
+        raise MigrationRefused(
+            [
+                f"another 'neurodags migrate --apply' holds the lock {path} ({who}). Wait "
+                "for it to finish. If no migrate is running on this output tree (it was "
+                "killed, or the machine restarted), delete that file and run again; the "
+                "lock is never removed automatically."
+            ]
+        ) from None
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(info, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path, token
+
+
+def _read_lock(path: str) -> dict[str, Any] | None:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            holder = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return holder if isinstance(holder, dict) else None
+
+
+def _release_lock(lock: tuple[str, str]) -> None:
+    """Remove the lock only when it is still this run's (same token)."""
+    path, token = lock
+    holder = _read_lock(path)
+    if holder is None or holder.get("token") != token:
+        log.warning("Migration lock is not this run's; left in place", lock=path)
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def _config_lock_path(config: str) -> str:
+    """``<folder>/.<file name>.migrate.lock``: serializes migrations of one configuration."""
+    return os.path.join(os.path.dirname(config), f".{os.path.basename(config)}.{LOCK_NAME}")
+
+
+def _lock_dirs(plan: MigrationPlan) -> list[str]:
+    """Folders of every tree's lock (an output tree that does not exist yet has none)."""
+    dirs = []
+    for tree in plan.trees:
+        if tree.kind == "derivatives" and not os.path.isdir(tree.root):
+            continue
+        dirs.append(os.path.dirname(tree.journal))
+    return list(dict.fromkeys(dirs))
+
+
+# -- publication without replacing ----------------------------------------------------
+
+
+def _link(src: str, dst: str) -> None:
+    """Hard-link *src* as *dst*: ``FileExistsError`` if *dst* exists (never replaced)."""
+    os.link(src, dst, follow_symlinks=False)
+
+
+def _publish_move(old: str, new: str) -> None:
+    """Move *old* to *new*; never replaces an existing *new* (``FileExistsError``).
+
+    ``os.link`` + ``os.unlink``: an interruption in between leaves both names of one file,
+    which the next plan finishes. Hard links are required (checked by
+    :func:`_probe_hard_links` before anything is changed).
+    """
+    if os.path.lexists(new):
+        if not _same_entry(old, new):
+            raise FileExistsError(errno.EEXIST, "target exists", new)
+        if _two_names(old, new):
+            os.unlink(old)  # an interrupted link/unlink: finish it
+        else:
+            os.rename(old, new)  # one entry, case-only rename (case-insensitive FS)
+        return
+    _link(old, new)
+    os.unlink(old)
+
+
+def _publish_copy(staged: str, dest: str) -> None:
+    """Publish a staged file at *dest* without replacing anything (``FileExistsError``)."""
+    _link(staged, dest)
+    os.unlink(staged)
+
+
+def _probe_hard_links(pairs: Iterable[tuple[str, str]]) -> list[str]:
+    """Check that hard links work from each source folder into each target folder.
+
+    One probe per pair of devices: a file is created in the (existing ancestor of the)
+    source folder, hard-linked into the target folder and both names removed. Returns
+    the problems (empty: every publication can be done without replacing files).
+    """
+    seen: set[tuple[int, int]] = set()
+    problems: list[str] = []
+    for src_dir, dst_dir in pairs:
+        src, dst = _existing_ancestor(src_dir), _existing_ancestor(dst_dir)
+        try:
+            key = (os.stat(src).st_dev, os.stat(dst).st_dev)
+        except OSError as exc:
+            problems.append(f"cannot inspect {src_dir} / {dst_dir}: {exc}")
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        tag = uuid.uuid4().hex
+        first = os.path.join(src, f".neurodags-linkprobe-{tag}")
+        second = os.path.join(dst, f".neurodags-linkprobe-{tag}-2")
+        try:
+            os.close(os.open(first, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            os.link(first, second, follow_symlinks=False)
+        except OSError as exc:
+            problems.append(
+                f"hard links do not work from {src} to {dst} ({exc}). migrate publishes "
+                "every file with a hard link so that it can never replace an existing file; "
+                "copy the output tree onto a filesystem with hard links (ext4, xfs, btrfs, "
+                "APFS, NTFS, ...) and migrate it there."
+            )
+        finally:
+            for probe in (second, first):
+                try:
+                    os.unlink(probe)
+                except OSError:
+                    pass
+    return problems
+
+
+def _publication_pairs(plan: MigrationPlan) -> list[tuple[str, str]]:
+    """(source folder, target folder) of every planned move and MNE publication."""
+    pairs = []
+    for unit in plan.units("move"):
+        pairs += [(os.path.dirname(o), os.path.dirname(n)) for o, n in unit.moves]
+        pairs += [(os.path.dirname(r.staging), os.path.dirname(r.new_path)) for r in unit.mne]
+    return list(dict.fromkeys(pairs))
+
+
+# -- MNE recordings ----------------------------------------------------------------------
+
+
+def _read_fif(path: str, preload: bool = True) -> tuple[str, Any]:
     import mne
 
     try:
-        return "raw", mne.io.read_raw_fif(path, preload=True, verbose="error")
+        return "raw", mne.io.read_raw_fif(path, preload=preload, verbose="error")
     except Exception as raw_exc:  # not a raw file: try epochs
         try:
-            return "epochs", mne.read_epochs(path, preload=True, verbose="error")
+            return "epochs", mne.read_epochs(path, preload=preload, verbose="error")
         except Exception as epochs_exc:
             raise RuntimeError(
                 f"cannot read {path} as Raw ({raw_exc}) nor as Epochs ({epochs_exc})"
             ) from epochs_exc
+
+
+def _shape(kind: str, recording: Any) -> list[int]:
+    if kind == "raw":
+        return [len(recording.ch_names), int(recording.n_times)]
+    return [len(recording.events), len(recording.ch_names), len(recording.times)]
+
+
+def _recording_shape(path: str) -> tuple[str, list[int]]:
+    """Kind and data shape from the recording's headers (no data is loaded)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        kind, recording = _read_fif(path, preload=False)
+    return kind, _shape(kind, recording)
+
+
+def _verify_recording(files: Sequence[str], expected: Sequence[Any] | None) -> str | None:
+    """Why the FIF artifact *files* is not a complete, loadable recording (``None``: it is).
+
+    Every FIF artifact, single file or split, is loaded in full (every data buffer is
+    read); any failure withholds the ``.done`` (fail closed). A Raw must have read exactly
+    the listed files (a single file that refers to a missing next part fails to load), and
+    the data shape must equal *expected* (``[kind, shape]`` recorded before a move).
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            kind, recording = _read_fif(files[0], preload=True)
+        shape = _shape(kind, recording)
+        if kind == "raw":
+            listed = {os.path.normcase(os.path.abspath(f)) for f in files}
+            read = {os.path.normcase(os.path.abspath(os.fspath(f))) for f in recording.filenames}
+            if read != listed:
+                return f"recording {files[0]} consists of other files than listed"
+        del recording
+    except Exception as exc:
+        return f"recording {files[0]} does not load: {exc}"
+    if expected:
+        want_kind, want_shape = expected
+        if kind != want_kind or shape != list(want_shape):
+            return (
+                f"recording {files[0]} has shape {shape}, the recording before the move had "
+                f"{list(want_shape)}"
+            )
+    return None
 
 
 def _same_recording(kind: str, original: Any, reloaded: Any) -> str | None:
@@ -2169,20 +2825,28 @@ def _same_recording(kind: str, original: Any, reloaded: Any) -> str | None:
     return None
 
 
-def _rewrite_mne(rewrite: MneRewrite) -> tuple[list[str] | None, str | None]:
-    """Re-save one split recording under its new name; ``(new_parts, None)`` or ``(None, why)``."""
+def _empty_dir(directory: str) -> None:
+    shutil.rmtree(directory, ignore_errors=True)
+    os.makedirs(directory, exist_ok=True)
+
+
+def _rewrite_mne(old_parts: Sequence[str], staged_target: str) -> tuple[list[str] | None, str]:
+    """Re-save a recording at *staged_target* (a private staging folder) and verify it.
+
+    MNE's own split layout is used (its default ``split_size``): the original split size
+    is not stored in the files, and MNE reserves room in every part, so a size inferred
+    from the part lengths would multiply the parts. The reloaded copy must equal the
+    original sample for sample. ``(parts, "")`` or ``(None, why)``.
+    """
     from neurodags.writers import save_mne
 
+    staging = os.path.dirname(staged_target)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
-            kind, original = _read_fif(rewrite.old_parts[0])
+            kind, original = _read_fif(old_parts[0])
         except Exception as exc:
             return None, str(exc)
-        # Same split size as the original (its largest part, plus room for the longer
-        # embedded file names); the parts actually written go into the manifest.
-        largest = max(os.path.getsize(p) for p in rewrite.old_parts)
-        split_size = min(largest + 64 * 1024, 2 * 1024**3 - 1)
         if kind == "raw":
             # The original on-disk sample format; "single" when MNE reports another one.
             fmt = original.orig_format
@@ -2191,43 +2855,25 @@ def _rewrite_mne(rewrite: MneRewrite) -> tuple[list[str] | None, str | None]:
             fmts = ["single", "double"]  # epochs keep no orig_format: compare, then double
         reason = "no format reproduced the data"
         for fmt in fmts:
-            written: list[str] = []
+            _empty_dir(staging)
             try:
                 written = save_mne(
-                    original,
-                    rewrite.new_path,
-                    fmt=fmt,
-                    split_size=(
-                        split_size if fmt != "double" else min(2 * split_size, 2 * 1024**3 - 1)
-                    ),
-                    overwrite=True,
-                    verbose="error",
+                    original, staged_target, fmt=fmt, overwrite=True, verbose="error"
                 )
-                _, reloaded = _read_fif(rewrite.new_path)
+                _, reloaded = _read_fif(staged_target)
                 problem = _same_recording(kind, original, reloaded)
                 del reloaded
             except Exception as exc:
                 problem = f"saving with fmt={fmt!r} failed: {exc}"
+                written = []
             if problem is None:
-                return written, None
+                outside = [p for p in written if os.path.dirname(os.path.abspath(p)) != staging]
+                if outside:
+                    return None, f"MNE wrote outside the staging folder: {', '.join(outside)}"
+                return [os.path.abspath(p) for p in written], ""
             reason = f"fmt={fmt!r}: {problem}"
-            _remove_new_parts(rewrite.new_path, written)
+        _empty_dir(staging)
         return None, reason
-
-
-def _remove_new_parts(new_path: str, written: Sequence[str]) -> None:
-    """Delete what a failed rewrite wrote (target names were free or ours, see the plan)."""
-    stem = new_path[:-4]
-    candidates = [*list(written), new_path]
-    part = 1
-    while os.path.exists(f"{stem}-{part}.fif"):
-        candidates.append(f"{stem}-{part}.fif")
-        part += 1
-    for path in dict.fromkeys(candidates):
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
 
 
 def _write_config(change: ConfigChange) -> None:
@@ -2250,68 +2896,191 @@ def _write_config(change: ConfigChange) -> None:
         raise
 
 
+def _appeared(path: str, where: str = "") -> MigrationError:
+    return MigrationError(
+        f"{path} appeared during the migration and was not overwritten{where}. Move it away "
+        "(or keep it and remove the old output), then plan again (preview) and re-run "
+        "--apply to finish."
+    )
+
+
+def _apply_rewrite(
+    unit: Unit, rewrite: MneRewrite, journal: _Journal, result: ApplyResult
+) -> list[str] | None:
+    """Stage, verify and publish one MNE re-save, then delete the old parts.
+
+    1. ``mne-start``; the recording is saved into ``rewrite.staging`` (private to this
+       transaction) and reloaded: it must equal the original sample for sample;
+    2. ``mne-staged`` with the size and SHA-256 of every staged part;
+    3. each part is published at its new name without replacing anything (``os.link``);
+       a file already there is this transaction's only when it matches its fingerprint;
+    4. only then the old parts are deleted (continuations first), ``mne-done``.
+    """
+    if rewrite.staged is None:
+        journal.write(
+            {
+                "op": "mne-start",
+                "txn": rewrite.txn,
+                "old_parts": rewrite.old_parts,
+                "new": rewrite.new_path,
+            }
+        )
+        journal.sync()
+        staged_target = os.path.join(rewrite.staging, os.path.basename(rewrite.new_path))
+        parts, reason = _rewrite_mne(rewrite.old_parts, staged_target)
+        if parts is None:
+            shutil.rmtree(rewrite.staging, ignore_errors=True)
+            journal.write(
+                {"op": "mne-failed", "txn": rewrite.txn, "old_parts": rewrite.old_parts}
+                | {"reason": reason}
+            )
+            result.recompute.append(
+                {"unit": unit.old_prefix, "reason": f"MNE rewrite not verified: {reason}"}
+            )
+            log.warning(
+                "MNE rewrite failed; unit left in place", unit=unit.old_prefix, reason=reason
+            )
+            return None
+        rewrite.staged = [[os.path.basename(p), *_fingerprint(p)] for p in parts]
+        journal.write(
+            {
+                "op": "mne-staged",
+                "txn": rewrite.txn,
+                "old_parts": rewrite.old_parts,
+                "new": rewrite.new_path,
+                "parts": rewrite.staged,
+            }
+        )
+        journal.sync()
+    directory = os.path.dirname(rewrite.new_path)
+    os.makedirs(directory, exist_ok=True)
+    kept = f"; the verified new recording is kept in {rewrite.staging}"
+    new_parts = []
+    for name, size, digest in rewrite.staged:
+        dest, staged = os.path.join(directory, name), os.path.join(rewrite.staging, name)
+        new_parts.append(dest)
+        if os.path.lexists(dest):
+            if os.path.lexists(staged) and _same_entry(staged, dest):
+                os.unlink(staged)  # linked by an interrupted run
+                continue
+            if _matches(dest, size, digest):
+                if os.path.lexists(staged):
+                    os.unlink(staged)
+                continue
+            raise _appeared(dest, kept)
+        try:
+            _publish_copy(staged, dest)
+        except FileExistsError:
+            raise _appeared(dest, kept) from None
+    # Continuation parts first, the first part last: an interruption leaves the first
+    # part, so the next plan finds the unit and finishes from the journal.
+    for old in rewrite.old_parts[1:] + rewrite.old_parts[:1]:
+        try:
+            os.unlink(old)
+        except FileNotFoundError:
+            pass
+    journal.write(
+        {
+            "op": "mne-done",
+            "txn": rewrite.txn,
+            "old_parts": rewrite.old_parts,
+            "new_parts": new_parts,
+        }
+    )
+    shutil.rmtree(rewrite.staging, ignore_errors=True)
+    result.rewritten.append(
+        {"old_parts": rewrite.old_parts, "new": rewrite.new_path, "new_parts": new_parts}
+    )
+    return new_parts
+
+
 def _apply_member(
-    unit: Unit, journal: _Journal, result: ApplyResult, new_artifacts: dict[str, list[str]]
+    unit: Unit,
+    journal: _Journal,
+    result: ApplyResult,
+    new_artifacts: dict[str, list[str]],
+    shapes: dict[str, list[Any]],
 ) -> bool:
     """MNE rewrites then moves of one unit; ``False`` when it is left in place."""
     for rewrite in unit.mne:
-        if rewrite.finished_parts is not None:
-            new_parts = rewrite.finished_parts
-        else:
-            journal.write(
-                {"op": "mne-start", "old_parts": rewrite.old_parts, "new": rewrite.new_path}
-            )
-            journal.sync()
-            parts, reason = _rewrite_mne(rewrite)
-            if parts is None:
-                journal.write(
-                    {"op": "mne-failed", "old_parts": rewrite.old_parts, "reason": reason}
-                )
+        new_parts = _apply_rewrite(unit, rewrite, journal, result)
+        if new_parts is None:
+            return False
+        new_artifacts[rewrite.suffix] = list(new_parts)
+    # Split recordings moved part by part: the original part list, destinations and
+    # data shape go to the journal (once per transaction) before the first move.
+    for split in unit.split_moves:
+        if not split["journaled"]:
+            first = split["parts"][0][0]
+            try:
+                split["kind"], split["shape"] = _recording_shape(first)
+            except Exception as exc:
                 result.recompute.append(
-                    {"unit": unit.old_prefix, "reason": f"MNE rewrite not verified: {reason}"}
+                    {"unit": unit.old_prefix, "reason": f"split recording does not open: {exc}"}
                 )
-                log.warning(
-                    "MNE rewrite failed; unit left in place", unit=unit.old_prefix, reason=reason
-                )
+                log.warning("Split recording does not open; unit left in place", unit=first)
                 return False
-            new_parts = parts
             journal.write(
                 {
-                    "op": "mne-verified",
-                    "old_parts": rewrite.old_parts,
-                    "new": rewrite.new_path,
-                    "new_parts": new_parts,
+                    "op": "split-move-start",
+                    "txn": split["txn"],
+                    "parts": [list(p) for p in split["parts"]],
+                    "kind": split["kind"],
+                    "shape": split["shape"],
                 }
             )
-            journal.sync()
-        # Continuation parts first, the first part last: an interruption leaves the first
-        # part (with the journal entry) so the next run finishes the deletion.
-        for old in rewrite.old_parts[1:] + rewrite.old_parts[:1]:
-            try:
-                os.unlink(old)
-            except FileNotFoundError:
-                pass
-        journal.write({"op": "mne-done", "old_parts": rewrite.old_parts, "new_parts": new_parts})
-        result.rewritten.append(
-            {"old_parts": rewrite.old_parts, "new": rewrite.new_path, "new_parts": new_parts}
-        )
-        new_artifacts[rewrite.suffix] = list(new_parts)
+            split["journaled"] = True
+    if unit.split_moves:
+        journal.sync()
     for old, new in unit.moves:
         os.makedirs(os.path.dirname(new), exist_ok=True)
-        os.replace(old, new)
+        try:
+            _publish_move(old, new)
+        except FileExistsError:
+            raise _appeared(new) from None
         journal.write({"op": "move", "old": old, "new": new})
         result.moved.append((old, new))
+    for split in unit.split_moves:
+        journal.write({"op": "split-move-done", "txn": split["txn"]})
+        tail = next(
+            (
+                t
+                for t, ps in unit.artifacts.items()
+                if unit.logical.get(ps[0], ps[0]) == split["parts"][0][0]
+            ),
+            None,
+        )
+        if tail is not None and split.get("shape") is not None:
+            shapes[tail] = [split["kind"], split["shape"]]
     return True
+
+
+def _unverified_recordings(
+    artifacts: Mapping[str, list[str]], verified: set[str], shapes: Mapping[str, list[Any]]
+) -> str | None:
+    """Why a FIF artifact of a manifest is not a complete recording (``None``: all are).
+
+    Re-saved recordings (*verified*) were compared sample for sample before publication;
+    every other FIF artifact is checked by :func:`_verify_recording`.
+    """
+    for suffix, files in artifacts.items():
+        if not _is_fif_tail(suffix) or suffix in verified:
+            continue
+        problem = _verify_recording(files, shapes.get(suffix))
+        if problem is not None:
+            return problem
+    return None
 
 
 def _apply_unit(unit: Unit, journal: _Journal, result: ApplyResult) -> None:
     """Apply one unit (with the other units sharing its target), then write its manifest."""
     new_prefix = unit.new_prefix or ""
     new_artifacts: dict[str, list[str]] = {}
+    shapes: dict[str, list[Any]] = {}
     complete = True
     for member in unit.members or [unit]:
         if member.status == "move":
-            complete = _apply_member(member, journal, result, new_artifacts) and complete
+            complete = _apply_member(member, journal, result, new_artifacts, shapes) and complete
     if unit.manifest_suffixes is None or not complete:
         return
     owners = {tail: member for member in unit.members or [unit] for tail in member.artifacts}
@@ -2322,6 +3091,11 @@ def _apply_unit(unit: Unit, journal: _Journal, result: ApplyResult) -> None:
         else:
             owner = owners[suffix]
             artifacts[suffix] = [owner.targets.get(p, p) for p in owner.artifacts[suffix]]
+    problem = _unverified_recordings(artifacts, set(new_artifacts), shapes)
+    if problem is not None:
+        result.recompute.append({"unit": unit.old_prefix, "reason": problem})
+        log.warning("Recording not verified; no .done", unit=new_prefix, reason=problem)
+        return
     cand = unit.candidate
     manifest = build_manifest(
         new_prefix,
@@ -2340,19 +3114,20 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
     """Execute *plan*: MNE rewrites, file moves, manifests, then configuration files.
 
     Refuses (raising :class:`MigrationRefused`, nothing changed) when the plan has
-    refusals or a precondition no longer holds. Every completed operation is appended to
-    the tree's journal (``<derivatives_path>/.neurodags/migrate-journal.json``, JSON
-    Lines; for datasets without ``derivatives_path``, ``.neurodags/`` next to the
-    pipeline), so an interrupted run is resumed by planning and applying again.
-    Configuration files are written (with ``.bak-0.3`` backups) only after every tree
-    was processed.
+    refusals, another run holds a tree's lock, or a precondition no longer holds. Every
+    completed operation is appended to the tree's journal
+    (``<derivatives_path>/.neurodags/migrate-journal.json``, JSON Lines; for datasets
+    without ``derivatives_path``, ``.neurodags/`` next to the pipeline), so an
+    interrupted run is resumed by planning and applying again. The lock file
+    (:data:`LOCK_NAME`, next to each journal) of every tree of the plan is held for the
+    whole run, also when only configuration files change. Existing files are never
+    replaced: MNE re-saves are staged in ``.neurodags/staging/`` and published with
+    ``os.link``. Configuration files are written (with ``.bak-0.3`` backups) only after
+    every tree was processed.
     """
     if plan.refusals:
         raise MigrationRefused(plan.refusals)
-    problems = _recheck(plan)
-    if problems:
-        raise MigrationRefused([*problems, "plan again (preview) and re-run --apply"])
-    result = ApplyResult()
+    work = []
     for tree in plan.trees:
         units = [
             u
@@ -2361,21 +3136,57 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
             and not u.secondary
             and (u.manifest_suffixes is not None or any(m.moves or m.mne for m in u.members or [u]))
         ]
-        if not units:
-            continue
-        journal = _Journal(tree.journal, plan)
-        result.journals.append(tree.journal)
-        try:
-            for unit in units:
-                _apply_unit(unit, journal, result)
-        finally:
-            journal.close()
-    # A separate datasets YAML first, the pipeline (which declares naming_version: 1)
-    # last: interrupted in between, the datasets already have source_root, which a
-    # re-run in legacy mode accepts as 0.4.0 paths, so the same command completes.
-    for change in sorted(plan.config_changes, key=lambda c: c.role == "pipeline"):
-        _write_config(change)
-        result.configs.append(change.path)
+        if units:
+            work.append((tree, units))
+    result = ApplyResult()
+    if not work and not plan.config_changes:
+        return result
+    # One --apply per output tree at a time: every tree's lock is held from the recheck
+    # until the configuration files are written.
+    locks: list[tuple[str, str]] = []
+    try:
+        # The configuration's own lock first (held even when no output tree exists yet),
+        # then every tree's.
+        configs = [plan.pipeline] + [c.path for c in plan.config_changes]
+        for config in dict.fromkeys(configs):
+            locks.append(_acquire_lock(os.path.dirname(config), _config_lock_path(config)))
+        for directory in _lock_dirs(plan):
+            locks.append(_acquire_lock(directory))
+        problems = _recheck(plan)
+        if problems:
+            raise MigrationRefused([*problems, "plan again (preview) and re-run --apply"])
+        # Hard links are required: checked before anything is changed.
+        problems = _probe_hard_links(_publication_pairs(plan))
+        if problems:
+            raise MigrationRefused(problems)
+        for tree, units in work:
+            journal = _Journal(tree.journal, plan)
+            result.journals.append(tree.journal)
+            try:
+                # Duplicates left in place, with fingerprints: their keeper may be
+                # re-saved (other bytes), and a re-run still recognizes them.
+                for dup in (u for u in tree.units if u.status == "duplicate"):
+                    journal.write(
+                        {
+                            "op": "duplicate",
+                            "new_prefix": dup.new_prefix,
+                            "files": {f: _fingerprint(f) for f in dup.files},
+                        }
+                    )
+                journal.sync()
+                for unit in units:
+                    _apply_unit(unit, journal, result)
+            finally:
+                journal.close()
+        # A separate datasets YAML first, the pipeline (which declares naming_version: 1)
+        # last: interrupted in between, the datasets already have source_root, which a
+        # re-run in legacy mode accepts as 0.4.0 paths, so the same command completes.
+        for change in sorted(plan.config_changes, key=lambda c: c.role == "pipeline"):
+            _write_config(change)
+            result.configs.append(change.path)
+    finally:
+        for lock in reversed(locks):
+            _release_lock(lock)
     return result
 
 

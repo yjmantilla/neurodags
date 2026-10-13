@@ -288,6 +288,17 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `a_b` and `a|b`, produced the same column; the new encoding is reversible.
 - `datasets_psycho.yml`'s `fir` `file_pattern` was a bare directory and is now a `**/*.vhdr`
   glob.
+- `neurodags migrate` (pre-release fixes): `--apply` never replaces an existing file (moves
+  and staged, verified MNE re-saves are published with `os.link`; a filesystem without hard
+  links is refused before any change) and holds lock files next to the pipeline and in each
+  output tree, never taken over automatically, also for configuration-only runs; a torn
+  journal tail is tolerated; `--map A=B` onto another definition is refused; compressed split
+  recordings (`.fif.gz`, `.fif-N.gz`) stay one artifact and re-saves use MNE's default split
+  size; interrupted split moves resume after any number of interruptions, and FIF recordings
+  (single files too) are loaded in full before their `.done`; a unit's `.done` lists all its artifacts; a split
+  rewrite into a new folder works; re-running after keeping an identical duplicate (also a
+  split recording whose kept copy was re-saved) is a no-op.
+
 - **`slurm-script` ignored `-d` and, for `per-file`, `--derivative`**: the generated jobs froze,
   counted and ran the pipeline's own datasets, and the per-file worker ran the whole
   `DerivativeList`. Every template now passes the resolved `-d` (absolute) to `neurodags
