@@ -267,6 +267,51 @@ def test_frozen_list_rejects_entries_that_are_not_inputs(recordings: Path, tmp_p
     assert [e.index for e in load_inputs(out, datasets).missing_sources] == [1]
 
 
+@pytest.fixture
+def nested_recordings(tmp_path: Path) -> Path:
+    raw = tmp_path / "raw"
+    _touch(raw / "outer.DS" / "inner.ds" / "x.meg4")
+    _touch(raw / "rec.mff" / "signal1.bin")
+    _touch(raw / "plain.txt")
+    if hasattr(os, "symlink"):
+        os.symlink(raw / "rec.mff", raw / "alias.MFF")
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        # Case-sensitive glob: outer.DS is no hit, but inner.ds is inside it.
+        ("**/*.ds", []),
+        # Contents of a recording, whatever the pattern (also through a symlinked one).
+        ("**/*.bin", []),
+        ("**/*.meg4", []),
+        ("*/*", []),
+        ("**/*", ["alias.MFF", "outer.DS", "plain.txt", "rec.mff"]),
+    ],
+)
+def test_nothing_inside_a_recording_container_is_an_input(nested_recordings, pattern, expected):
+    if not (nested_recordings / "alias.MFF").exists():
+        expected = [r for r in expected if r != "alias.MFF"]
+    assert _rels({"d": _dataset(nested_recordings, pattern)}) == expected
+
+
+def test_frozen_list_refuses_entries_inside_a_container(nested_recordings, tmp_path: Path):
+    datasets = {"d": _dataset(nested_recordings, "**/*")}
+    out = tmp_path / "inputs.tsv"
+    # Overlap: the recording and one of its own files.
+    out.write_text(f"{INPUTS_HEADER}\n0\td\trec.mff\n1\td\trec.mff/signal1.bin\n")
+    with pytest.raises(InputsFileError, match=r"1 \(d: rec.mff/signal1.bin is inside rec.mff\)"):
+        load_inputs(out, datasets)
+    # Lexical and case-insensitive: refused even when the file does not exist, and the
+    # outermost container is named.
+    out.write_text(f"{INPUTS_HEADER}\n0\td\tplain.txt\n1\td\touter.DS/inner.ds/gone.meg4\n")
+    with pytest.raises(InputsFileError, match=r"1 \(d: outer.DS/inner.ds/gone.meg4 is inside "):
+        load_inputs(out, datasets)
+    out.write_text(f"{INPUTS_HEADER}\n0\td\tplain.txt\n1\td\touter.DS\n")
+    assert [e.rel for e in load_inputs(out, datasets).entries] == ["plain.txt", "outer.DS"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX leading-slash rule")
 def test_exclude_pattern_with_leading_double_slash(tmp_path: Path):
     raw = tmp_path / "raw"

@@ -201,6 +201,8 @@ sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
 # e.g. 3 derivatives × N files → array size = 3 × N
 # SLURM_ARRAY_TASK_ID = file_index * n_derivatives + derivative_index
 
+source activate myenv
+
 DERIVATIVES=("Preprocessed" "Spectrum" "BandPower")
 N_DERIVATIVES=${#DERIVATIVES[@]}
 
@@ -208,21 +210,21 @@ FILE_INDEX=$(( SLURM_ARRAY_TASK_ID / N_DERIVATIVES ))
 DERIV_INDEX=$(( SLURM_ARRAY_TASK_ID % N_DERIVATIVES ))
 DERIVATIVE=${DERIVATIVES[$DERIV_INDEX]}
 
-source activate myenv
-
-python - <<EOF
+# Quoted heredoc: the shell passes values as arguments, never into the Python source.
+python - "$DERIVATIVE" "$FILE_INDEX" pipeline.yml <<'EOF'
 import os
+import sys
 from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config_path = os.path.abspath("pipeline.yml")
+config_path = os.path.abspath(sys.argv[3])
 config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
     inputs=os.path.abspath("inputs.tsv"),   # frozen input list
-    derivatives=["$DERIVATIVE"],
-    only_index=$FILE_INDEX,
+    derivatives=[sys.argv[1]],
+    only_index=int(sys.argv[2]),
     raise_on_error=True,
 )
 EOF
@@ -244,19 +246,19 @@ neurodags inputs pipeline.yml -o inputs.tsv
 N=$(neurodags count-inputs pipeline.yml --inputs inputs.tsv)
 ARRAY="0-$((N - 1))"
 
-JOB1=$(sbatch --parsable --array=$ARRAY \
-    --export=ALL,DERIVATIVE=Preprocessed \
-    run_one_derivative.sh)
+# The derivative is the worker's argument. --export=ALL keeps PATH and the module/venv
+# environment; an environment variable would not do, because with ALL an inherited value
+# of the same name takes precedence over one set in --export.
+JOB1=$(sbatch --parsable --array=$ARRAY --export=ALL \
+    run_one_derivative.sh Preprocessed)
 
-JOB2=$(sbatch --parsable --array=$ARRAY \
+JOB2=$(sbatch --parsable --array=$ARRAY --export=ALL \
     --dependency=afterok:$JOB1 \
-    --export=ALL,DERIVATIVE=Spectrum \
-    run_one_derivative.sh)
+    run_one_derivative.sh Spectrum)
 
-sbatch --array=$ARRAY \
+sbatch --array=$ARRAY --export=ALL \
     --dependency=afterok:$JOB2 \
-    --export=ALL,DERIVATIVE=BandPower \
-    run_one_derivative.sh
+    run_one_derivative.sh BandPower
 ```
 
 ```bash
@@ -267,20 +269,23 @@ sbatch --array=$ARRAY \
 #SBATCH --mem=8G
 #SBATCH --output=logs/%x_%A_%a.out
 
+SELECTED_DERIVATIVE="$1"  # sbatch ... run_one_derivative.sh <derivative>
+
 source activate myenv
 
-python - <<EOF
+python - "$SELECTED_DERIVATIVE" pipeline.yml <<'EOF'
 import os
+import sys
 from neurodags.loaders import load_pipeline_configuration
 from neurodags.orchestrators import run_pipeline
 
-config_path = os.path.abspath("pipeline.yml")
+config_path = os.path.abspath(sys.argv[2])
 config = load_pipeline_configuration(config_path)  # requires naming_version: 1
 run_pipeline(
     config,
     base_dir=os.path.dirname(config_path),  # relative inline dataset paths (0.4.0)
     inputs=os.path.abspath("inputs.tsv"),   # frozen input list
-    derivatives=["$DERIVATIVE"],
+    derivatives=[sys.argv[1]],
     only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
     raise_on_error=True,
     skip_errors=True,

@@ -3,8 +3,8 @@
 Text checks cannot tell a selection that is honoured from one that only appears in a
 comment, so these tests run the generated scripts unchanged with ``bash``. Small shims on
 ``PATH`` stand in for the cluster: ``sbatch`` runs every array task in turn (in submission
-order, which respects ``--dependency=afterok``; ``--export`` without ``ALL`` replaces the
-task environment, as on SLURM), ``neurodags`` and ``python`` run this checkout,
+order, which respects ``--dependency=afterok``; ``--export`` follows SLURM: without
+``ALL`` it replaces the task environment, with ``ALL`` inherited variables win), ``neurodags`` and ``python`` run this checkout,
 and ``activate`` is an empty file for ``source activate myenv``. Both shims log their
 arguments so the tests can check what was frozen, counted and submitted.
 """
@@ -29,28 +29,34 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash
 _SBATCH = """\
 import json, os, subprocess, sys
 args = sys.argv[1:]
-script = args[-1]
+# sbatch [options] script [script arguments]
+first = next(i for i, a in enumerate(args) if not a.startswith("--"))
+options, script, script_args = args[:first], args[first], args[first + 1:]
 env = dict(os.environ)
 lo = hi = 0
-for arg in args[:-1]:
+for arg in options:
     if arg.startswith("--array="):
         lo, hi = (int(x) for x in arg.split("=", 1)[1].split("-"))
     elif arg.startswith("--export="):
-        # SLURM semantics: without ALL, the listed variables *replace* the environment
-        # (PATH and the activated environment are lost).
+        # SLURM semantics (sbatch --export): without ALL, the listed variables *replace*
+        # the environment (PATH and the activated environment are lost); with ALL, a
+        # variable already in the user's environment takes precedence over the listed one.
         items = arg.split("=", 1)[1].split(",")
         if "ALL" not in items:
             env = {}
         for item in items:
             if "=" in item:
                 key, value = item.split("=", 1)
-                env[key] = value
+                if "ALL" in items:
+                    env.setdefault(key, value)
+                else:
+                    env[key] = value
 with open(os.environ["SHIM_LOG"], "a") as log:
     log.write(json.dumps({"sbatch": args, "tasks": list(range(lo, hi + 1)),
-                          "derivative": env.get("DERIVATIVE")}) + "\\n")
+                          "script_args": script_args}) + "\\n")
 for task in range(lo, hi + 1):
     env["SLURM_ARRAY_TASK_ID"] = str(task)
-    rc = subprocess.run(["bash", script], env=env).returncode
+    rc = subprocess.run(["bash", script, *script_args], env=env).returncode
     if rc:
         sys.exit(rc)
 if "--parsable" in args:
@@ -221,7 +227,8 @@ def test_chained_submission_honours_datasets_override(same_key: Path):
 
 
 def test_chained_sbatch_keeps_the_job_environment(same_key: Path):
-    # --export=DERIVATIVE=X alone would replace the environment (PATH, modules, venv).
+    # --export=DERIVATIVE=X alone would replace the environment (PATH, modules, venv);
+    # the derivative is the worker's argument instead.
     p = same_key
     env = _shims(p / "bin")
     _generate("pipeline.yml", "-d", "override.yml", "--pattern", "chained",
@@ -229,9 +236,23 @@ def test_chained_sbatch_keeps_the_job_environment(same_key: Path):
     _bash(p / "submit_pipeline.sh", env, p)
     sbatch = [c["sbatch"] for c in _calls(env) if "sbatch" in c]
     assert [[a for a in argv if a.startswith("--export=")] for argv in sbatch] == [
-        ["--export=ALL,DERIVATIVE=A"],
-        ["--export=ALL,DERIVATIVE=B"],
+        ["--export=ALL"],
+        ["--export=ALL"],
     ]
+    assert [argv[-2:] for argv in sbatch] == [
+        ["run_one_derivative.sh", "A"],
+        ["run_one_derivative.sh", "B"],
+    ]
+
+
+def test_chained_selection_ignores_an_inherited_derivative_variable(same_key: Path):
+    # With --export=ALL an inherited DERIVATIVE would win over --export=ALL,DERIVATIVE=B.
+    p = same_key
+    env = {**_shims(p / "bin"), "DERIVATIVE": "A"}
+    _generate("pipeline.yml", "-d", "override.yml", "--derivative", "B", "--pattern", "chained",
+              "--output", "submit_pipeline.sh")  # fmt: skip
+    _bash(p / "submit_pipeline.sh", env, p)
+    assert _artifacts(p) == ["b-out/x.txt@B.message.txt"]
 
 
 def test_chained_submission_honours_derivative_selection(same_key: Path):
@@ -240,7 +261,7 @@ def test_chained_submission_honours_derivative_selection(same_key: Path):
     _generate("pipeline.yml", "-d", "override.yml", "--derivative", "B", "--pattern", "chained",
               "--output", "submit_pipeline.sh")  # fmt: skip
     _bash(p / "submit_pipeline.sh", env, p)
-    assert [c["derivative"] for c in _calls(env) if "sbatch" in c] == ["B"]
+    assert [c["script_args"] for c in _calls(env) if "sbatch" in c] == [["B"]]
     assert _artifacts(p) == ["b-out/x.txt@B.message.txt"]
 
 

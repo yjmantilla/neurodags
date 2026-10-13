@@ -44,7 +44,12 @@ from typing import Any, Literal
 
 from neurodags.loggers import get_logger
 from neurodags.naming import output_prefix_basename, parse_output_basename
-from neurodags.utils import DatasetConfigError, effective_derivatives_base, resolve_dataset_field
+from neurodags.utils import (
+    DatasetConfigError,
+    effective_derivatives_base,
+    lexical_path_key,
+    resolve_dataset_field,
+)
 
 log = get_logger(__name__)
 
@@ -186,7 +191,9 @@ def check_output_collisions(units: Iterable[tuple[str, str]]) -> None:
     """
     by_base: dict[str, list[tuple[str, str]]] = {}
     for label, base in units:
-        key = os.path.normcase(os.path.normpath(base))
+        # Lexical identity as in discovery (a POSIX leading // is /), case-folded where
+        # the filesystem is case-insensitive.
+        key = os.path.normcase(lexical_path_key(base))
         by_base.setdefault(key, []).append((label, base))
     problems = []
     for group in by_base.values():

@@ -337,14 +337,15 @@ def _slurm_flat(config_path: str, derivatives: list[str], datasets: str | None =
 #SBATCH --output=logs/neurodags_%A_%a.out
 #SBATCH --error=logs/neurodags_%A_%a.err
 
+source activate myenv  # TODO: activate your environment
+
+# Set after activation, so an activation script cannot change them.
 DERIVATIVES={deriv_arr}
 N_DERIVATIVES={n}
 
 FILE_INDEX=$(( SLURM_ARRAY_TASK_ID / N_DERIVATIVES ))
 DERIV_INDEX=$(( SLURM_ARRAY_TASK_ID % N_DERIVATIVES ))
 DERIVATIVE=${{DERIVATIVES[$DERIV_INDEX]}}
-
-source activate myenv  # TODO: activate your environment
 
 {assign}
 python - "$DERIVATIVE" "$FILE_INDEX" {args} <<'EOF'
@@ -380,27 +381,29 @@ def _slurm_chained(
         if is_last:
             submit_lines.append(
                 f"sbatch --array=$ARRAY {dep}"
-                f"--export=ALL,DERIVATIVE={deriv} run_one_derivative.sh"
+                f"--export=ALL run_one_derivative.sh {shlex.quote(deriv)}"
             )
         else:
             submit_lines.append(
                 f"{var}=$(sbatch --parsable --array=$ARRAY {dep}"
-                f"--export=ALL,DERIVATIVE={deriv} run_one_derivative.sh)"
+                f"--export=ALL run_one_derivative.sh {shlex.quote(deriv)})"
             )
         prev_var = var
 
     submit = "\n".join(submit_lines) + "\n"
 
+    # argv: 1 = derivative, 2 = pipeline, 3 = datasets (with -d).
     body = _slurm_run_call(
         datasets,
-        1,
-        '    derivatives=[os.environ["DERIVATIVE"]],\n'
+        2,
+        "    derivatives=[sys.argv[1]],\n"
         '    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),\n',
     )
     worker = f"""\
 #!/bin/bash
 # Worker script used by submit_pipeline.sh (chained pattern).
-# DERIVATIVE is injected via --export from the submit script.
+# The derivative is its first argument (sbatch ... run_one_derivative.sh <derivative>), not
+# an environment variable: with --export=ALL an inherited value would take precedence.
 #
 #SBATCH --job-name=neurodags
 #SBATCH --time=01:00:00    # TODO: adjust per derivative
@@ -408,10 +411,12 @@ def _slurm_chained(
 #SBATCH --output=logs/neurodags_%x_%A_%a.out
 #SBATCH --error=logs/neurodags_%x_%A_%a.err
 
+SELECTED_DERIVATIVE="$1"  # before activation, which may change positional arguments
+
 source activate myenv  # TODO: activate your environment
 
 {assign}
-python - {args} <<'EOF'
+python - "$SELECTED_DERIVATIVE" {args} <<'EOF'
 {body}    skip_errors=True,
 )
 EOF

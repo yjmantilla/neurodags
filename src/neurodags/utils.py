@@ -545,7 +545,8 @@ def _shared_derivatives_path_problems(
     by_path: dict[str, list[str]] = {}
     for name, entry in resolved.items():
         if entry.get("derivatives_path"):
-            key = os.path.normpath(entry["derivatives_path"])
+            # Same lexical identity as discovery (a POSIX leading // is /).
+            key = lexical_path_key(entry["derivatives_path"])
             by_path.setdefault(key, []).append(name)
     problems: list[str] = []
     for path, names in by_path.items():

@@ -156,6 +156,21 @@ def is_recording_container(path: str) -> bool:
     return name.endswith(RECORDING_CONTAINER_EXTENSIONS) and os.path.isdir(path)
 
 
+def container_ancestor(rel: str) -> str | None:
+    """The outermost recording container among the folders of *rel* (POSIX, relative to
+    ``source_root``), or ``None``.
+
+    The check is lexical and case-insensitive on the folder names
+    (:data:`RECORDING_CONTAINER_EXTENSIONS`): anything below a ``.ds``/``.mff`` folder is
+    part of that recording and never an input itself, whatever the pattern matched.
+    """
+    parts = rel.split("/")[:-1]
+    for i, part in enumerate(parts):
+        if part.lower().endswith(RECORDING_CONTAINER_EXTENSIONS):
+            return "/".join(parts[: i + 1])
+    return None
+
+
 def is_input_path(path: str) -> bool:
     """Whether *path* can be an input: a file (or a symbolic link to one) or a recording
     container directory (:func:`is_recording_container`)."""
@@ -529,6 +544,7 @@ def _discover_dataset(
     outside: list[str] = []
     excluded_dirs = list(excluded_dirs)
     n_excluded = 0
+    n_in_containers = 0
     for f in files:
         path = lexical_path_key(f)
         if any(path == d or _is_below(path, d) for d in excluded_dirs):
@@ -539,6 +555,11 @@ def _discover_dataset(
         except ValueError:
             outside.append(path)
             continue
+        if container_ancestor(rel) is not None:
+            # Inside a recording container (e.g. ``**/*.bin`` matching ``rec.mff/x.bin``,
+            # or a ``.ds`` nested in another): part of that recording, not an input.
+            n_in_containers += 1
+            continue
         by_rel.setdefault(rel, path)
     if outside:
         outside.sort()
@@ -548,6 +569,12 @@ def _discover_dataset(
             f"datasets.{dataset_name}: {len(outside)} discovered file(s) are not inside "
             f"source_root {lexical_path_key(source_root)!r}: {shown}{more}. Every discovered "
             "file must lie below its dataset's source_root; fix file_pattern or source_root."
+        )
+    if n_in_containers:
+        log.info(
+            "Skipped files inside recording containers (part of the container's input)",
+            dataset=dataset_name,
+            skipped=n_in_containers,
         )
     if n_excluded:
         log.info(
@@ -797,6 +824,7 @@ def load_inputs(
     roots: dict[str, str] = {}
     entries: list[InputEntry] = []
     not_inputs: list[str] = []
+    inside: list[str] = []
     for index, dataset, rel in rows:
         if dataset not in roots:
             root = resolve_dataset_field(datasets[dataset], "source_root", mount_point)
@@ -806,10 +834,21 @@ def load_inputs(
                 )
             roots[dataset] = lexical_path_key(root)
         path = os.path.join(roots[dataset], *rel.split("/"))
-        if os.path.exists(path) and not is_input_path(path):
+        ancestor = container_ancestor(rel)
+        if ancestor is not None:
+            # Lexical, so refused whether or not the file still exists.
+            inside.append(f"{index} ({dataset}: {rel} is inside {ancestor})")
+        elif os.path.exists(path) and not is_input_path(path):
             # Same rule as discovery; never silently dropped or renumbered.
             not_inputs.append(f"{index} ({dataset}: {rel})")
         entries.append(InputEntry(index, dataset, rel, path, missing=not os.path.exists(path)))
+    if inside:
+        raise InputsFileError(
+            f"{inputs_file}: listed entr{'y lies' if len(inside) == 1 else 'ies lie'} inside a "
+            f"recording container ({'/'.join(RECORDING_CONTAINER_EXTENSIONS)}), which is one "
+            f"input as a whole: {', '.join(inside)}. Fix or regenerate the list with "
+            "'neurodags inputs'."
+        )
     if not_inputs:
         raise InputsFileError(
             f"{inputs_file}: listed entr{'y is' if len(not_inputs) == 1 else 'ies are'} not "

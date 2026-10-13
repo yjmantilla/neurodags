@@ -295,8 +295,10 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `derivatives=[...]`. Pipeline and datasets paths are now shell-quoted and reach the
   workers as arguments of a quoted heredoc (never interpolated into shell or Python source),
   so a name with spaces, quotes, `$` or backquotes runs the intended pipeline. The chained
-  submit script exports `--export=ALL,DERIVATIVE=...` (without `ALL`, SLURM replaced the job
-  environment, dropping `PATH` and the activated environment). Regenerate
+  submit script passes `--export=ALL` (without `ALL`, SLURM replaced the job environment,
+  dropping `PATH` and the activated environment) and gives each array its derivative as the
+  worker's argument (`run_one_derivative.sh <derivative>`), not as `DERIVATIVE=` in
+  `--export`, where an inherited `DERIVATIVE` would take precedence. Regenerate
   scripts made with `-d` or `--derivative`, or for such paths.
 - **The TUI showed one datasets YAML and ran another**: a relative override typed in the Config
   tab was read against the current directory for the summary but against the pipeline's
@@ -313,12 +315,17 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   spellings of the same path (`raw/./**`, `//`, `..`, a leading `//` on POSIX; lexical,
   symlinks are not resolved); and inputs are files or recording containers only: a directory
   is an input only when its name ends in `.ds` (CTF) or `.mff` (EGI), case-insensitively
-  (`neurodags.iterators.RECORDING_CONTAINER_EXTENSIONS`), and then as one input whose inner
-  files are never inputs themselves. Other directories matched by a broad pattern
+  (`neurodags.iterators.RECORDING_CONTAINER_EXTENSIONS`), and then as one input: nothing
+  inside such a folder is an input, whatever the pattern, and a frozen list naming such a
+  path is refused. Other directories matched by a broad pattern
   (`raw/**/*`), including the dataset's own output folder, are no longer enumerated, and a
   frozen list naming such a directory is refused. **This changes indices** for configurations
   whose pattern matched ordinary directories or the inside of `.ds`/`.mff` recordings;
   regenerate frozen lists (`neurodags inputs`) for them.
+- **Output-collision checks ignored a POSIX leading `//`**: two datasets whose output roots
+  were spelled `/x/out` and `//x/out` passed both the shared-`derivatives_path` check and the
+  per-source collision check, so two sources could share one artifact. Both now compare paths
+  with the same lexical identity as discovery (`neurodags.utils.lexical_path_key`).
 - **TUI DataFrame filter**: derivative names are whitespace-separated as specified (`A B`);
   commas are still accepted.
 
