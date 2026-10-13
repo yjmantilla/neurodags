@@ -219,8 +219,20 @@ contributes no files (and no indices), but must still declare `source_root`.
 
 ## Discovery and file order
 
-For each active dataset, neurodags globs `file_pattern`, removes `exclude_pattern` matches, drops
-MNE split continuations, removes duplicates and the pipeline's own output trees (the dataset's
+For each active dataset, neurodags globs `file_pattern` and keeps only inputs: files (a
+symbolic link to a file is kept under its own path) and recording containers, directories that
+are one recording each, named `*.ds` (CTF) or `*.mff` (EGI), case-insensitively (the list is
+`neurodags.iterators.RECORDING_CONTAINER_EXTENSIONS`). A container is one input: nothing
+below a folder with such a name (checked on the path below `source_root`, nested `.ds`
+folders included) is ever an input, whatever the pattern, so `raw/**/*` yields
+`sub-01_meg.ds` once and `raw/**/*.bin` does not return the files of an `.mff` recording. A
+frozen input list naming a path inside a container is refused.
+Other directories are never inputs (select a BrainVision recording by its `.vhdr`, not its
+folder). Discovery then normalizes each path lexically (`raw/./sub//x` is `raw/sub/x`, and on
+POSIX a leading `//` is `/`; symbolic links are not resolved) and removes duplicates (a pattern
+with several `**` can match a file more than once), removes `exclude_pattern` matches (normalized the same way, so another
+spelling of the same path is still excluded), drops MNE split continuations, removes the
+pipeline's own output trees (the dataset's
 `derivatives_path[/derivatives_subdir]` when it lies inside `source_root`, and `code/` /
 `.neurodags/` under any `derivatives_path`), checks that every file lies below `source_root`, and
 **sorts the files by their path relative to `source_root`** (`/` separators, code-point order:

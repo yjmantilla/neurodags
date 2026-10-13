@@ -248,7 +248,9 @@ neurodags status pipeline.yml --format json --include-files
 
 `label` is `status`, except `done (migrated)` for a done unit certified by `neurodags migrate`
 (`status` stays `done`, so consumers counting `done` keep working). `status` is one of `done`, `skipped`, `incomplete`, `missing`, `errored`, `no-save`, `unknown`, or
-`missing-source` (with `--inputs`: listed, but no longer on disk). When no
+`missing-source` (with `--inputs`: listed, but no longer on disk) or `planning-error` (the dry
+run could not plan the unit, e.g. a node argument names a node id that does not exist; the
+record's `planning_error` field holds the error, and `planning_error_indices` lists them). When no
 input files are found, `--format json` still emits a valid document (zero counts, empty
 index lists, `"complete": true`).
 
@@ -265,7 +267,13 @@ neurodags status pipeline.yml --derivative Alpha --format indices
 ```
 
 The exit code keeps its meaning in every format: `1` whenever something is missing,
-incomplete or errored (or, with `--inputs`, a listed input is `missing-source`). Under `set -e`, capturing it with `$(...)`
+incomplete or errored (or, with `--inputs`, a listed input is `missing-source`), and also
+when any unit could not be planned (`planning-error`: the report is then not `complete`, and
+the failing units are named on stderr; `--format indices` leaves out every index with a
+planning error in *any* selected derivative, even if another selected derivative is missing
+there, because rerunning that index fails the same way until the configuration is fixed;
+select the other derivative alone, `--derivative B`, to get its indices). `neurodags
+dry-run` likewise saves the plan but exits `1` when a unit could not be planned. Under `set -e`, capturing it with `$(...)`
 would abort the script precisely when there is something to resubmit, so add `--exit-zero`:
 
 ```bash
@@ -273,7 +281,8 @@ IDX=$(neurodags status pipeline.yml --format indices --exit-zero)
 [ -n "$IDX" ] && neurodags run pipeline.yml --only-index $IDX
 ```
 
-With `--exit-zero`, `status` exits `0` whenever the report was produced, but real failures
+With `--exit-zero`, `status` exits `0` whenever the report was produced (planning errors
+included: they are still reported on stderr and in the JSON report), but real failures
 (missing or invalid config, unset environment variable, unreadable `-d` file) still exit
 non-zero, so `set -e` still stops on a broken config. Avoid the older `|| true` guard: it
 also swallows those real failures, leaving `IDX` silently empty.

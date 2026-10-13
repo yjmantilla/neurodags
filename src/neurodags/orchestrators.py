@@ -325,7 +325,9 @@ def iterate_derivative_pipeline(
         files. Cannot be combined with ``inputs``.
     dry_run : bool, optional
         When True, evaluate the pipeline without executing nodes and return a dataframe describing
-        the plan.
+        the plan. A unit whose plan could not be computed keeps a row with an empty ``plan``
+        and the error in ``planning_error`` (``"<ErrorType>: <message>"``; the column is
+        absent or null when every unit was planned).
     only_index : int | list[int], optional
         Restrict execution to a subset of files by index. A negative or unknown index raises
         :class:`neurodags.iterators.IndexSelectionError` (a ``ValueError``).
@@ -578,6 +580,20 @@ def iterate_derivative_pipeline(
                 error_type=result.error_type,
                 traceback=result.traceback,
             )
+            if dry_run and not result.missing_source:
+                # Keep the unit in the plan: an inspection that could not plan a unit
+                # must not look like a population without it (status reports it as
+                # "planning-error" and fails).
+                dry_run_collection.append(
+                    {
+                        "index": result.index,
+                        "dataset": result.dataset,
+                        "file_path": result.file_path,
+                        "derivative": result.derivative_label,
+                        "plan": [],
+                        "planning_error": f"{result.error_type}: {result.error_message}",
+                    }
+                )
             if raise_on_error:
                 error_summary = (
                     f"Failed to process file '{result.file_path}' for '{result.derivative_label}' "
