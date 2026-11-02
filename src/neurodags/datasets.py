@@ -19,6 +19,14 @@ from neurodags.definitions import DatasetConfig, PathLike
 from neurodags.loaders import load_configuration, load_pipeline_configuration
 from neurodags.utils import MOUNT_POINT_ENV, expand_path, get_num_digits
 
+#: How each :func:`resolve_mount_point` source is shown in human-readable output.
+MOUNT_SOURCE_LABELS = {
+    "argument": "-m/--mount-point",
+    "environment": f"${MOUNT_POINT_ENV}",
+    "pipeline": "pipeline",
+    "unset": "not set",
+}
+
 
 def resolve_mount_point(configured: Any, override: str | None = None) -> tuple[Any, str]:
     """Return the active mount point and where it came from.
@@ -110,8 +118,23 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
     ValueError
         If the datasets section is missing or invalid.
     """
+    datasets, mount_point, _ = _load_datasets_mount_and_source(
+        pipeline_input, datasets_input, base_dir=base_dir, mount_point=mount_point
+    )
+    return datasets, mount_point
+
+
+def _load_datasets_mount_and_source(
+    pipeline_input: dict[str, Any] | PathLike,
+    datasets_input: dict[str, Any] | PathLike | None = None,
+    *,
+    base_dir: PathLike | None = None,
+    mount_point: str | None = None,
+) -> tuple[dict[str, DatasetConfig], Any, str]:
+    """:func:`get_datasets_and_mount_point_from_pipeline_configuration`, plus the source
+    of the mount point (a :func:`resolve_mount_point` token)."""
     pipeline_config = load_pipeline_configuration(pipeline_input)
-    mount_point, _ = resolve_mount_point(pipeline_config.get("mount_point"), mount_point)
+    mount_point, mount_source = resolve_mount_point(pipeline_config.get("mount_point"), mount_point)
     pipeline_is_file = isinstance(pipeline_input, str | os.PathLike)
     memory_base = os.path.abspath(os.fspath(base_dir)) if base_dir is not None else None
 
@@ -157,7 +180,7 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         dataset_config._base_dir = origin_dir
         configs[name] = dataset_config
 
-    return configs, mount_point
+    return configs, mount_point, mount_source
 
 
 def replace_brainvision_filename(fpath: PathLike, newname: str) -> None:

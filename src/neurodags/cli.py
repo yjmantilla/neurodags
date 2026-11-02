@@ -14,6 +14,7 @@ import pandas as pd
 
 from neurodags.datasets import (
     MOUNT_POINT_ENV,
+    MOUNT_SOURCE_LABELS,
     get_datasets_and_mount_point_from_pipeline_configuration,
     resolve_mount_point,
 )
@@ -21,8 +22,7 @@ from neurodags.iterators import (
     InputEnumeration,
     InputsError,
     InputsFileError,
-    discover_inputs,
-    enumerate_inputs,
+    enumerate_pipeline_inputs,
     format_inputs,
     output_tree_warnings,
     write_inputs_file,
@@ -48,9 +48,10 @@ from neurodags.orchestrators import (
 )
 from neurodags.utils import (
     DatasetConfigError,
+    MountPointError,
     expand_path,
     inspect_dataset_paths,
-    resolve_dataset_paths,
+    missing_mount_entries,
 )
 
 # Help text shared by every subcommand that takes -d/--datasets (see #43).
@@ -65,14 +66,6 @@ MOUNT_POINT_HELP = (
     "Mount point to use instead of the pipeline's 'mount_point' key (one pipeline YAML, "
     f"one mount per host). Default: ${MOUNT_POINT_ENV} if set, else the YAML value."
 )
-
-# How each source of the active mount point is shown (validate, status).
-_MOUNT_SOURCE_LABELS = {
-    "argument": "--mount-point",
-    "environment": f"${MOUNT_POINT_ENV}",
-    "pipeline": "pipeline",
-    "unset": "not set",
-}
 
 # Help text shared by every subcommand that takes --inputs (spec §8.6).
 INPUTS_HELP = (
@@ -198,11 +191,12 @@ def _describe_mount(config: dict, args: argparse.Namespace) -> tuple[object, str
 
 def _cli_enumeration(args: argparse.Namespace) -> InputEnumeration:
     """Enumerate the inputs once for a CLI invocation (discovery or ``--inputs``)."""
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        args.config, datasets_input=args.datasets, mount_point=args.mount_point
+    return enumerate_pipeline_inputs(
+        args.config,
+        datasets_input=args.datasets,
+        inputs=getattr(args, "inputs", None),
+        mount_point=args.mount_point,
     )
-    resolve_dataset_paths(datasets, mount_point)
-    return enumerate_inputs(datasets, mount_point, inputs=getattr(args, "inputs", None))
 
 
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
@@ -776,7 +770,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             )
 
     print(f"config: {args.config}")
-    print(f"mount:  {mount_point} (from {_MOUNT_SOURCE_LABELS[mount_source]})")
+    print(f"mount:  {mount_point} (from {MOUNT_SOURCE_LABELS[mount_source]})")
     if inputs_file:
         print(f"inputs: {inputs_file}")
     if not rows:
@@ -1369,7 +1363,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
             args.config, datasets_input=args.datasets, mount_point=args.mount_point
         )
-        resolved_paths, problems = inspect_dataset_paths(datasets, mount_point)
+        mount_source = _describe_mount(config, args)[1]
+        resolved_paths, problems = inspect_dataset_paths(
+            datasets, mount_point, mount_source=mount_source
+        )
         # Errors were raised when the configuration was loaded; this returns the warnings.
         name_warnings = check_pipeline_names(config)
         for name in getattr(args, "derivatives", None) or []:
@@ -1394,8 +1391,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     print(f"config: {args.config}")
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
-    mount_label = _MOUNT_SOURCE_LABELS[_describe_mount(config, args)[1]]
-    print(f"mount_point: {mount_point} (from {mount_label})")
+    print(f"mount_point: {mount_point} (from {MOUNT_SOURCE_LABELS[mount_source]})")
     _print_dataset_report(datasets, resolved_paths, mount_point, problems)
     for warning in [*name_warnings, *layout_warnings]:
         print(f"warning: {warning}", file=sys.stderr)
@@ -1509,11 +1505,9 @@ def _cmd_count(args: argparse.Namespace) -> int:
 
 def _cmd_inputs(args: argparse.Namespace) -> int:
     _load_pipeline_config(args.config)
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+    enumeration = enumerate_pipeline_inputs(
         args.config, datasets_input=args.datasets, mount_point=args.mount_point
     )
-    resolve_dataset_paths(datasets, mount_point)
-    enumeration = discover_inputs(datasets, mount_point)
     if args.output:
         path = write_inputs_file(enumeration, args.output)
         print(f"wrote {len(enumeration.entries)} input(s) to {path}")
@@ -1526,6 +1520,15 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
     ordered = _derivative_topo_order(config, derivatives)
+    if args.mount_point:
+        # Every job would fail on a mount the datasets do not define. The paths are not
+        # checked: they may exist only on the cluster.
+        datasets, _ = get_datasets_and_mount_point_from_pipeline_configuration(
+            args.config, datasets_input=args.datasets, mount_point=args.mount_point
+        )
+        problems = missing_mount_entries(datasets, args.mount_point)
+        if problems:
+            raise MountPointError(problems)
 
     if args.pattern == "per-file":
         script = _slurm_per_file(args.config, ordered, args.datasets, args.mount_point)

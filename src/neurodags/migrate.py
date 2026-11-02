@@ -82,7 +82,7 @@ from typing import Any
 import yaml
 
 from neurodags._legacy import snake_to_camel
-from neurodags.datasets import resolve_mount_point
+from neurodags.datasets import MOUNT_SOURCE_LABELS, resolve_mount_point
 from neurodags.definitions import DatasetConfig
 from neurodags.iterators import discover_inputs, neuromag_split_name, neuromag_split_part
 from neurodags.loaders import UniqueKeySafeLoader, check_pipeline_names, load_configuration
@@ -2430,8 +2430,7 @@ def format_preview(plan: MigrationPlan, *, apply: bool = False) -> str:
         lines.append("mount:       (none)")
     else:
         # A stale NEURODAGS_MOUNT_POINT would migrate another mount's tree: show the source.
-        labels = {"argument": "-m/--mount-point", "environment": "$NEURODAGS_MOUNT_POINT"}
-        source = labels.get(plan.mount_source, plan.mount_source)
+        source = MOUNT_SOURCE_LABELS.get(plan.mount_source, plan.mount_source)
         lines.append(f"mount:       {plan.mount} (from {source})")
     if plan.mode == "legacy":
         lines.append(

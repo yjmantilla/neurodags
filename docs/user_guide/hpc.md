@@ -91,7 +91,9 @@ into the script as an absolute path) is passed to `neurodags inputs`/`count-inpu
 (per-file workers pass `derivatives=[...]`; flat and chained arrays only list the selected
 derivatives), and `-m NAME` is passed to `neurodags inputs`/`count-inputs` and exported as
 `NEURODAGS_MOUNT_POINT` in every worker, after the environment activation (without `-m`, a
-value exported where you submit, or the YAML's `mount_point`, applies). Each job log shows
+value exported where you submit, or the YAML's `mount_point`, applies; the per-file and flat
+jobs only see a submit-side value when sbatch exports your environment, its default unless
+`SBATCH_EXPORT` or a site policy says otherwise, so prefer `-m`). Each job log shows
 the active mount point and its source. Paths are shell-quoted, and the Python part of each worker is a quoted heredoc
 (`python - "$PIPELINE" ... <<'EOF'`) that reads them from `sys.argv`, so unusual file names
 (spaces, quotes, `$`) reach `run_pipeline` unchanged.

@@ -12,6 +12,7 @@ from joblib import Parallel, delayed
 
 from neurodags.dag import collect_derivative_for_dataframe, run_derivative
 from neurodags.datasets import (
+    _load_datasets_mount_and_source,
     get_datasets_and_mount_point_from_pipeline_configuration,
     resolve_mount_point,
 )
@@ -396,7 +397,7 @@ def iterate_derivative_pipeline(
             "No 'DerivativeDefinitions' found in the configuration. Skipping derivative registration."
         )
 
-    datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+    datasets_configs, mount_point, mount_source = _load_datasets_mount_and_source(
         pipeline_configuration,
         datasets_input=datasets_configuration,
         base_dir=base_dir,
@@ -404,7 +405,7 @@ def iterate_derivative_pipeline(
     )
     # Preflight: unresolved paths, missing/invalid source_root, invalid
     # derivatives_subdir and shared derivatives_path fail before any file is touched.
-    resolve_dataset_paths(datasets_configs, mount_point)
+    resolve_dataset_paths(datasets_configs, mount_point, mount_source=mount_source)
 
     # One enumeration per invocation (spec §8): run_pipeline passes its own down.
     if enumeration is None:
@@ -890,7 +891,7 @@ def run_pipeline(
     # so job logs show it, and recorded in the snapshot.
     mount_source = resolve_mount_point(config.get("mount_point"), mount_point)[1]
     if _ds_configs is not None:
-        resolve_dataset_paths(_ds_configs, _mount)
+        resolve_dataset_paths(_ds_configs, _mount, mount_source=mount_source)
         # After the preflight, so a configuration error stays the first line on stderr.
         log.info("Active mount point", mount_point=_mount, source=mount_source)
         # One enumeration per invocation, shared by every derivative (spec §8). Done
@@ -1111,15 +1112,14 @@ def build_derivative_dataframe(
         )
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
-    mount_source = resolve_mount_point(config_dict.get("mount_point"), mount_point)[1]
-    datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+    datasets_configs, mount_point, mount_source = _load_datasets_mount_and_source(
         pipeline_configuration,
         datasets_input=datasets_configuration,
         base_dir=base_dir,
         mount_point=mount_point,
     )
     # Preflight (#28): fail on unresolved ~/$VARS before any directory is touched.
-    resolve_dataset_paths(datasets_configs, mount_point)
+    resolve_dataset_paths(datasets_configs, mount_point, mount_source=mount_source)
     log.info("Active mount point", mount_point=mount_point, source=mount_source)
 
     # One enumeration (spec §8); the layout roots come from the unlimited discovery.

@@ -18,9 +18,12 @@ from neurodags.datasets import (
     get_datasets_and_mount_point_from_pipeline_configuration,
     resolve_mount_point,
 )
-from neurodags.iterators import enumerate_pipeline_inputs
+from neurodags.iterators import (
+    enumerate_pipeline_inputs,
+    get_all_files_from_pipeline_configuration,
+)
 from neurodags.orchestrators import run_pipeline
-from neurodags.utils import DatasetConfigError
+from neurodags.utils import DatasetConfigError, MountPointError
 
 # The lab tree has 2 recordings, the hpc tree 3, so the count shows which mount was used.
 _FILES = {"lab": ["sub-01/a.vhdr", "sub-02/a.vhdr"], "hpc": ["s1/a.vhdr", "s2/a.vhdr", "s3/a.vhdr"]}
@@ -109,12 +112,43 @@ def test_unknown_mount_is_a_dataset_config_error(pipeline_yml):
     )
     with pytest.raises(DatasetConfigError, match=r"'nowhere' \(available: hpc, lab\)"):
         resolve_dataset_paths(datasets, mount)
+    # Still a KeyError, as before, for callers that caught that.
+    with pytest.raises(KeyError):
+        resolve_dataset_paths(datasets, mount)
 
 
-# dataframe returns early here (no for_dataframe derivative) and never loads the datasets.
-@pytest.mark.parametrize("command", ["run", "dry-run", "status", "inputs", "count-inputs"])
+def test_mount_point_error_survives_pickling():
+    import pickle
+
+    error = pickle.loads(pickle.dumps(MountPointError(["ds: no entry"])))
+    assert type(error) is MountPointError
+    assert error.problems == ["ds: no entry"]
+    assert str(error) == "invalid dataset configuration:\n  - ds: no entry"
+
+
+@pytest.mark.parametrize(
+    "enumerate_",
+    [enumerate_pipeline_inputs, get_all_files_from_pipeline_configuration],
+)
+def test_enumeration_apis_check_the_dataset_paths(tmp_path, enumerate_):
+    config = _config(tmp_path)
+    with pytest.raises(MountPointError, match=r"'nowhere' \(available: lab, hpc\)"):
+        enumerate_(config, mount_point="nowhere")
+    # A map lacking the mount in derivatives_path only is refused too, as by run_pipeline.
+    del config["datasets"]["ds"]["derivatives_path"]["hpc"]
+    with pytest.raises(MountPointError, match=r"derivatives_path: no entry for mount point 'hpc'"):
+        enumerate_(config, mount_point="hpc")
+
+
+@pytest.mark.parametrize(
+    "command", ["run", "dry-run", "status", "inputs", "count-inputs", "dataframe"]
+)
 def test_cli_unknown_mount_is_a_clean_error(pipeline_yml, capsys, monkeypatch, command):
     monkeypatch.chdir(pipeline_yml.parent)  # dry-run writes its CSV to the cwd
+    # dataframe returns early without a for_dataframe derivative, before loading the datasets.
+    config = yaml.safe_load(pipeline_yml.read_text())
+    config["DerivativeDefinitions"]["Prep"]["for_dataframe"] = True
+    pipeline_yml.write_text(yaml.safe_dump(config))
     assert main([command, str(pipeline_yml), "-m", "nowhere"]) == 2
     err = capsys.readouterr().err
     assert (
@@ -123,6 +157,18 @@ def test_cli_unknown_mount_is_a_clean_error(pipeline_yml, capsys, monkeypatch, c
     ) in err
     assert "KeyError" not in err
     assert "NEURODAGS_MOUNT_POINT" not in err
+
+
+def test_mount_error_does_not_blame_the_variable_for_an_explicit_flag(
+    pipeline_yml, capsys, monkeypatch
+):
+    monkeypatch.setenv(MOUNT_POINT_ENV, "nowhere")
+    assert main(["count-inputs", str(pipeline_yml), "-m", "nowhere"]) == 2
+    assert "NEURODAGS_MOUNT_POINT" not in capsys.readouterr().err
+    assert main(["validate", str(pipeline_yml), "-m", "nowhere"]) == 1
+    captured = capsys.readouterr()
+    assert "mount_point: nowhere (from -m/--mount-point)" in captured.out
+    assert "NEURODAGS_MOUNT_POINT" not in captured.err
 
 
 def test_cli_stale_environment_mount_names_the_variable(pipeline_yml, capsys, monkeypatch):
@@ -212,7 +258,7 @@ def test_inputs_mount_point(pipeline_yml, capsys):
     ("argv", "env", "expected"),
     [
         ([], None, "mount_point: lab (from pipeline)"),
-        (["-m", "hpc"], None, "mount_point: hpc (from --mount-point)"),
+        (["-m", "hpc"], None, "mount_point: hpc (from -m/--mount-point)"),
         ([], "hpc", f"mount_point: hpc (from ${MOUNT_POINT_ENV})"),
     ],
 )
@@ -234,7 +280,7 @@ def test_status_reports_mount(pipeline_yml, capsys):
     assert data["n_files"] == 3
 
     main(["status", str(pipeline_yml), "-m", "hpc"])
-    assert "mount:  hpc (from --mount-point)" in capsys.readouterr().out
+    assert "mount:  hpc (from -m/--mount-point)" in capsys.readouterr().out
 
 
 def test_status_shows_mount_when_no_files_are_found(pipeline_yml, capsys, monkeypatch):
@@ -359,7 +405,29 @@ def test_slurm_script_without_mount_point_leaves_it_to_the_job(pipeline_yml, cap
     assert " -m " not in out
 
 
-def test_slurm_script_quotes_mount_point(pipeline_yml, tmp_path):
+def test_slurm_script_refuses_a_mount_the_datasets_do_not_define(pipeline_yml, tmp_path, capsys):
+    out = tmp_path / "run.sh"
+    assert main(["slurm-script", str(pipeline_yml), "-m", "nowhere", "--output", str(out)]) == 2
+    assert "no entry for mount point 'nowhere' (available: hpc, lab)" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_slurm_script_does_not_check_the_paths_of_the_mount(tmp_path, capsys):
+    # The cluster's paths need not exist where the scripts are generated.
+    config = _config(tmp_path)
+    config["datasets"]["ds"]["source_root"]["hpc"] = "/only/on/the/cluster"
+    path = tmp_path / "pipeline.yml"
+    path.write_text(yaml.safe_dump(config))
+    assert main(["slurm-script", str(path), "-m", "hpc"]) == 0
+
+
+def test_slurm_script_quotes_mount_point(tmp_path):
+    config = _config(tmp_path)
+    for field in ("source_root", "file_pattern", "derivatives_path"):
+        values = config["datasets"]["ds"][field]
+        values["my mount;rm"] = values.pop("hpc")
+    pipeline_yml = tmp_path / "pipeline.yml"
+    pipeline_yml.write_text(yaml.safe_dump(config))
     out = tmp_path / "run.sh"
     assert main(["slurm-script", str(pipeline_yml), "-m", "my mount;rm", "--output", str(out)]) == 0
     script = out.read_text()

@@ -5,7 +5,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.datasets import _load_datasets_mount_and_source
 from neurodags.definitions import DatasetConfig
 from neurodags.loggers import get_logger
 from neurodags.utils import (
@@ -14,6 +14,7 @@ from neurodags.utils import (
     lexical_path_key,
     relative_to_source_root,
     resolve_dataset_field,
+    resolve_dataset_paths,
 )
 
 log = get_logger(__name__)
@@ -958,11 +959,15 @@ def enumerate_pipeline_inputs(
     """Load the datasets of a pipeline configuration and enumerate its inputs.
 
     Parameters are those of :func:`get_all_files_from_pipeline_configuration` and
-    :func:`enumerate_inputs`.
+    :func:`enumerate_inputs`. The dataset paths are checked first, as in
+    :func:`neurodags.orchestrators.run_pipeline`
+    (:func:`neurodags.utils.resolve_dataset_paths`), so an unknown mount point raises
+    :class:`neurodags.utils.MountPointError`.
     """
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
+    datasets, mount_point, mount_source = _load_datasets_mount_and_source(
         pipeline_input, datasets_input=datasets_input, base_dir=base_dir, mount_point=mount_point
     )
+    resolve_dataset_paths(datasets, mount_point, mount_source=mount_source)
     return enumerate_inputs(
         datasets,
         mount_point,
