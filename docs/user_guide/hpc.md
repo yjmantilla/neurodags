@@ -87,9 +87,12 @@ the run, including resubmissions, has finished.
 The selection given to `slurm-script` is carried into every generated command and worker:
 `-d datasets.yml` (resolved against the directory you run `slurm-script` from, and written
 into the script as an absolute path) is passed to `neurodags inputs`/`count-inputs` and as
-`datasets_configuration=` to `run_pipeline`, and `--derivative` limits what the workers run
+`datasets_configuration=` to `run_pipeline`, `--derivative` limits what the workers run
 (per-file workers pass `derivatives=[...]`; flat and chained arrays only list the selected
-derivatives). Paths are shell-quoted, and the Python part of each worker is a quoted heredoc
+derivatives), and `-m NAME` is passed to `neurodags inputs`/`count-inputs` and exported as
+`NEURODAGS_MOUNT_POINT` in every worker, after the environment activation (without `-m`, a
+value exported where you submit, or the YAML's `mount_point`, applies). Each job log shows
+the active mount point and its source. Paths are shell-quoted, and the Python part of each worker is a quoted heredoc
 (`python - "$PIPELINE" ... <<'EOF'`) that reads them from `sys.argv`, so unusual file names
 (spaces, quotes, `$`) reach `run_pipeline` unchanged.
 

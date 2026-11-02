@@ -354,7 +354,9 @@ neurodags status pipeline.yml -m hpc            # this command only
 export NEURODAGS_MOUNT_POINT=hpc                # every command and run_pipeline call in this shell
 ```
 
-`validate` and `status` print the active mount point and where it came from (`mount_point: hpc (from --mount-point)`; `mount_point` and `mount_point_source` in `status --format json`). `run` records both in `<derivatives_path>/code/neurodags_env.json`, since the copied pipeline YAML does not show an override. A mount point without an entry in a dataset's map is an error naming the available entries.
+`validate`, `status` and the `migrate` preview print the active mount point and where it came from (`mount_point: hpc (from --mount-point)`; in `status --format json`, `mount_point` and `mount_point_source`: `argument`, `environment`, `pipeline` or `unset`). `run_pipeline` and `build_derivative_dataframe` log both at INFO, so every job log shows them, and `neurodags run` (a pipeline given as a path) also records them in `<derivatives_path>/code/neurodags_env.json`, since the copied pipeline YAML does not show an override; the generated SLURM workers pass a loaded dict and do not write that snapshot. A mount point without an entry in a dataset's map is an error naming the available entries (and saying when the value came from `NEURODAGS_MOUNT_POINT`); an empty `-m ''` is rejected.
+
+In the Python API, a `mount_point` key you set in a dict config is the YAML level: an inherited `NEURODAGS_MOUNT_POINT` overrides it. Pass `mount_point=` instead:
 
 ```python
 from neurodags.loaders import load_pipeline_configuration

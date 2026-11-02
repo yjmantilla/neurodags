@@ -320,6 +320,9 @@ class MigrationPlan:
     notes: list[str] = field(default_factory=list)
     chained_patterns: list[str] = field(default_factory=list)
     column_map: dict[str, Any] = field(default_factory=dict)
+    #: Where ``mount`` came from: ``argument`` (-m), ``environment``
+    #: (NEURODAGS_MOUNT_POINT), ``pipeline`` or ``unset`` (see resolve_mount_point).
+    mount_source: str = "pipeline"
     #: Journal state of an interrupted ``--apply``: the last ``mne-*`` entry per rewrite
     #: transaction, open split moves, and recorded duplicates (by target prefix).
     _mne_txns: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
@@ -362,6 +365,7 @@ class MigrationPlan:
             "pipeline": self.pipeline,
             "datasets_file": self.datasets_file,
             "mount": self.mount,
+            "mount_source": self.mount_source,
             "legacy_cwd": self.legacy_cwd,
             "mode": self.mode,
             "config": {
@@ -1091,11 +1095,12 @@ def plan_migration(
     source = _datasets_source(
         pipeline_path, config, os.fspath(datasets) if datasets is not None else None
     )
-    active_mount, _ = resolve_mount_point(config.get("mount_point"), mount)
+    active_mount, mount_source = resolve_mount_point(config.get("mount_point"), mount)
     plan = MigrationPlan(
         pipeline=pipeline_path,
         datasets_file=None if source.inline else source.path,
         mount=active_mount,
+        mount_source=mount_source,
         legacy_cwd=cwd if mode == "legacy" else None,
         mode=mode,
         synthesize=synthesize,
@@ -2421,7 +2426,13 @@ def format_preview(plan: MigrationPlan, *, apply: bool = False) -> str:
     lines.append(f"pipeline:    {plan.pipeline}")
     if plan.datasets_file:
         lines.append(f"datasets:    {plan.datasets_file}")
-    lines.append(f"mount:       {plan.mount if plan.mount is not None else '(none)'}")
+    if plan.mount is None:
+        lines.append("mount:       (none)")
+    else:
+        # A stale NEURODAGS_MOUNT_POINT would migrate another mount's tree: show the source.
+        labels = {"argument": "-m/--mount-point", "environment": "$NEURODAGS_MOUNT_POINT"}
+        source = labels.get(plan.mount_source, plan.mount_source)
+        lines.append(f"mount:       {plan.mount} (from {source})")
     if plan.mode == "legacy":
         lines.append(
             f"legacy cwd:  {plan.legacy_cwd}  (0.3.x resolved relative dataset paths here; "

@@ -222,6 +222,10 @@ def get_path(
     return path
 
 
+#: Environment variable that selects the mount point when no explicit one is given (#66).
+MOUNT_POINT_ENV = "NEURODAGS_MOUNT_POINT"
+
+
 class DatasetConfigError(ValueError):
     """One or more dataset definitions are invalid (all problems are listed together)."""
 
@@ -442,7 +446,11 @@ def effective_derivatives_base(
 def _format_resolution_error(exc: BaseException, field: str, value: Any, mount_point: Any) -> str:
     if isinstance(exc, KeyError):
         available = ", ".join(map(str, value)) if isinstance(value, dict) else "?"
-        return f"{field}: no entry for mount point {mount_point!r} (available: {available})"
+        message = f"{field}: no entry for mount point {mount_point!r} (available: {available})"
+        if mount_point is not None and os.environ.get(MOUNT_POINT_ENV) == mount_point:
+            # A stale variable inherited from the shell or the job is the likely cause.
+            message += f"; the mount point was set by ${MOUNT_POINT_ENV}"
+        return message
     return str(exc)
 
 
@@ -471,8 +479,9 @@ def inspect_dataset_paths(
     mount_point : str, optional
         The active mount point.
     strict : bool, default False
-        Re-raise path-resolution errors (unset variables, missing mount entries,
-        relative paths without a base directory) instead of collecting them.
+        Raise path-resolution errors (unset variables, relative paths without a base
+        directory) instead of collecting them; a missing mount entry raises
+        :class:`DatasetConfigError` naming the available mount points.
 
     Returns
     -------
@@ -497,6 +506,18 @@ def inspect_dataset_paths(
             except (ValueError, KeyError) as exc:
                 if skipped:  # only resolved for the source_root suggestion
                     continue
+                if strict and isinstance(exc, KeyError):
+                    # An unknown mount point: name the available ones (a clean CLI error).
+                    raise DatasetConfigError(
+                        [
+                            _format_resolution_error(
+                                exc,
+                                f"datasets.{name}.{attr}",
+                                getattr(cfg, attr, None),
+                                mount_point,
+                            )
+                        ]
+                    ) from exc
                 if strict:
                     raise
                 problems.append(
@@ -603,10 +624,9 @@ def resolve_dataset_paths(
     ValueError
         If any active path field references an unset/empty environment variable, or
         is relative without a base directory.
-    KeyError
-        If a mount-point map lacks the active mount point.
     DatasetConfigError
-        If any configuration check fails (all problems are listed).
+        If a mount-point map lacks the active mount point (naming the available ones),
+        or if any configuration check fails (all problems are listed).
     """
     resolved, problems = inspect_dataset_paths(datasets, mount_point, strict=True)
     if problems:

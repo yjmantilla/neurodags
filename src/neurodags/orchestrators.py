@@ -886,8 +886,13 @@ def run_pipeline(
         # datasets itself; only the snapshot is skipped here, as before.
         log.warning("Could not load datasets before execution", error=str(_load_err))
         _ds_configs = None
+    # Where the mount came from (-m/mount_point=, NEURODAGS_MOUNT_POINT or the YAML), logged
+    # so job logs show it, and recorded in the snapshot.
+    mount_source = resolve_mount_point(config.get("mount_point"), mount_point)[1]
     if _ds_configs is not None:
         resolve_dataset_paths(_ds_configs, _mount)
+        # After the preflight, so a configuration error stays the first line on stderr.
+        log.info("Active mount point", mount_point=_mount, source=mount_source)
         # One enumeration per invocation, shared by every derivative (spec §8). Done
         # before the snapshot so a bad input list or index fails before any write.
         if enumeration is None:
@@ -923,7 +928,7 @@ def run_pipeline(
                 _ds_configs,
                 _mount,
                 datasets_configuration=datasets_configuration,
-                mount_point_source=resolve_mount_point(config.get("mount_point"), mount_point)[1],
+                mount_point_source=mount_source,
             )
         except Exception as _snap_err:
             log.warning("Config snapshot failed — pipeline continues", error=str(_snap_err))
@@ -1106,6 +1111,7 @@ def build_derivative_dataframe(
         )
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
+    mount_source = resolve_mount_point(config_dict.get("mount_point"), mount_point)[1]
     datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
         pipeline_configuration,
         datasets_input=datasets_configuration,
@@ -1114,6 +1120,7 @@ def build_derivative_dataframe(
     )
     # Preflight (#28): fail on unresolved ~/$VARS before any directory is touched.
     resolve_dataset_paths(datasets_configs, mount_point)
+    log.info("Active mount point", mount_point=mount_point, source=mount_source)
 
     # One enumeration (spec §8); the layout roots come from the unlimited discovery.
     enumeration = enumerate_inputs(

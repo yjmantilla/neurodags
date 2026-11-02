@@ -17,11 +17,7 @@ import numpy as np
 
 from neurodags.definitions import DatasetConfig, PathLike
 from neurodags.loaders import load_configuration, load_pipeline_configuration
-from neurodags.utils import expand_path, get_num_digits
-
-# Environment variable that selects the mount point when no explicit override is given
-# (issue #66): one pipeline YAML, one value per host or cluster job.
-MOUNT_POINT_ENV = "NEURODAGS_MOUNT_POINT"
+from neurodags.utils import MOUNT_POINT_ENV, expand_path, get_num_digits
 
 
 def resolve_mount_point(configured: Any, override: str | None = None) -> tuple[Any, str]:
@@ -29,7 +25,8 @@ def resolve_mount_point(configured: Any, override: str | None = None) -> tuple[A
 
     The first one that is set wins: *override* (``-m/--mount-point`` or the
     ``mount_point=`` argument of the API), the ``NEURODAGS_MOUNT_POINT`` environment
-    variable (an empty value counts as unset), then the pipeline's ``mount_point`` key.
+    variable, then the pipeline's ``mount_point`` key. An empty override or variable counts
+    as unset.
 
     Parameters
     ----------
@@ -45,7 +42,7 @@ def resolve_mount_point(configured: Any, override: str | None = None) -> tuple[A
     source : str
         ``"argument"``, ``"environment"``, ``"pipeline"`` or ``"unset"``.
     """
-    if override is not None:
+    if override:
         return override, "argument"
     from_env = os.environ.get(MOUNT_POINT_ENV)
     if from_env:

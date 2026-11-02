@@ -172,14 +172,28 @@ def resolve_cli_inputs_path(inputs: str | None) -> str | None:
     return str(path)
 
 
-def _add_mount_point_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("-m", "--mount-point", default=None, metavar="NAME", help=MOUNT_POINT_HELP)
+def mount_point_name(value: str) -> str:
+    """argparse type for ``-m/--mount-point``: a non-empty name."""
+    if not value:
+        raise argparse.ArgumentTypeError("the mount point name cannot be empty")
+    return value
+
+
+def add_mount_point_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``-m/--mount-point`` (shared by every subcommand and ``neurodags-tui``)."""
+    parser.add_argument(
+        "-m",
+        "--mount-point",
+        type=mount_point_name,
+        default=None,
+        metavar="NAME",
+        help=MOUNT_POINT_HELP,
+    )
 
 
 def _describe_mount(config: dict, args: argparse.Namespace) -> tuple[object, str]:
-    """Return the active mount point and a label for where it came from."""
-    mount_point, source = resolve_mount_point(config.get("mount_point"), args.mount_point)
-    return mount_point, _MOUNT_SOURCE_LABELS[source]
+    """Return the active mount point and where it came from (a resolve_mount_point token)."""
+    return resolve_mount_point(config.get("mount_point"), args.mount_point)
 
 
 def _cli_enumeration(args: argparse.Namespace) -> InputEnumeration:
@@ -210,7 +224,7 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(parser)
+    add_mount_point_arg(parser)
     parser.add_argument(
         "--derivative",
         action="append",
@@ -761,7 +775,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
                 f"{' '.join(map(str, missing_source_indices))}"
             )
 
+    print(f"config: {args.config}")
+    print(f"mount:  {mount_point} (from {_MOUNT_SOURCE_LABELS[mount_source]})")
+    if inputs_file:
+        print(f"inputs: {inputs_file}")
     if not rows:
+        # The mount line matters most here: a wrong mount finds no files.
         print("No files found.")
         _print_input_list_report()
         return 0
@@ -781,10 +800,6 @@ def _cmd_status(args: argparse.Namespace) -> int:
     )
     sep = "─" * len(header)
 
-    print(f"config: {args.config}")
-    print(f"mount:  {mount_point} (from {mount_source})")
-    if inputs_file:
-        print(f"inputs: {inputs_file}")
     print(f"files:  {total_files}")
     print()
     print(header)
@@ -917,7 +932,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(tui_parser)
+    add_mount_point_arg(tui_parser)
 
     validate_parser = subparsers.add_parser("validate", help="Load a config and print a summary.")
     validate_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
@@ -927,7 +942,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(validate_parser)
+    add_mount_point_arg(validate_parser)
     validate_parser.add_argument(
         "--derivative",
         action="append",
@@ -958,7 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(dataframe_parser)
+    add_mount_point_arg(dataframe_parser)
     dataframe_parser.add_argument(
         "--include-derivative",
         action="append",
@@ -1057,7 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(inputs_parser)
+    add_mount_point_arg(inputs_parser)
     inputs_parser.add_argument(
         "-o",
         "--output",
@@ -1077,7 +1092,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(count_parser)
+    add_mount_point_arg(count_parser)
     count_parser.add_argument(
         "--derivative",
         action="append",
@@ -1098,7 +1113,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(status_parser)
+    add_mount_point_arg(status_parser)
     status_parser.add_argument(
         "--derivative",
         action="append",
@@ -1173,7 +1188,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
-    _add_mount_point_arg(slurm_parser)
+    add_mount_point_arg(slurm_parser)
     slurm_parser.add_argument(
         "--derivative",
         action="append",
@@ -1230,6 +1245,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mount-point",
         "--mount",
         dest="mount_point",
+        type=mount_point_name,
         default=None,
         metavar="NAME",
         help=(
@@ -1378,7 +1394,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     print(f"config: {args.config}")
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
-    print(f"mount_point: {mount_point} (from {_describe_mount(config, args)[1]})")
+    mount_label = _MOUNT_SOURCE_LABELS[_describe_mount(config, args)[1]]
+    print(f"mount_point: {mount_point} (from {mount_label})")
     _print_dataset_report(datasets, resolved_paths, mount_point, problems)
     for warning in [*name_warnings, *layout_warnings]:
         print(f"warning: {warning}", file=sys.stderr)

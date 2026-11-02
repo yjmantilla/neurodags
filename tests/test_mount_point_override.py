@@ -20,6 +20,7 @@ from neurodags.datasets import (
 )
 from neurodags.iterators import enumerate_pipeline_inputs
 from neurodags.orchestrators import run_pipeline
+from neurodags.utils import DatasetConfigError
 
 # The lab tree has 2 recordings, the hpc tree 3, so the count shows which mount was used.
 _FILES = {"lab": ["sub-01/a.vhdr", "sub-02/a.vhdr"], "hpc": ["s1/a.vhdr", "s2/a.vhdr", "s3/a.vhdr"]}
@@ -100,9 +101,50 @@ def test_mount_map_without_any_mount_names_every_way_to_set_one(tmp_path):
         enumerate_pipeline_inputs(config)
 
 
-def test_unknown_mount_is_an_error(pipeline_yml):
-    with pytest.raises(Exception, match="nowhere"):
-        enumerate_pipeline_inputs(str(pipeline_yml), mount_point="nowhere")
+def test_unknown_mount_is_a_dataset_config_error(pipeline_yml):
+    from neurodags.utils import resolve_dataset_paths
+
+    datasets, mount = get_datasets_and_mount_point_from_pipeline_configuration(
+        pipeline_yml, mount_point="nowhere"
+    )
+    with pytest.raises(DatasetConfigError, match=r"'nowhere' \(available: hpc, lab\)"):
+        resolve_dataset_paths(datasets, mount)
+
+
+# dataframe returns early here (no for_dataframe derivative) and never loads the datasets.
+@pytest.mark.parametrize("command", ["run", "dry-run", "status", "inputs", "count-inputs"])
+def test_cli_unknown_mount_is_a_clean_error(pipeline_yml, capsys, monkeypatch, command):
+    monkeypatch.chdir(pipeline_yml.parent)  # dry-run writes its CSV to the cwd
+    assert main([command, str(pipeline_yml), "-m", "nowhere"]) == 2
+    err = capsys.readouterr().err
+    assert (
+        "neurodags: error: invalid dataset configuration:\n"
+        "  - datasets.ds.source_root: no entry for mount point 'nowhere' (available: hpc, lab)\n"
+    ) in err
+    assert "KeyError" not in err
+    assert "NEURODAGS_MOUNT_POINT" not in err
+
+
+def test_cli_stale_environment_mount_names_the_variable(pipeline_yml, capsys, monkeypatch):
+    monkeypatch.setenv(MOUNT_POINT_ENV, "stale-host")
+    assert main(["count-inputs", str(pipeline_yml)]) == 2
+    err = capsys.readouterr().err
+    assert "'stale-host' (available: hpc, lab)" in err
+    assert f"set by ${MOUNT_POINT_ENV}" in err
+
+
+@pytest.mark.parametrize("command", ["count-inputs", "migrate", "tui"])
+def test_empty_mount_point_flag_is_rejected(command, capsys):
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args([command, "p.yml", "-m", ""])
+    assert exc.value.code == 2
+    assert "cannot be empty" in capsys.readouterr().err
+
+
+def test_empty_override_counts_as_unset(monkeypatch):
+    assert resolve_mount_point("lab", "") == ("lab", "pipeline")
+    monkeypatch.setenv(MOUNT_POINT_ENV, "hpc")
+    assert resolve_mount_point("lab", "") == ("hpc", "environment")
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +230,47 @@ def test_status_reports_mount(pipeline_yml, capsys):
     main(["status", str(pipeline_yml), "-m", "hpc", "--format", "json"])
     data = json.loads(capsys.readouterr().out)
     assert data["mount_point"] == "hpc"
-    assert data["mount_point_source"] == "--mount-point"
+    assert data["mount_point_source"] == "argument"  # same tokens as neurodags_env.json
     assert data["n_files"] == 3
 
     main(["status", str(pipeline_yml), "-m", "hpc"])
     assert "mount:  hpc (from --mount-point)" in capsys.readouterr().out
+
+
+def test_status_shows_mount_when_no_files_are_found(pipeline_yml, capsys, monkeypatch):
+    for f in (pipeline_yml.parent / "hpc" / "raw").rglob("*.vhdr"):
+        f.unlink()
+    monkeypatch.setenv(MOUNT_POINT_ENV, "hpc")
+    assert main(["status", str(pipeline_yml)]) == 0
+    out = capsys.readouterr().out
+    assert f"mount:  hpc (from ${MOUNT_POINT_ENV})" in out
+    assert out.index("mount:") < out.index("No files found.")
+
+
+def test_run_pipeline_logs_mount_and_source(pipeline_yml, monkeypatch):
+    from neurodags import orchestrators
+
+    events = []
+    monkeypatch.setattr(orchestrators, "iterate_derivative_pipeline", lambda **kw: None)
+    monkeypatch.setattr(orchestrators.log, "info", lambda event, **kw: events.append((event, kw)))
+    config = yaml.safe_load(pipeline_yml.read_text())
+    monkeypatch.setenv(MOUNT_POINT_ENV, "hpc")
+    run_pipeline(config, base_dir=pipeline_yml.parent, dry_run=True)
+    assert ("Active mount point", {"mount_point": "hpc", "source": "environment"}) in events
+
+
+def test_migrate_preview_shows_mount_source(pipeline_yml, monkeypatch):
+    from neurodags import migrate
+
+    plan = migrate.plan_migration(str(pipeline_yml))
+    assert (plan.mount, plan.mount_source) == ("lab", "pipeline")
+    monkeypatch.setenv(MOUNT_POINT_ENV, "hpc")
+    plan = migrate.plan_migration(str(pipeline_yml))
+    assert (plan.mount, plan.mount_source) == ("hpc", "environment")
+    assert f"mount:       hpc (from ${MOUNT_POINT_ENV})" in migrate.format_preview(plan)
+    assert plan.to_dict()["mount_source"] == "environment"
+    plan = migrate.plan_migration(str(pipeline_yml), mount="lab")
+    assert (plan.mount, plan.mount_source) == ("lab", "argument")
 
 
 def test_run_and_dataframe_pass_mount_point(pipeline_yml, monkeypatch):
@@ -233,6 +311,17 @@ def test_every_dataset_command_accepts_mount_point():
 def test_migrate_keeps_mount_spelling():
     args = build_parser().parse_args(["migrate", "p.yml", "--mount", "hpc"])
     assert args.mount_point == "hpc"
+
+
+def test_legacy_tui_entry_point_accepts_mount_point(pipeline_yml, monkeypatch):
+    import sys
+
+    import neurodags.tui
+
+    monkeypatch.setattr(neurodags.tui.NeuroDagsApp, "run", lambda self: None)
+    monkeypatch.setattr(sys, "argv", ["neurodags-tui", str(pipeline_yml), "--mount-point", "hpc"])
+    neurodags.tui.main()
+    assert os.environ[MOUNT_POINT_ENV] == "hpc"
 
 
 def test_tui_mount_point_sets_environment(pipeline_yml, monkeypatch):

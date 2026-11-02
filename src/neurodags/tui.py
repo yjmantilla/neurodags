@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import re
 import subprocess
 import sys
@@ -842,11 +843,21 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="NeuroDAGs TUI")
     parser.add_argument("config", nargs="?", help="Path to pipeline YAML config")
-    from neurodags.cli import DATASETS_HELP, DatasetsPathError, resolve_cli_datasets_path
+    from neurodags.cli import (
+        DATASETS_HELP,
+        DatasetsPathError,
+        add_mount_point_arg,
+        resolve_cli_datasets_path,
+    )
     from neurodags.loaders import ConfigVersionError, load_pipeline_configuration
+    from neurodags.utils import MOUNT_POINT_ENV
 
     parser.add_argument("-d", "--datasets", help=DATASETS_HELP)
+    add_mount_point_arg(parser)
     args = parser.parse_args()
+    if args.mount_point is not None:
+        # Same as `neurodags tui -m`: the app and its workers read the variable.
+        os.environ[MOUNT_POINT_ENV] = args.mount_point
     if args.config:
         try:
             load_pipeline_configuration(args.config)  # refuse an unmigrated config up front
