@@ -262,8 +262,9 @@ def resolve_config_path(
     """
     if isinstance(path, dict) and mount_point is None:
         raise ValueError(
-            f"{field} is a mount-point map ({', '.join(map(str, path))}) but the pipeline "
-            "configuration sets no 'mount_point'."
+            f"{field} is a mount-point map ({', '.join(map(str, path))}) but no mount point "
+            "is set: set 'mount_point' in the pipeline, pass -m/--mount-point, or set "
+            "NEURODAGS_MOUNT_POINT."
         )
     resolved = get_path(path, mount_point=mount_point, field=field)
     if not isinstance(resolved, str):

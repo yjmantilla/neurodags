@@ -52,6 +52,8 @@ it are an error. See {ref}`Relative paths <relative-paths>` for the full table.
 
 Selects which environment's paths to use from `datasets.yml`. Must match a key in each dataset's `source_root` / `file_pattern` / `derivatives_path` maps.
 
+It is the default only: `-m/--mount-point` on the command line, `mount_point=` in the Python API, or the `NEURODAGS_MOUNT_POINT` environment variable select another mount without editing the YAML (see {ref}`Choosing the mount point <mount-point-override>`).
+
 ## `new_definitions`
 
 Path (or list of paths) to Python modules that register custom nodes. Loaded before any derivatives execute.

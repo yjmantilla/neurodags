@@ -7,7 +7,21 @@ from typing import Any
 
 import pytest
 
-from neurodags.datasets import generate_dummy_dataset, get_dummy_epochs, get_dummy_raw
+from neurodags.datasets import (
+    MOUNT_POINT_ENV,
+    generate_dummy_dataset,
+    get_dummy_epochs,
+    get_dummy_raw,
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_mount_point_env(monkeypatch):
+    """A NEURODAGS_MOUNT_POINT set in the developer's shell must not change test results."""
+    # setenv first so the original state is restored even when a test (``tui -m``) sets it.
+    monkeypatch.setenv(MOUNT_POINT_ENV, "")
+    monkeypatch.delenv(MOUNT_POINT_ENV)
+
 
 # ---------------------------------------------------------------------------
 # MNE object fixtures

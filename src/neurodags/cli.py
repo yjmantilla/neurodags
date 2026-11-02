@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.datasets import (
+    MOUNT_POINT_ENV,
+    get_datasets_and_mount_point_from_pipeline_configuration,
+    resolve_mount_point,
+)
 from neurodags.iterators import (
     InputEnumeration,
     InputsError,
@@ -55,6 +59,20 @@ DATASETS_HELP = (
     "Resolved relative to the current working directory (~ and $VARS are expanded). "
     "Relative paths inside that YAML are resolved against the YAML's own directory."
 )
+
+# Help text shared by every subcommand that takes -m/--mount-point (#66).
+MOUNT_POINT_HELP = (
+    "Mount point to use instead of the pipeline's 'mount_point' key (one pipeline YAML, "
+    f"one mount per host). Default: ${MOUNT_POINT_ENV} if set, else the YAML value."
+)
+
+# How each source of the active mount point is shown (validate, status).
+_MOUNT_SOURCE_LABELS = {
+    "argument": "--mount-point",
+    "environment": f"${MOUNT_POINT_ENV}",
+    "pipeline": "pipeline",
+    "unset": "not set",
+}
 
 # Help text shared by every subcommand that takes --inputs (spec §8.6).
 INPUTS_HELP = (
@@ -154,10 +172,20 @@ def resolve_cli_inputs_path(inputs: str | None) -> str | None:
     return str(path)
 
 
+def _add_mount_point_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-m", "--mount-point", default=None, metavar="NAME", help=MOUNT_POINT_HELP)
+
+
+def _describe_mount(config: dict, args: argparse.Namespace) -> tuple[object, str]:
+    """Return the active mount point and a label for where it came from."""
+    mount_point, source = resolve_mount_point(config.get("mount_point"), args.mount_point)
+    return mount_point, _MOUNT_SOURCE_LABELS[source]
+
+
 def _cli_enumeration(args: argparse.Namespace) -> InputEnumeration:
     """Enumerate the inputs once for a CLI invocation (discovery or ``--inputs``)."""
     datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        args.config, datasets_input=args.datasets
+        args.config, datasets_input=args.datasets, mount_point=args.mount_point
     )
     resolve_dataset_paths(datasets, mount_point)
     return enumerate_inputs(datasets, mount_point, inputs=getattr(args, "inputs", None))
@@ -182,6 +210,7 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(parser)
     parser.add_argument(
         "--derivative",
         action="append",
@@ -232,23 +261,32 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _slurm_paths(config_path: str, datasets: str | None) -> tuple[str, str, str, str]:
+def _slurm_paths(
+    config_path: str, datasets: str | None, mount_point: str | None = None
+) -> tuple[str, str, str, str]:
     """Shell pieces shared by the SLURM templates.
 
     Paths never reach the generated Python source: the shell sets ``PIPELINE`` (and
     ``DATASETS``) from :func:`shlex.quote`-d literals and passes them to ``python -`` as
     arguments, and every Python body is a quoted heredoc (``<<'EOF'``) that the shell
-    leaves untouched. Returns ``(quoted pipeline, " -d <quoted datasets>" or "", the
-    variable assignments, the ``"$PIPELINE" ["$DATASETS"]`` arguments)``.
+    leaves untouched. A mount point is exported as ``NEURODAGS_MOUNT_POINT``, which
+    ``run_pipeline`` reads when no ``mount_point=`` is given. Returns ``(quoted pipeline,
+    the " -d <datasets>" / " -m <mount>" CLI flags or "", the variable assignments, the
+    ``"$PIPELINE" ["$DATASETS"]`` arguments)``.
     """
     q_config = shlex.quote(config_path)
-    d_flag = f" -d {shlex.quote(datasets)}" if datasets else ""
+    flags = f" -d {shlex.quote(datasets)}" if datasets else ""
     assign = f"PIPELINE={q_config}\n"
     args = '"$PIPELINE"'
     if datasets:
         assign += f"DATASETS={shlex.quote(datasets)}  # -d given to slurm-script\n"
         args += ' "$DATASETS"'
-    return q_config, d_flag, assign, args
+    if mount_point is not None:
+        flags += f" -m {shlex.quote(mount_point)}"
+        assign += (
+            f"export {MOUNT_POINT_ENV}={shlex.quote(mount_point)}  # -m given to slurm-script\n"
+        )
+    return q_config, flags, assign, args
 
 
 def _slurm_run_call(datasets: str | None, first_arg: int, extra: str) -> str:
@@ -274,9 +312,14 @@ run_pipeline(
 """
 
 
-def _slurm_per_file(config_path: str, derivatives: list[str], datasets: str | None = None) -> str:
+def _slurm_per_file(
+    config_path: str,
+    derivatives: list[str],
+    datasets: str | None = None,
+    mount_point: str | None = None,
+) -> str:
     deriv_names = ", ".join(derivatives)
-    q_config, d_flag, assign, args = _slurm_paths(config_path, datasets)
+    q_config, flags, assign, args = _slurm_paths(config_path, datasets, mount_point)
     body = _slurm_run_call(
         datasets,
         1,
@@ -289,8 +332,8 @@ def _slurm_per_file(config_path: str, derivatives: list[str], datasets: str | No
 # Derivatives: {deriv_names}
 #
 # Submit (freeze the input list once; every task reads the same list, see the HPC guide):
-#   neurodags inputs {q_config}{d_flag} -o inputs.tsv
-#   N=$(neurodags count-inputs {q_config}{d_flag} --inputs inputs.tsv)
+#   neurodags inputs {q_config}{flags} -o inputs.tsv
+#   N=$(neurodags count-inputs {q_config}{flags} --inputs inputs.tsv)
 #   sbatch --array=0-$((N - 1)) run_array.sh
 #
 #SBATCH --job-name=neurodags
@@ -310,9 +353,14 @@ EOF
 """
 
 
-def _slurm_flat(config_path: str, derivatives: list[str], datasets: str | None = None) -> str:
+def _slurm_flat(
+    config_path: str,
+    derivatives: list[str],
+    datasets: str | None = None,
+    mount_point: str | None = None,
+) -> str:
     n = len(derivatives)
-    q_config, d_flag, assign, args = _slurm_paths(config_path, datasets)
+    q_config, flags, assign, args = _slurm_paths(config_path, datasets, mount_point)
     deriv_arr = "(" + " ".join(f'"{d}"' for d in derivatives) + ")"
     # argv: 1 = derivative, 2 = file index, 3 = pipeline, 4 = datasets (with -d).
     body = _slurm_run_call(
@@ -326,8 +374,8 @@ def _slurm_flat(config_path: str, derivatives: list[str], datasets: str | None =
 # WARNING: use only when derivatives are independent (no inter-derivative dependencies).
 #
 # Submit (freeze the input list once; every task reads the same list, see the HPC guide):
-#   neurodags inputs {q_config}{d_flag} -o inputs.tsv
-#   N=$(neurodags count-inputs {q_config}{d_flag} --inputs inputs.tsv)
+#   neurodags inputs {q_config}{flags} -o inputs.tsv
+#   N=$(neurodags count-inputs {q_config}{flags} --inputs inputs.tsv)
 #   TOTAL=$(( N * {n} ))
 #   sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
 #
@@ -355,10 +403,13 @@ EOF
 
 
 def _slurm_chained(
-    config_path: str, derivatives: list[str], datasets: str | None = None
+    config_path: str,
+    derivatives: list[str],
+    datasets: str | None = None,
+    mount_point: str | None = None,
 ) -> tuple[str, str]:
     """Return (submit_script, worker_script) for chained per-derivative arrays."""
-    q_config, d_flag, assign, args = _slurm_paths(config_path, datasets)
+    q_config, flags, assign, args = _slurm_paths(config_path, datasets, mount_point)
     submit_lines = [
         "#!/bin/bash",
         "# chained: per-derivative sequential arrays chained via --dependency=afterok.",
@@ -367,8 +418,8 @@ def _slurm_chained(
         "# Usage: bash submit_pipeline.sh",
         "",
         "# Freeze the input list once; every task reads the same list (see the HPC guide).",
-        f"neurodags inputs {q_config}{d_flag} -o inputs.tsv",
-        f"N=$(neurodags count-inputs {q_config}{d_flag} --inputs inputs.tsv)",
+        f"neurodags inputs {q_config}{flags} -o inputs.tsv",
+        f"N=$(neurodags count-inputs {q_config}{flags} --inputs inputs.tsv)",
         'ARRAY="0-$((N - 1))"',
         "",
     ]
@@ -582,6 +633,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
+    mount_point, mount_source = _describe_mount(config, args)
 
     # With --inputs, enumerate here (once, shared with the dry run) to also report the
     # files on disk that are not in the list; otherwise run_pipeline enumerates once.
@@ -589,6 +641,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     result = run_pipeline(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
+        mount_point=args.mount_point,
         derivatives=derivatives,
         dry_run=True,
         n_jobs=args.n_jobs,
@@ -658,6 +711,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if fmt == "json":
         payload: dict = {
             "config": args.config,
+            "mount_point": mount_point,
+            "mount_point_source": mount_source,
             "n_files": total_files,
             "derivatives": per_deriv,
             "grand_total": {**grand, "migrated": n_migrated},
@@ -727,6 +782,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     sep = "─" * len(header)
 
     print(f"config: {args.config}")
+    print(f"mount:  {mount_point} (from {mount_source})")
     if inputs_file:
         print(f"inputs: {inputs_file}")
     print(f"files:  {total_files}")
@@ -861,6 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(tui_parser)
 
     validate_parser = subparsers.add_parser("validate", help="Load a config and print a summary.")
     validate_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
@@ -870,6 +927,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(validate_parser)
     validate_parser.add_argument(
         "--derivative",
         action="append",
@@ -900,6 +958,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(dataframe_parser)
     dataframe_parser.add_argument(
         "--include-derivative",
         action="append",
@@ -998,6 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(inputs_parser)
     inputs_parser.add_argument(
         "-o",
         "--output",
@@ -1017,6 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(count_parser)
     count_parser.add_argument(
         "--derivative",
         action="append",
@@ -1037,6 +1098,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(status_parser)
     status_parser.add_argument(
         "--derivative",
         action="append",
@@ -1111,6 +1173,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    _add_mount_point_arg(slurm_parser)
     slurm_parser.add_argument(
         "--derivative",
         action="append",
@@ -1163,10 +1226,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     migrate_parser.add_argument(
+        "-m",
+        "--mount-point",
         "--mount",
+        dest="mount_point",
         default=None,
         metavar="NAME",
-        help="Mount point whose output tree to migrate (default: the pipeline's mount_point).",
+        help=(
+            "Mount point whose output tree to migrate. Default: "
+            f"${MOUNT_POINT_ENV} if set, else the pipeline's mount_point. "
+            "--mount is the 0.4.0 pre-release spelling."
+        ),
     )
     migrate_parser.add_argument(
         "--apply", action="store_true", help="Execute the plan (default: preview only)."
@@ -1218,6 +1288,10 @@ def _cmd_tui(args: argparse.Namespace) -> int:
 
     if getattr(args, "config", None):
         _load_pipeline_config(args.config)  # refuse an unmigrated config before the UI starts
+    if args.mount_point is not None:
+        # The app and its workers resolve the mount point themselves; the environment
+        # variable reaches all of them.
+        os.environ[MOUNT_POINT_ENV] = args.mount_point
 
     NeuroDagsApp(config_path=args.config, datasets_path=args.datasets).run()
     return 0
@@ -1277,7 +1351,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
     try:
         datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-            args.config, datasets_input=args.datasets
+            args.config, datasets_input=args.datasets, mount_point=args.mount_point
         )
         resolved_paths, problems = inspect_dataset_paths(datasets, mount_point)
         # Errors were raised when the configuration was loaded; this returns the warnings.
@@ -1304,7 +1378,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     print(f"config: {args.config}")
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
-    print(f"mount_point: {mount_point}")
+    print(f"mount_point: {mount_point} (from {_describe_mount(config, args)[1]})")
     _print_dataset_report(datasets, resolved_paths, mount_point, problems)
     for warning in [*name_warnings, *layout_warnings]:
         print(f"warning: {warning}", file=sys.stderr)
@@ -1327,6 +1401,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     result = run_pipeline(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
+        mount_point=args.mount_point,
         derivatives=derivatives,
         max_files_per_dataset=args.max_files_per_dataset,
         dry_run=dry_run,
@@ -1355,6 +1430,7 @@ def _cmd_dataframe(args: argparse.Namespace) -> int:
     df = build_derivative_dataframe(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
+        mount_point=args.mount_point,
         include_derivatives=args.include_derivatives,
         max_files_per_dataset=args.max_files_per_dataset,
         only_index=args.only_index,
@@ -1417,7 +1493,7 @@ def _cmd_count(args: argparse.Namespace) -> int:
 def _cmd_inputs(args: argparse.Namespace) -> int:
     _load_pipeline_config(args.config)
     datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        args.config, datasets_input=args.datasets
+        args.config, datasets_input=args.datasets, mount_point=args.mount_point
     )
     resolve_dataset_paths(datasets, mount_point)
     enumeration = discover_inputs(datasets, mount_point)
@@ -1435,21 +1511,21 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
     ordered = _derivative_topo_order(config, derivatives)
 
     if args.pattern == "per-file":
-        script = _slurm_per_file(args.config, ordered, args.datasets)
+        script = _slurm_per_file(args.config, ordered, args.datasets, args.mount_point)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     elif args.pattern == "flat":
-        script = _slurm_flat(args.config, ordered, args.datasets)
+        script = _slurm_flat(args.config, ordered, args.datasets, args.mount_point)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     else:
-        submit, worker = _slurm_chained(args.config, ordered, args.datasets)
+        submit, worker = _slurm_chained(args.config, ordered, args.datasets, args.mount_point)
         if args.output:
             submit_path = Path(args.output)
             worker_path = submit_path.parent / "run_one_derivative.sh"
@@ -1469,7 +1545,7 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     plan = migrate.plan_migration(
         args.config,
         args.datasets,
-        mount=args.mount,
+        mount=args.mount_point,
         renames=args.map,
         legacy_cwd=args.legacy_cwd,
         synthesize=not args.no_synthesize,

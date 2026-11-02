@@ -11,7 +11,7 @@
    resolve every `REFUSED` line. The most common one is a
    [pilot copy next to a full-run copy](#pilot-duplicates).
 4. **Apply once per output tree / mount**: `neurodags migrate pipeline.yml --apply`, then
-   `neurodags migrate pipeline.yml --mount hpc --apply` on the other machine.
+   `neurodags migrate pipeline.yml -m hpc --apply` on the other machine.
 5. **Check** with `neurodags status pipeline.yml` (migrated units show as `done` with a
    `(migrated)` count).
 6. **Rebuild dataframes** with `neurodags dataframe` (column names changed).
@@ -41,7 +41,7 @@ recomputed. `neurodags migrate` converts both in one pass:
 It **previews by default** and changes nothing until you add `--apply`.
 
 ```text
-neurodags migrate pipeline.yml [-d datasets.yml] [--mount NAME]
+neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
                   [--apply] [--report plan.json] [--map OLD=NEW ...]
                   [--legacy-cwd DIR] [--no-synthesize]
                   [--source-root DATASET[:MOUNT]=PATH ...] [--upstream-map OLDTOKEN=NEWNAME ...]
@@ -77,7 +77,7 @@ neurodags migrate pipeline.yml [-d datasets.yml] [--mount NAME]
    (`Nothing to migrate`), and an interrupted run continues where it stopped.
 
    On a second machine or mount (say `hpc`), run it again there after the configuration
-   was migrated: `neurodags migrate pipeline.yml --mount hpc --apply`. The configuration is
+   was migrated: `neurodags migrate pipeline.yml -m hpc --apply`. The configuration is
    already at `naming_version: 1`, so only that mount's tree is migrated. Keep the
    `pipeline.yml.bak-0.3` backup next to the pipeline (it shows the configuration was
    migrated by this tool) and pass the same `--map` options as the first time.

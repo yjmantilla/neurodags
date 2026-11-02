@@ -82,6 +82,7 @@ from typing import Any
 import yaml
 
 from neurodags._legacy import snake_to_camel
+from neurodags.datasets import resolve_mount_point
 from neurodags.definitions import DatasetConfig
 from neurodags.iterators import discover_inputs, neuromag_split_name, neuromag_split_part
 from neurodags.loaders import UniqueKeySafeLoader, check_pipeline_names, load_configuration
@@ -1037,8 +1038,9 @@ def plan_migration(
     datasets : path-like, optional
         A datasets YAML used instead of the pipeline's ``datasets`` (the CLI ``-d``).
     mount : str, optional
-        Mount point to migrate (default: the pipeline's ``mount_point``). Run once per
-        output tree, i.e. once per mount.
+        Mount point to migrate (the CLI's ``-m/--mount-point``). Default: the
+        ``NEURODAGS_MOUNT_POINT`` environment variable, then the pipeline's
+        ``mount_point``. Run once per output tree, i.e. once per mount.
     renames : mapping or iterable of ``"OLD=NEW"``, optional
         Derivative renames (``--map``). Default: keep the YAML spelling verbatim.
     legacy_cwd : path-like, optional
@@ -1089,7 +1091,7 @@ def plan_migration(
     source = _datasets_source(
         pipeline_path, config, os.fspath(datasets) if datasets is not None else None
     )
-    active_mount = mount if mount is not None else config.get("mount_point")
+    active_mount, _ = resolve_mount_point(config.get("mount_point"), mount)
     plan = MigrationPlan(
         pipeline=pipeline_path,
         datasets_file=None if source.inline else source.path,

@@ -286,6 +286,7 @@ neurodags slurm-script pipeline.yml --pattern flat
 neurodags slurm-script pipeline.yml --pattern chained
 neurodags slurm-script pipeline.yml --output run_array.sh        # write to file
 neurodags slurm-script pipeline.yml --derivative CleanedEEG      # restrict to one derivative
+neurodags slurm-script pipeline.yml -m hpc                       # export NEURODAGS_MOUNT_POINT=hpc in the jobs
 ```
 
 See {doc}`hpc` for full details on each pattern and how to submit.
@@ -297,7 +298,7 @@ A 0.3.x configuration is refused until it is migrated. `neurodags migrate` adds 
 ```bash
 neurodags migrate pipeline.yml --report plan.json        # preview: prints the plan, changes nothing
 neurodags migrate pipeline.yml --apply                   # rewrite config, move outputs, write .done
-neurodags migrate pipeline.yml --mount hpc --apply       # then each other mount's output tree
+neurodags migrate pipeline.yml -m hpc --apply            # then each other mount's output tree
 ```
 
 Exit code `2` when the plan is refused (nothing is changed). See {doc}`migrating_to_0_4`.
@@ -337,3 +338,29 @@ neurodags run pipelines/x/pipeline.yml -d datasets_alt.yml               # error
 ```
 
 In the Python API (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`), a relative `datasets_configuration` string keeps the library rule — relative to the pipeline YAML's directory, like the `datasets:` key (relative to `base_dir=` for an in-memory pipeline). Pass an absolute path to avoid ambiguity. A `datasets_configuration` dict with relative paths needs `base_dir=`.
+
+(mount-point-override)=
+
+## Choosing the Mount Point
+
+The same pipeline YAML can run on several hosts, each with its own mount point (the keys of the `source_root` / `file_pattern` / `derivatives_path` maps). The active mount point is the first of these that is set:
+
+1. `-m / --mount-point NAME` on the command line (`validate`, `run`, `dry-run`, `status`, `count-inputs`, `inputs`, `dataframe`, `slurm-script`, `migrate`, `tui`), or `mount_point=` in the Python API (`run_pipeline`, `iterate_derivative_pipeline`, `build_derivative_dataframe`, `enumerate_pipeline_inputs`, `get_datasets_and_mount_point_from_pipeline_configuration`);
+2. the `NEURODAGS_MOUNT_POINT` environment variable (an empty value counts as unset);
+3. the `mount_point` key of `pipeline.yml`.
+
+```bash
+neurodags status pipeline.yml -m hpc            # this command only
+export NEURODAGS_MOUNT_POINT=hpc                # every command and run_pipeline call in this shell
+```
+
+`validate` and `status` print the active mount point and where it came from (`mount_point: hpc (from --mount-point)`; `mount_point` and `mount_point_source` in `status --format json`). `run` records both in `<derivatives_path>/code/neurodags_env.json`, since the copied pipeline YAML does not show an override. A mount point without an entry in a dataset's map is an error naming the available entries.
+
+```python
+from neurodags.loaders import load_pipeline_configuration
+from neurodags.orchestrators import run_pipeline
+
+# A dict config needs base_dir= for its relative paths; the dict itself is not modified.
+config = load_pipeline_configuration("pipelines/preprocessing.yml")
+run_pipeline(config, base_dir="pipelines", mount_point="hpc", only_index=[i])
+```

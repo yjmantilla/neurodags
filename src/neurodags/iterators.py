@@ -953,6 +953,7 @@ def enumerate_pipeline_inputs(
     drop_split_continuations: bool = True,
     inputs: str | os.PathLike | None = None,
     base_dir=None,
+    mount_point: str | None = None,
 ) -> InputEnumeration:
     """Load the datasets of a pipeline configuration and enumerate its inputs.
 
@@ -960,7 +961,7 @@ def enumerate_pipeline_inputs(
     :func:`enumerate_inputs`.
     """
     datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_input, datasets_input=datasets_input, base_dir=base_dir
+        pipeline_input, datasets_input=datasets_input, base_dir=base_dir, mount_point=mount_point
     )
     return enumerate_inputs(
         datasets,
@@ -1026,6 +1027,7 @@ def get_all_files_from_pipeline_configuration(
     drop_split_continuations=True,
     *,
     base_dir=None,
+    mount_point=None,
 ):
     """
     Given a pipeline configuration and an optional datasets configuration,
@@ -1046,6 +1048,9 @@ def get_all_files_from_pipeline_configuration(
     base_dir : path-like, optional
         Directory that relative dataset paths of in-memory mappings resolve against
         (see :func:`get_datasets_and_mount_point_from_pipeline_configuration`).
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key (then
+        ``NEURODAGS_MOUNT_POINT``, then the key).
 
     Returns
     -------
@@ -1064,5 +1069,6 @@ def get_all_files_from_pipeline_configuration(
         max_files_per_dataset=max_files_per_dataset,
         drop_split_continuations=drop_split_continuations,
         base_dir=base_dir,
+        mount_point=mount_point,
     )
     return enumeration.files_per_dataset, enumeration.all_files, enumeration.source_roots

@@ -87,7 +87,8 @@ file_pattern:
   hpc: /cluster/BIDS/**/*.vhdr
 ```
 
-The active mount point is set by `mount_point` in `pipeline.yml`.
+The active mount point is set by `mount_point` in `pipeline.yml`, unless `-m/--mount-point`
+or `NEURODAGS_MOUNT_POINT` overrides it (see {ref}`mount-point-override`).
 
 See "Environment variables and `~`" below for using
 `$SCRATCH`-style paths.
