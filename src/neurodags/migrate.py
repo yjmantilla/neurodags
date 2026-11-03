@@ -95,7 +95,7 @@ from neurodags.outputs import (
     is_staging_name,
     output_prefix,
     output_reference_base,
-    staging_dirs,
+    read_manifest,
     unit_state,
     write_manifest,
 )
@@ -1572,6 +1572,9 @@ def _plan_trees(
         split_txns = _unfinished_split_moves(tree.journal)
         plan._split_txns.update(split_txns)
         relocated = {_path_key(new): old for t in split_txns.values() for old, new in t["parts"]}
+        # Only a part the transaction's own move record proves unchanged is rejoined: a
+        # later `neurodags run` may have replaced it (split-move-start alone is no proof).
+        moved_parts = _journal_ownership(tree.journal) if relocated else {}
         for scan_root, recursive in scans:
             single_form = scan_root != tree.root
             for path in _scan_tree(scan_root, recursive=recursive, exclude=nested):
@@ -1582,6 +1585,8 @@ def _plan_trees(
                     if _same_entry(logical, path) and _two_names(logical, path):
                         continue  # interrupted between link and unlink: the old name counts
                     logical = path  # a different file at the old name: not ours to rejoin
+                elif logical != path and not _owns(moved_parts, path):
+                    logical = path  # replaced since the move: not ours to rejoin
                 basename = os.path.basename(logical)
                 if single_form and not basename.startswith(os.path.basename(tree.root) + "@"):
                     continue
@@ -2142,9 +2147,17 @@ def _journal_new_paths(entry: Mapping[str, Any]) -> list[str]:
 
 
 def _unfinished_ownership(plan: MigrationPlan) -> dict[str, dict[str, Any]]:
-    """Files at their new names the unfinished migration transaction produced, by
-    :func:`_path_key`: ``{"old": 0.3.x path or None, "fingerprint": [size, mtime_ns] or
-    None, "digest": [size, sha256] or None}``.
+    """:func:`_journal_ownership` of every tree's journal."""
+    owned: dict[str, dict[str, Any]] = {}
+    for journal in {t.journal for t in plan.trees}:
+        owned.update(_journal_ownership(journal))
+    return owned
+
+
+def _journal_ownership(journal: str) -> dict[str, dict[str, Any]]:
+    """Files at their new names the unfinished migration transaction of *journal*
+    produced, by :func:`_path_key`: ``{"old": 0.3.x path or None, "fingerprint":
+    [size, mtime_ns] or None, "digest": [size, sha256] or None}``.
 
     ``move`` records carry the old path and the fingerprint, ``mne-staged`` records the
     size and SHA-256 of each re-saved part (published by hard link, so the same content).
@@ -2152,28 +2165,27 @@ def _unfinished_ownership(plan: MigrationPlan) -> dict[str, dict[str, Any]]:
     later ``neurodags run`` may have replaced the file since.
     """
     owned: dict[str, dict[str, Any]] = {}
-    for journal in {t.journal for t in plan.trees}:
-        for entry in _unfinished_entries(journal):
-            op = entry.get("op")
-            moved = op in ("move", "move-start")
-            old = entry.get("old") if moved else None
-            fingerprint = entry.get("fingerprint") if moved else None
-            digests: dict[str, list[Any]] = {}
-            if op == "mne-staged" and isinstance(entry.get("new"), str):
-                folder = os.path.dirname(entry["new"])
-                for part in entry.get("parts") or []:
-                    if isinstance(part, list) and len(part) == 3 and isinstance(part[0], str):
-                        digests[_path_key(os.path.join(folder, part[0]))] = part[1:]
-            for path in _journal_new_paths(entry):
-                key = _path_key(path)
-                record = {
-                    "old": old if isinstance(old, str) else None,
-                    "fingerprint": fingerprint if isinstance(fingerprint, list) else None,
-                    "digest": digests.get(key),
-                }
-                if record["fingerprint"] is None and record["digest"] is None and key in owned:
-                    continue  # keep the earlier proof
-                owned[key] = record
+    for entry in _unfinished_entries(journal):
+        op = entry.get("op")
+        moved = op in ("move", "move-start")
+        old = entry.get("old") if moved else None
+        fingerprint = entry.get("fingerprint") if moved else None
+        digests: dict[str, list[Any]] = {}
+        if op == "mne-staged" and isinstance(entry.get("new"), str):
+            folder = os.path.dirname(entry["new"])
+            for part in entry.get("parts") or []:
+                if isinstance(part, list) and len(part) == 3 and isinstance(part[0], str):
+                    digests[_path_key(os.path.join(folder, part[0]))] = part[1:]
+        for path in _journal_new_paths(entry):
+            key = _path_key(path)
+            record = {
+                "old": old if isinstance(old, str) else None,
+                "fingerprint": fingerprint if isinstance(fingerprint, list) else None,
+                "digest": digests.get(key),
+            }
+            if record["fingerprint"] is None and record["digest"] is None and key in owned:
+                continue  # keep the earlier proof
+            owned[key] = record
     return owned
 
 
@@ -2223,22 +2235,36 @@ UNCERTIFIED_IN_PLACE = (
 )
 
 
-def _refuse_run_evidence(plan: MigrationPlan) -> None:
-    """``--legacy-tree`` is refused when the tree shows a 0.4.0 ``neurodags run``."""
-    seen: list[str] = []
-    for unit in _primaries(plan):
-        prefix = unit.new_prefix or ""
-        state = unit_state(prefix, unit.derivative)
-        if state.state == "done" and state.origin == "run":
-            seen.append(f"{prefix}.done (written by neurodags run)")
-        seen.extend(f"{d} (a neurodags run staging folder)" for d in staging_dirs(prefix))
-    if seen:
-        shown = "; ".join(seen[:3]) + (f"; and {len(seen) - 3} more" if len(seen) > 3 else "")
-        plan.refusals.append(
-            "--legacy-tree certifies outputs as 0.3.x results, but this tree was also written "
-            f"by neurodags 0.4.0: {shown}. Migrate without --legacy-tree (outputs already at "
-            "their 0.4.0 names are recomputed)."
-        )
+def _run_evidence(root: str) -> list[str]:
+    """What in the output tree *root* shows a neurodags 0.4.0 ``run`` wrote there: a
+    readable ``.done`` with ``origin: run`` (valid or not, any derivative or dataset) or a
+    run's staging folder. Read for ``--legacy-tree`` only."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        kept = []
+        for name in dirnames:
+            if name == ".neurodags":
+                continue
+            if is_staging_name(name):
+                found.append(f"{os.path.join(dirpath, name)} (a neurodags run staging folder)")
+            else:
+                kept.append(name)
+        dirnames[:] = sorted(kept)
+        for name in sorted(filenames):
+            if name.endswith(".done") and not name.startswith("."):
+                manifest = read_manifest(os.path.join(dirpath, name[: -len(".done")]))
+                if manifest is not None and manifest.get("origin") == "run":
+                    found.append(f"{os.path.join(dirpath, name)} (written by neurodags run)")
+    return found
+
+
+def _legacy_tree_refusal(root: str, found: list[str]) -> str:
+    shown = "; ".join(found[:3]) + (f"; and {len(found) - 3} more" if len(found) > 3 else "")
+    return (
+        f"--legacy-tree certifies outputs in {root} as 0.3.x results, but neurodags 0.4.0 "
+        f"also wrote there: {shown}. Migrate without --legacy-tree (its outputs already at "
+        "their 0.4.0 names are then recomputed)."
+    )
 
 
 def _plan_manifests(plan: MigrationPlan) -> None:
@@ -2248,22 +2274,21 @@ def _plan_manifests(plan: MigrationPlan) -> None:
     # `migrate --apply` itself moved (its journal) can still be legacy output.
     # Only the unfinished transaction counts (never a completed migration's records: its
     # files may since have been replaced by an interrupted `neurodags run`).
-    owned = (
-        _unfinished_ownership(plan) if plan.mode == "tree-only" and not plan.legacy_tree else None
-    )
-    if plan.mode == "tree-only" and plan.legacy_tree:
-        _refuse_run_evidence(plan)
+    # --legacy-tree (the user's statement that a tree is 0.3.x output only) certifies the
+    # others too, in trees that show no 0.4.0 run.
+    owned = _unfinished_ownership(plan) if plan.mode == "tree-only" else None
+    evidence: dict[str, list[str]] = {}
     for unit in _primaries(plan):
         artifacts, markers = _group_view(unit)
         unit.manifest_suffixes = None
-        if not plan.synthesize:
-            unit.manifest_reason = "--no-synthesize"
-            continue
         if unit_state(unit.new_prefix or "", unit.derivative).state in (
             "done",
             "skipped",
         ):
             continue  # already complete (resumed or migrated before)
+        if not plan.synthesize:
+            unit.manifest_reason = "--no-synthesize"
+            continue
         if "error" in markers:
             unit.manifest_reason = "has an .error marker"
             continue
@@ -2274,8 +2299,12 @@ def _plan_manifests(plan: MigrationPlan) -> None:
             or all(_owns(owned, p) for paths in member.artifacts.values() for p in paths)
             for member in unit.members or [unit]
         ):
-            unit.manifest_reason = UNCERTIFIED_IN_PLACE
-            continue
+            root = unit.tree.rpartition("\0")[2]  # a TreePlan key ("\0rest\0<root>" too)
+            if plan.legacy_tree and root not in evidence:
+                evidence[root] = _run_evidence(root)
+            if not plan.legacy_tree or evidence[root]:
+                unit.manifest_reason = UNCERTIFIED_IN_PLACE
+                continue
         info = plan.artifact_sets.get(unit.derivative)
         known = info.get("known") if info else None
         if not known:
@@ -2289,6 +2318,9 @@ def _plan_manifests(plan: MigrationPlan) -> None:
         # the unit (a unit with an extra artifact keeps it, spec 6).
         unit.manifest_suffixes = list(known) + sorted(s for s in artifacts if s not in known)
         unit.manifest_reason = None
+    for root, found in evidence.items():
+        if found:
+            plan.refusals.append(_legacy_tree_refusal(root, found))
 
 
 def _plan_safety(plan: MigrationPlan) -> None:
@@ -3292,6 +3324,9 @@ def _apply_member(
         # resumed run tells it from a later replacement.
         record = {"old": old, "new": new, "fingerprint": list(file_fingerprint(old))}
         journal.write({"op": "move-start", **record})
+        if unit.split_moves:
+            # The parts of a split recording are rejoined on resume only with this proof.
+            journal.sync()
         try:
             _publish_move(old, new)
         except FileExistsError:

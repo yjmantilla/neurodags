@@ -45,7 +45,7 @@ It **previews by default** and changes nothing until you add `--apply`.
 ```text
 neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
                   [--apply] [--report plan.json] [--map OLD=NEW ...]
-                  [--legacy-cwd DIR] [--no-synthesize]
+                  [--legacy-cwd DIR] [--no-synthesize] [--legacy-tree]
                   [--source-root DATASET[:MOUNT]=PATH ...] [--upstream-map OLDTOKEN=NEWNAME ...]
 ```
 
@@ -97,8 +97,10 @@ neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
    such files could also be left by an interrupted 0.4.0 `run`: without `--legacy-tree`
    they get no `.done` and the next run recomputes them (the preview says how many).
    `--legacy-tree` states that this tree was written by 0.3.x only, so they are certified
-   too; it is refused when the tree shows a 0.4.0 run (a `.done` written by `run`, or a
-   run's staging folder). Running 0.4.0 on a mount before migrating it recomputes its
+   too. It is refused for an output tree that shows a 0.4.0 run: anywhere in it, a `.done`
+   written by `run` (valid or not, of any derivative or dataset) or a run's staging folder
+   (a run interrupted while publishing keeps it). Re-running it once nothing is left to
+   certify is a no-op. Running 0.4.0 on a mount before migrating it recomputes its
    outputs and can make the later migration refuse (two sets of outputs for one unit).
 6. **Check:** `neurodags status pipeline.yml`. Migrated units are counted as `done`, with a
    `(migrated)` column; `--format json --include-files` labels them `done (migrated)`.

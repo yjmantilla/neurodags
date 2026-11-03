@@ -891,15 +891,18 @@ def _save_final_artifacts(
        old file or a complete new one, never a partial one.
     5. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
 
-    The staging folder is always removed, also on failure; files a writer wrote without
-    reporting them are discarded with it. A process killed before step 5 leaves no
-    ``.done`` (and possibly its staging folder, which nothing reads).
+    The staging folder is removed, also on failure (files a writer wrote without reporting
+    them are discarded with it), except when an interruption that is not an ``Exception``
+    (Ctrl-C, ``SystemExit``) stops step 4: it then stays as the trace of a half-published
+    unit. A process killed before step 5 leaves no ``.done`` (and possibly its staging
+    folder, which nothing reads).
 
     Returns the manifest path. Errors propagate (the caller writes the ``.error`` marker).
     """
     validate_artifact_suffixes(res.artifacts)
     remove_markers(final_prefix, "done")
     staging = make_staging_dir(final_prefix)
+    publishing = False
     try:
         staged: dict[str, list[str]] = {}
         base = os.path.basename(final_prefix)
@@ -924,9 +927,18 @@ def _save_final_artifacts(
         # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
         # and mtime): a file another process replaces before our .done no longer matches.
         staged_prints = [file_fingerprint(p) for paths in staged.values() for p in paths]
+        publishing = True
         written = publish_staged(staging, final_prefix, staged)
+        publishing = False
+    except Exception:
+        publishing = False  # the caller writes the .error marker
+        raise
     finally:
-        remove_staging_dir(staging)
+        # Interrupted while publishing (Ctrl-C, SystemExit): some files may be new and some
+        # old, with no .done or .error. The staging folder stays as the trace of it (status
+        # reports it, migrate --legacy-tree refuses the tree).
+        if not publishing:
+            remove_staging_dir(staging)
     finals = [p for paths in written.values() for p in paths]
     manifest = build_manifest(
         final_prefix,

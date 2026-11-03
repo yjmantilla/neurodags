@@ -2249,8 +2249,9 @@ def test_unterminated_mne_staged_record_survives_two_interruptions(
 def test_unterminated_split_move_start_survives_two_interruptions(
     small_split, tmp_path, monkeypatch
 ):
-    """N1: the same for a folder-only split move whose split-move-start record lost its
-    newline: the part list survives the resumed run and a second interruption."""
+    """N1: the same for a folder-only split move whose last record (the moved part's
+    move-start, its proof) lost its newline: the part list and the proof survive the resumed
+    run and a second interruption."""
     pipe = _mini_project(tmp_path)
     old = _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
     journal = tmp_path / "out/.neurodags/migrate-journal.json"
@@ -2263,10 +2264,10 @@ def test_unterminated_split_move_start_survives_two_interruptions(
     monkeypatch.setattr(migrate, "_publish_move", interrupt_after_one)
     with pytest.raises(_Crash):
         apply_migration(_plan(pipe, tmp_path))
-    _cut_journal_after(journal, "split-move-start")
+    _cut_journal_after(journal, "move-start")
     resumed = _plan(pipe, tmp_path)
     assert resumed.refusals == []
-    assert read_journal(str(journal))[-1]["op"] == "split-move-start"
+    assert read_journal(str(journal))[-1]["op"] == "move-start"
     with pytest.raises(_Crash):
         apply_migration(resumed)
     monkeypatch.undo()
@@ -2581,7 +2582,9 @@ def test_legacy_tree_is_refused_when_the_tree_shows_a_0_4_run(tmp_path):
     (clean.parent / f".{clean.name}.tmp~0123456789abcdef").mkdir()  # a run's staging folder
     plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
     assert len(plan.refusals) == 1
-    assert "--legacy-tree certifies outputs as 0.3.x results" in plan.refusals[0]
+    assert plan.refusals[0].startswith(
+        f"--legacy-tree certifies outputs in {tmp_path / 'hpc/derivatives'} as 0.3.x results"
+    )
     assert "staging folder" in plan.refusals[0]
 
 
@@ -2644,3 +2647,159 @@ def test_unfinished_mne_rewrite_owns_only_the_recording_it_verified(
         assert len(resumed.manifests) == 1
         apply_migration(resumed)
         _assert_recording(small_split, prefix, "clean_raw")
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0 release-fix re-review (6477e4d)
+# ---------------------------------------------------------------------------
+
+
+def _as_tree_only(pipe: Path) -> None:
+    """Configure *pipe* (a ``_mini_project``) as another mount's tree after its
+    configuration was migrated: naming_version 1, source_root, the 0.3.x backup."""
+    Path(f"{pipe}{migrate.BACKUP_SUFFIX}").write_text(pipe.read_text())
+    cfg = yaml.safe_load(pipe.read_text())
+    cfg["naming_version"] = 1
+    cfg["datasets"]["s"]["source_root"] = "raw"
+    pipe.write_text(yaml.safe_dump(cfg, sort_keys=False))
+
+
+@pytest.mark.parametrize("replaced", [False, True])
+def test_open_split_move_rejoins_only_parts_it_proves_unchanged(
+    small_split, tmp_path, monkeypatch, replaced
+):
+    """Re-review 6477e4d P1: a folder-only split move interrupted after two parts, then a
+    run that replaced a moved continuation: resume must not certify the mixed recording.
+    Untouched, the same interrupted move still completes."""
+    pipe = _mini_project(tmp_path)
+    _as_tree_only(pipe)
+    _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
+    real_move = migrate._publish_move
+    moved = []
+
+    def interrupt_after_two(old_path, new_path):
+        real_move(old_path, new_path)
+        moved.append(new_path)
+        if len(moved) == 2:
+            raise _Crash("after two parts")
+
+    plan = _plan(pipe, tmp_path)
+    assert plan.mode == "tree-only"
+    assert plan.refusals == []
+    monkeypatch.setattr(migrate, "_publish_move", interrupt_after_two)
+    with pytest.raises(_Crash):
+        apply_migration(plan)
+    monkeypatch.undo()
+    prefix = str(tmp_path / "out/sub/x.txt@Clean")
+    if replaced:  # what a later, interrupted `neurodags run` of the unit leaves
+        mne = pytest.importorskip("mne")
+        np = pytest.importorskip("numpy")
+        continuation = next(p for p in moved if p.endswith("-1.fif"))
+        # The same shape and part names, other samples: MNE verification cannot tell.
+        other = tmp_path / "later_run" / "x.txt@Clean.fif"
+        other.parent.mkdir()
+        raw = mne.io.RawArray(
+            np.random.default_rng(2).standard_normal((4, 150_000)) * 2e-5,
+            mne.create_info(4, 1000.0, "eeg"),
+            verbose="error",
+        )
+        parts = raw.save(other, split_size="2MB", overwrite=True, verbose="error")
+        assert len(parts) == 3
+        os.replace(next(str(p) for p in parts if str(p).endswith("-1.fif")), continuation)
+
+    resumed = _plan(pipe, tmp_path)
+    if replaced:
+        if not resumed.refusals:
+            apply_migration(resumed)
+        assert unit_state(prefix, "Clean").state != "done"
+    else:
+        assert resumed.refusals == []
+        apply_migration(resumed)
+        _assert_recording(small_split, prefix, "Clean", 3)
+
+
+def _write_run_manifest(prefix: str, name: str, rel: str, tail: str = ".nc") -> None:
+    from neurodags.outputs import build_manifest, write_manifest
+
+    write_manifest(
+        prefix,
+        build_manifest(
+            prefix, name, dataset="study", rel=rel, artifacts={tail: [prefix + tail]}, origin="run"
+        ),
+    )
+
+
+@pytest.mark.parametrize("evidence", ["invalid-run-done", "removed-derivative", "staging-only"])
+def test_legacy_tree_sees_run_evidence_anywhere_in_the_tree(tmp_path, evidence):
+    """Re-review 6477e4d: run evidence counts whatever the unit's state or recognition."""
+    pipe = _two_mount_project(tmp_path)
+    hpc = tmp_path / "hpc/derivatives"
+    if evidence == "invalid-run-done":
+        prefix = str(hpc / f"{RELS[0]}@Clean")
+        _write_run_manifest(prefix, "Clean", RELS[0])
+        Path(prefix + ".nc").write_text("replaced since")  # the .done no longer validates
+        assert unit_state(prefix, "Clean").state == "incomplete"
+    elif evidence == "removed-derivative":
+        prefix = str(hpc / f"{RELS[1]}@Removed")
+        Path(prefix + ".nc").write_text("an old run")
+        _write_run_manifest(prefix, "Removed", RELS[1])
+    else:
+        (hpc / "sub-09" / ".x.txt@Clean.tmp~0123456789abcdef").mkdir(parents=True)
+    plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert len(plan.refusals) == 1
+    assert "neurodags 0.4.0 also wrote there" in plan.refusals[0]
+
+
+def test_legacy_tree_rerun_after_later_runs_is_a_no_op(tmp_path):
+    """Re-review 6477e4d (claude F1): once certified, a later 0.4.0 run in the tree does not
+    make the same --legacy-tree command fail: nothing is left to certify."""
+    pipe = _two_mount_project(tmp_path)
+    apply_migration(_plan(pipe, tmp_path, mount="hpc", legacy_tree=True))
+    prefix = str(tmp_path / "hpc/derivatives" / f"{RELS[0]}@Ep_HiguchiFD")
+    Path(prefix + ".nc").write_text("computed by 0.4.0")
+    _write_run_manifest(prefix, "Ep_HiguchiFD", RELS[0])
+    again = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert again.refusals == []
+    assert not again.has_work
+
+
+def test_legacy_tree_evidence_is_per_output_tree(tmp_path):
+    """Re-review 6477e4d (claude F2): a 0.4.0 run in another dataset's output tree does
+    not block --legacy-tree for a tree 0.4.0 never wrote."""
+    pipe = _two_mount_project(tmp_path)
+    ds = yaml.safe_load((tmp_path / "ds.yml").read_text())
+    ds["other"] = {
+        "name": "Other",
+        "source_root": {"local": "local/raw2", "hpc": "hpc/raw2"},
+        "file_pattern": {"local": "local/raw2/**/*.txt", "hpc": "hpc/raw2/**/*.txt"},
+        "derivatives_path": {"local": "local/derivatives2", "hpc": "hpc/derivatives2"},
+    }
+    (tmp_path / "ds.yml").write_text(yaml.safe_dump(ds, sort_keys=False))
+    _sources(tmp_path / "hpc/raw2", RELS[:1])
+    prefix = str(tmp_path / "hpc/derivatives2" / f"{RELS[0]}@Clean")
+    Path(prefix + ".nc").parent.mkdir(parents=True, exist_ok=True)
+    Path(prefix + ".nc").write_text("computed by 0.4.0")
+    _write_run_manifest(prefix, "Clean", RELS[0])
+    plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert plan.refusals == []
+    apply_migration(plan)
+    clean = str(tmp_path / "hpc/derivatives" / f"{RELS[0]}@Clean")
+    assert unit_state(clean, "Clean").state == "done"
+
+
+def test_interrupted_publication_keeps_its_staging_folder(tmp_path, monkeypatch):
+    """Re-review 6477e4d (claude F3): Ctrl-C between two artifacts' publication leaves the
+    staging folder, so the mixed unit stays visible as a 0.4.0 run (--legacy-tree refuses)."""
+    from neurodags.dag import run_derivative
+    from neurodags.outputs import staging_dirs
+
+    pipe = _two_mount_project(tmp_path)
+    sources = [str(tmp_path / "hpc/raw" / RELS[0])]
+    base = tmp_path / "hpc/derivatives" / RELS[0]
+    _interrupt_second_publication(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        run_derivative({"nodes": [{"id": 0, "node": "rc_pair"}]}, "pair", sources[0], base)
+    monkeypatch.undo()
+    assert staging_dirs(f"{base}@pair")
+    plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert any("staging folder" in r for r in plan.refusals)

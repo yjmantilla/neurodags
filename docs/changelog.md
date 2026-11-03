@@ -294,6 +294,9 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
 ### Changed
 
+- A run interrupted by Ctrl-C or `SystemExit` while publishing a unit's files keeps that
+  unit's staging folder (`status` reports it), the trace of a half-published unit; it was
+  removed.
 - **`neurodags run` exits `1` when a unit failed**, after processing every requested input
   (it exited `0`; the failed units have `.error` markers). Inputs listed in `--inputs` that
   no longer exist (`missing-source`) are not failures. `run_pipeline` and
