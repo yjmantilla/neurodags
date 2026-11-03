@@ -21,9 +21,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, ClassVar
 
-from rich.text import Text
-
 try:
+    from rich.text import Text  # installed with textual
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical
     from textual.markup import escape as escape_markup

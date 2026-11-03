@@ -113,8 +113,8 @@ Total                        84      54          40         0           1       
 40 of the done unit(s) are done (migrated): their .done was written by 'neurodags migrate' from 0.3.x outputs (column '(migrated)').
 
 4 error(s) found.  Run with --list-errors for details.
-1 derivative(s) incomplete (no valid .done manifest).  Run with --list-missing for details.
-25 derivative(s) missing.  Run with --list-missing for details.
+1 unit(s) incomplete (no valid .done manifest).  Run with --list-missing for details.
+25 unit(s) missing.  Run with --list-missing for details.
 Use --format indices to get the file indices for --only-index resubmission.
 ```
 

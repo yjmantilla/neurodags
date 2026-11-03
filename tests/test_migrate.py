@@ -1131,12 +1131,15 @@ def test_cross_filesystem_moves_are_refused(full_project, tmp_path, monkeypatch)
 
 
 def test_shared_derivatives_path_needs_subdirs(tmp_path, capsys):
-    datasets = DATASETS_TEXT + """\
+    datasets = (
+        DATASETS_TEXT
+        + """\
 other:
   name: Other
   file_pattern: raw2/**/*.txt
   derivatives_path: derivatives
 """
+    )
     pipe = _project(tmp_path, datasets=datasets)
     _sources(tmp_path / "raw", RELS[:1])
     _sources(tmp_path / "raw2", ["sub-09/x.txt"])
@@ -2505,3 +2508,139 @@ def test_upgrade_journey_from_0_3_to_0_4(tmp_path, monkeypatch, capsys):
     assert data["grand_total"]["done"] == 3
     assert data["grand_total"]["migrated"] == 0
     assert set(build_derivative_dataframe(str(pipe))["band_power.a.txt"]) == {"new"}
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0 release review (2f4894c)
+# ---------------------------------------------------------------------------
+
+
+def _two_mount_project(tmp_path: Path) -> Path:
+    """0.3.x trees on 'local' and 'hpc' with ``band_power`` (renamed on disk) and ``Clean``
+    (same name in 0.3.x and 0.4.0); the configuration is migrated on 'local'."""
+    datasets = """\
+study:
+  name: Study
+  file_pattern:
+    local: local/raw/**/*.txt
+    hpc: hpc/raw/**/*.txt
+  derivatives_path:
+    local: local/derivatives
+    hpc: hpc/derivatives
+"""
+    pipe = _project(
+        tmp_path,
+        pipeline=PIPELINE_TEXT.replace("mount_point: null", "mount_point: local"),
+        datasets=datasets,
+    )
+    for mount in ("local", "hpc"):
+        sources = _sources(tmp_path / mount / "raw", RELS)
+        _legacy_tree(
+            tmp_path / mount / "derivatives", sources, {"band_power": [".nc"], "Clean": [".nc"]}
+        )
+    apply_migration(_plan(pipe, tmp_path))
+    return pipe
+
+
+def test_second_mount_names_that_do_not_change_need_legacy_tree(tmp_path):
+    """Review 2f4894c P1: on another mount after the configuration was migrated, outputs
+    whose names do not change are not certified by default (an interrupted 0.4.0 run looks
+    the same), the preview says so instead of 'up to date', and --legacy-tree certifies them."""
+    pipe = _two_mount_project(tmp_path)
+    clean = str(tmp_path / "hpc/derivatives" / f"{RELS[0]}@Clean")
+    assert unit_state(str(tmp_path / "local/derivatives" / f"{RELS[0]}@Clean"), "Clean").state == (
+        "done"
+    )
+
+    hpc = _plan(pipe, tmp_path, mount="hpc")
+    assert hpc.mode == "tree-only"
+    assert hpc.refusals == []
+    assert len(hpc.manifests) == 3  # band_power: moved now
+    assert [u.manifest_reason for u in hpc.units("identity")] == [migrate.UNCERTIFIED_IN_PLACE] * 3
+    apply_migration(hpc)
+    assert unit_state(clean, "Clean").state == "incomplete"
+    again = _plan(pipe, tmp_path, mount="hpc")
+    assert not again.has_work
+    preview = migrate.format_preview(again)
+    assert "up to date" not in preview
+    assert "3 unit(s) at their 0.4.0 names have no .done" in preview
+    assert "--legacy-tree" in preview
+
+    certified = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert certified.refusals == []
+    assert len(certified.manifests) == 3
+    assert certified.to_dict()["legacy_tree"] is True
+    apply_migration(certified)
+    assert unit_state(clean, "Clean").state == "done"
+    assert not _plan(pipe, tmp_path, mount="hpc", legacy_tree=True).has_work
+
+
+def test_legacy_tree_is_refused_when_the_tree_shows_a_0_4_run(tmp_path):
+    pipe = _two_mount_project(tmp_path)
+    clean = tmp_path / "hpc/derivatives" / f"{RELS[1]}@Clean"
+    (clean.parent / f".{clean.name}.tmp~0123456789abcdef").mkdir()  # a run's staging folder
+    plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert len(plan.refusals) == 1
+    assert "--legacy-tree certifies outputs as 0.3.x results" in plan.refusals[0]
+    assert "staging folder" in plan.refusals[0]
+
+
+def test_legacy_tree_needs_the_configuration_backup(tmp_path):
+    pipe = _two_mount_project(tmp_path)
+    os.remove(f"{pipe}{migrate.BACKUP_SUFFIX}")
+    plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert any(r.startswith("--legacy-tree needs pl.yml.bak-0.3") for r in plan.refusals)
+
+
+def test_legacy_tree_cli_flag(tmp_path, capsys, monkeypatch):
+    pipe = _two_mount_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert main(["migrate", str(pipe), "-m", "hpc", "--legacy-tree", "--apply"]) == 0
+    capsys.readouterr()
+    main(["status", str(pipe), "-m", "hpc", "--format", "json"])  # Ep_HiguchiFD never ran
+    total = json.loads(capsys.readouterr().out)["grand_total"]
+    assert (total["done"], total["incomplete"]) == (6, 0)
+
+
+@pytest.mark.parametrize("replaced", [False, True])
+def test_unfinished_mne_rewrite_owns_only_the_recording_it_verified(
+    small_split, tmp_path, monkeypatch, replaced
+):
+    """Review 2f4894c P1: after an interrupted migration re-saved a recording (mne-done, old
+    parts gone, no .done), a run that replaced the recording must not get the migration's
+    .done; the unchanged recording is still certified on resume."""
+    pipe = _mini_project(tmp_path, "clean_raw")
+    _place_split(small_split, tmp_path / "out/sub/x.txt@CleanRaw.fif")
+
+    def crash(*args, **kwargs):
+        raise _Crash("before the manifest")
+
+    monkeypatch.setattr(migrate, "write_manifest", crash)
+    with pytest.raises(_Crash):
+        apply_migration(_plan(pipe, tmp_path))
+    monkeypatch.undo()
+    journal = tmp_path / "out/.neurodags/migrate-journal.json"
+    assert "mne-done" in [e["op"] for e in read_journal(str(journal))]
+    # Configured as another mount's tree after the configuration was migrated.
+    cfg = yaml.safe_load(pipe.read_text())
+    Path(f"{pipe}{migrate.BACKUP_SUFFIX}").write_text(pipe.read_text())
+    cfg["naming_version"] = 1
+    cfg["datasets"]["s"]["source_root"] = "raw"
+    pipe.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    prefix = str(tmp_path / "out/sub/x.txt@clean_raw")
+    if replaced:  # what an interrupted `neurodags run` of the unit leaves
+        staged = tmp_path / "replacement.fif"
+        staged.write_bytes(_fif_bytes("a later run"))
+        os.replace(staged, prefix + ".fif")
+
+    resumed = _plan(pipe, tmp_path)
+    assert resumed.mode == "tree-only"
+    assert resumed.refusals == []
+    if replaced:
+        assert resumed.manifests == []
+        apply_migration(resumed)
+        assert unit_state(prefix, "clean_raw").state == "incomplete"
+    else:
+        assert len(resumed.manifests) == 1
+        apply_migration(resumed)
+        _assert_recording(small_split, prefix, "clean_raw")

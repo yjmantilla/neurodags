@@ -305,6 +305,7 @@ def iterate_derivative_pipeline(
     mount_point: str | None = None,
     inputs: str | os.PathLike | None = None,
     enumeration: InputEnumeration | None = None,
+    failures: list[dict[str, Any]] | None = None,
 ) -> pd.DataFrame | None:
     """
     Iterate over all files specified in the pipeline configuration and call a given function on each file.
@@ -369,6 +370,11 @@ def iterate_derivative_pipeline(
         An already computed enumeration (used by :func:`run_pipeline` so that all
         derivatives share one). Cannot be combined with ``inputs`` or
         ``max_files_per_dataset``.
+    failures : list, optional
+        When given, receives one dict per unit that failed in this call (``index``,
+        ``dataset``, ``file_path``, ``derivative``, ``error_type``, ``error``); listed
+        inputs that no longer exist (``missing-source``) are not failures. The CLI's
+        ``run`` exits ``1`` when it is not empty.
 
     Returns
     -------
@@ -592,6 +598,17 @@ def iterate_derivative_pipeline(
                 error_type=result.error_type,
                 traceback=result.traceback,
             )
+            if failures is not None and not result.missing_source:
+                failures.append(
+                    {
+                        "index": result.index,
+                        "dataset": result.dataset,
+                        "file_path": result.file_path,
+                        "derivative": result.derivative_label,
+                        "error_type": result.error_type,
+                        "error": result.error_message,
+                    }
+                )
             if dry_run and not result.missing_source:
                 # Keep the unit in the plan: an inspection that could not plan a unit
                 # must not look like a population without it (status reports it as
@@ -798,6 +815,7 @@ def run_pipeline(
     mount_point: str | None = None,
     inputs: str | os.PathLike | None = None,
     enumeration: InputEnumeration | None = None,
+    failures: list[dict[str, Any]] | None = None,
 ) -> pd.DataFrame | None:
     """
     Execute multiple derivatives from a pipeline configuration in dependency order.
@@ -858,6 +876,9 @@ def run_pipeline(
         An already computed enumeration to use instead of enumerating the inputs (the CLI
         ``status`` command passes its own to report files not in an input list). Cannot be
         combined with ``inputs`` or ``max_files_per_dataset``.
+    failures : list, optional
+        When given, receives one dict per failed unit of every derivative, see
+        :func:`iterate_derivative_pipeline`.
 
     Returns
     -------
@@ -964,6 +985,7 @@ def run_pipeline(
             mount_point=mount_point,
             inputs=None if enumeration is not None else inputs,
             enumeration=enumeration,
+            failures=failures,
         )
         if dry_run and result is not None:
             dry_run_results.append(result)

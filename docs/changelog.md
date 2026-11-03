@@ -219,7 +219,10 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   cross-filesystem moves and invalid 0.4.0 names (rename with `--map`) are refused before
   anything changes. `--apply` keeps a journal
   (`<derivatives_path>/.neurodags/migrate-journal.json`), so an interrupted run resumes, and
-  re-running an applied plan is a no-op. `--report` writes the plan as JSON with a dataframe
+  re-running an applied plan is a no-op. On another mount after the configuration was
+  migrated, `--legacy-tree` also certifies outputs whose names do not change (refused when
+  the tree shows a 0.4.0 run); without it they are recomputed, and the preview says so
+  instead of "up to date". `--report` writes the plan as JSON with a dataframe
   column map (`name__error` → `name.error`; best-effort coordinate re-encoding,
   `neurodags.migrate.legacy_column_to_new`). See the new guide
   {doc}`user_guide/migrating_to_0_4`.
@@ -291,6 +294,11 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
 ### Changed
 
+- **`neurodags run` exits `1` when a unit failed**, after processing every requested input
+  (it exited `0`; the failed units have `.error` markers). Inputs listed in `--inputs` that
+  no longer exist (`missing-source`) are not failures. `run_pipeline` and
+  `iterate_derivative_pipeline` take `failures=` (a list that receives one record per
+  failed unit).
 - **One enumeration per invocation** (#41): `run_pipeline` discovers the inputs once and shares
   them with every derivative (it rediscovered per derivative), and `build_derivative_dataframe`
   scans once (it scanned twice).

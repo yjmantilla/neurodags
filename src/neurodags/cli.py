@@ -852,18 +852,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print()
 
     if grand["skipped"]:
-        print(
-            f"\n{grand['skipped']} derivative(s) skipped (not applicable for those source files)."
-        )
+        print(f"\n{grand['skipped']} unit(s) skipped (not applicable for those source files).")
 
     if grand["incomplete"]:
-        print(f"{grand['incomplete']} derivative(s) incomplete (no valid .done manifest).", end="")
+        print(f"{grand['incomplete']} unit(s) incomplete (no valid .done manifest).", end="")
         if not args.list_missing:
             print("  Run with --list-missing for details.", end="")
         print()
 
     if grand["missing"] and not complete:
-        print(f"{grand['missing']} derivative(s) missing.", end="")
+        print(f"{grand['missing']} unit(s) missing.", end="")
         if not args.list_missing:
             print("  Run with --list-missing for details.", end="")
         print()
@@ -1274,6 +1272,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not write .done manifests for migrated outputs (they are recomputed).",
     )
     migrate_parser.add_argument(
+        "--legacy-tree",
+        action="store_true",
+        help="For another mount's tree after the configuration was migrated: the tree was "
+        "written by neurodags 0.3.x only (never by a 0.4.0 run), so outputs whose names do "
+        "not change are certified too. Refused when the tree shows a 0.4.0 run.",
+    )
+    migrate_parser.add_argument(
         "--source-root",
         action="append",
         default=None,
@@ -1411,6 +1416,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
 
+    failures: list[dict] = []
     result = run_pipeline(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
@@ -1425,6 +1431,7 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
         joblib_backend=args.joblib_backend,
         joblib_prefer=args.joblib_prefer,
         inputs=args.inputs,
+        failures=failures,
     )
 
     if dry_run and result is not None:
@@ -1436,6 +1443,16 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
                 # The saved plan lacks these units: a failed inspection, not a plan.
                 print(f"neurodags: error: {message}", file=sys.stderr)
                 return 1
+    if failures and not dry_run:
+        # Every requested input was processed; the failed units have .error markers.
+        shown = ", ".join(f"{f['derivative']} #{f['index']}" for f in failures[:5])
+        more = f" and {len(failures) - 5} more" if len(failures) > 5 else ""
+        print(
+            f"neurodags: error: {len(failures)} unit(s) failed ({shown}{more}); see the log, "
+            "and 'neurodags status' for the .error markers",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -1571,6 +1588,7 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
         synthesize=not args.no_synthesize,
         source_roots=args.source_root,
         upstream_renames=args.upstream_map,
+        legacy_tree=args.legacy_tree,
     )
     print(migrate.format_preview(plan, apply=args.apply))
     if args.report:
