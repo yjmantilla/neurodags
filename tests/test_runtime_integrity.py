@@ -227,30 +227,94 @@ def test_split_recording_is_published_atomically_and_reloads(tmp_path):
     np.testing.assert_allclose(loaded.get_data(), big.get_data())
 
 
-@pytest.mark.parametrize("suffix", [".fif", ".fif.gz"])
-def test_writer_not_reporting_its_split_parts_fails_the_unit(tmp_path, suffix):
-    """Ship review 8adb7eb B1: a writer that saves a split MNE recording and returns None
-    reported only the main file; its parts were deleted with the staging folder and the
-    .done certified a truncated recording. The unit now fails and nothing is published."""
-    big = mne.io.RawArray(
+def _split_raw():
+    return mne.io.RawArray(
         np.arange(4 * 200_000, dtype=float).reshape(4, 200_000) * 1e-9,
         mne.create_info(4, 1000, "eeg"),
     )
 
+
+@pytest.mark.parametrize(
+    ("suffix", "naming", "keep"),
+    [
+        (".fif", "neuromag", None),  # def w(p): raw.save(p)  -> reports only X.fif
+        (".fif.gz", "neuromag", None),
+        (".fif", "neuromag", slice(0, 2)),
+        (".fif", "neuromag", slice(1, None)),  # entry left out: would reload truncated
+        (".eeg_raw.fif", "bids", slice(0, 1)),
+        (".eeg_raw.fif.gz", "bids", slice(0, 2)),
+        (".eeg_raw.fif", "bids", slice(1, None)),
+    ],
+)
+def test_writer_not_reporting_its_split_parts_fails_the_unit(tmp_path, suffix, naming, keep):
+    """Ship review 8adb7eb B1 and review 2b670e4 A/B: a writer that saved a split MNE
+    recording but reported only some of its files (None, or a slice of what save()
+    returns) had the others deleted with the staging folder, and the .done certified a
+    truncated recording. The unit now fails and nothing is published."""
+    big = _split_raw()
+
     def writer(path):
-        big.save(path, split_size="2MB", overwrite=True, verbose="error")  # returns nothing
+        files = big.save(
+            path, split_size="2MB", split_naming=naming, overwrite=True, verbose="error"
+        )
+        assert len(files) > 2
+        return None if keep is None else files[keep]
 
     @register_node(name="rt_split_unreported", override=True)
     def node():
         return NodeResult({suffix: Artifact(big, writer)})
 
     base = _source(tmp_path)
-    with pytest.raises(RuntimeError, match="split parts it did not report"):
+    with pytest.raises(RuntimeError, match="did not report every file of an MNE split"):
         run_derivative(_single("rt_split_unreported"), "Rec", str(base), base)
     prefix = str(base) + "@Rec"
     assert unit_state(prefix, "Rec").state == "error"
-    assert not os.path.exists(prefix + suffix)
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source", "source@Rec.error"]
+
+
+@pytest.mark.parametrize("suffix", [".eeg_raw.fif", ".eeg_raw.fif.gz"])
+def test_bids_split_recording_reported_in_full_is_published(tmp_path, suffix):
+    big = _split_raw()
+
+    @register_node(name="rt_split_bids", override=True)
+    def node():
+        return NodeResult(
+            {
+                suffix: Artifact(
+                    big,
+                    lambda p: save_mne(
+                        big, p, split_size="2MB", split_naming="bids", verbose="error"
+                    ),
+                )
+            }
+        )
+
+    base = _source(tmp_path)
+    run_derivative(_single("rt_split_bids"), "Rec", str(base), base)
+    state = unit_state(str(base) + "@Rec", "Rec")
+    assert state.state == "done"
+    parts = state.artifacts[suffix]
+    assert len(parts) > 2
+    loaded = mne.io.read_raw_fif(parts[0], preload=True, verbose="error")
+    assert loaded.n_times == big.n_times
+
+
+def test_scratch_file_named_like_a_split_part_fails_the_unit(tmp_path):
+    """A file left unreported next to a reported FIF and named like its split part cannot be
+    told apart from a lost part: the unit fails (documented in the writer contract)."""
+    small = mne.io.RawArray(np.zeros((2, 100)), mne.create_info(2, 100, "eeg"))
+
+    def writer(path):
+        small.save(path, overwrite=True, verbose="error")
+        Path(path[: -len(".fif")] + "-1.fif").write_text("scratch")
+
+    @register_node(name="rt_split_scratch", override=True)
+    def node():
+        return NodeResult({".fif": Artifact(small, writer)})
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="source@Rec-1.fif"):
+        run_derivative(_single("rt_split_scratch"), "Rec", str(base), base)
 
 
 @needs_fork

@@ -229,10 +229,14 @@ followed by `.` (or an MNE split tail `-1`, `-2`, ...), or be exactly the prefix
 folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, which every
 unit of the folder would share, fails the unit before anything is replaced. A reported file
 outside the staging folder also fails the unit, and unreported files are discarded. The
-exception is an MNE split part (`X-1.fif`, `X.fif-1.gz`, ...) of a reported recording: a
-writer that saves an MNE object and returns `None` would lose the parts of a recording
-larger than its split size, so the unit fails instead. Return what MNE's `save()` returns
-(`lambda p: raw.save(p, overwrite=True)`) or use `neurodags.writers.save_mne`. Writers
+exception is MNE split recordings: when the staging folder holds a recording of which only
+some files were reported (`X.fif` with `X-1.fif`, ..., `X.fif.gz` with `X.fif-1.gz`, ..., or
+BIDS names that differ only in `_split-NN_`), the unit fails instead of certifying a
+truncated recording. That happens with a writer that saves an MNE object larger than its
+split size and returns `None`, or returns only part of the list MNE's `save()` returns. Use
+`neurodags.writers.save_mne`, which returns every part. A writer's own scratch files must
+not be named like split parts of a FIF it reports (`X-1.fif` next to `X.fif`): they are
+indistinguishable from a lost part. Writers
 that ignore `path` and write somewhere fixed cannot be published atomically and are not
 supported.
 

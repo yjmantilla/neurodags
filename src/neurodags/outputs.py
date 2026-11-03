@@ -525,12 +525,17 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
 
 
 def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[str]]) -> None:
-    """Refuse MNE split parts a writer wrote into *staging* without reporting them.
+    """Refuse an MNE split recording of which a writer reported only some files.
 
     A writer that saves an MNE object larger than its split size and returns ``None``
-    (``def w(path): raw.save(path)``) reports only the main file; its continuation parts
-    (``X-1.fif``, ``X.fif-1.gz``, ...) would be discarded with the staging folder and the
-    ``.done`` would certify a truncated recording.
+    (``def w(path): raw.save(path)``) reports only the first file; a writer that slices
+    the list MNE returns reports only some. The files it left out would be discarded with
+    the staging folder and the ``.done`` would certify a truncated recording.
+
+    The FIF files in *staging* are grouped by recording, with the rules discovery uses
+    (:func:`neurodags.iterators.find_split_continuations`): ``X.fif`` with ``X-1.fif``,
+    ``X-2.fif``, ... (``X.fif.gz`` with ``X.fif-1.gz``, ...), and BIDS names that differ
+    only in ``_split-NN_``. A group with both reported and unreported files fails.
 
     Parameters
     ----------
@@ -542,29 +547,46 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     Raises
     ------
     RuntimeError
-        Naming the unreported parts and the artifacts they belong to.
+        Naming the unreported files and the artifacts their recording belongs to.
     """
     from neurodags.iterators import neuromag_split_part
+
+    bids_split = re.compile(r"_split-\d+_")
 
     def key(path: str) -> str:
         return os.path.normcase(os.path.abspath(os.fspath(path)))
 
+    def recording(path: str) -> tuple[str, str] | None:
+        part = neuromag_split_part(path)  # X-1.fif, X.fif-1.gz (only FIF entries)
+        if part is not None:
+            return "neuromag", key(part[0])
+        if not path.lower().endswith((".fif", ".fif.gz")):
+            return None
+        dirpath, fname = os.path.split(path)
+        if bids_split.search(fname):
+            return "bids", key(os.path.join(dirpath, bids_split.sub("_split-_", fname)))
+        return "neuromag", key(path)
+
     owner = {key(p): suffix for suffix, paths in written.items() for p in paths}
-    missing: list[str] = []
+    groups: dict[tuple[str, str], list[str]] = {}
     for dirpath, _dirs, files in os.walk(staging):
         for fname in sorted(files):
             path = os.path.join(dirpath, fname)
-            if key(path) in owner:
-                continue
-            part = neuromag_split_part(path)
-            if part is not None and key(part[0]) in owner:
-                missing.append(f"{fname} (artifact {owner[key(part[0])]!r})")
+            group = recording(path)
+            if group is not None:
+                groups.setdefault(group, []).append(path)
+    missing: list[str] = []
+    for paths in groups.values():
+        reported = [p for p in paths if key(p) in owner]
+        if reported and len(reported) < len(paths):
+            suffixes = sorted({owner[key(p)] for p in reported})
+            names = [os.path.basename(p) for p in paths if key(p) not in owner]
+            missing.extend(f"{n} (artifact {', '.join(map(repr, suffixes))})" for n in names)
     if missing:
         raise RuntimeError(
-            "an artifact writer wrote MNE split parts it did not report: "
-            f"{', '.join(missing)}. Return every file written (MNE's save() returns them; "
-            "e.g. writer=lambda p: raw.save(p, overwrite=True)) or use "
-            "neurodags.writers.save_mne."
+            "an artifact writer did not report every file of an MNE split recording: "
+            f"{', '.join(missing)}. Return every file written (neurodags.writers.save_mne "
+            "does) and do not leave other files named like split parts."
         )
 
 

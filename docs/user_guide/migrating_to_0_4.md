@@ -30,8 +30,10 @@
 :class: warning
 
 After `neurodags migrate --apply`, use 0.4.x for every job that writes to that tree.
-neurodags 0.3.x ignores `naming_version`, finds no outputs under the new names and
-recomputes everything under the old names next to them. Update every environment that
+neurodags 0.3.x ignores `naming_version` and the `.done` manifests. Depending on the
+derivative name and folder, it recomputes outputs under the old names, or takes the 0.4.0
+files (including the `.done` file itself) as its own cached outputs and reuses or
+overwrites them. Update every environment that
 writes to the tree (cluster virtual environments, colleagues, SLURM arrays already queued)
 before or together with the migration.
 
