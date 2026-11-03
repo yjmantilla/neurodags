@@ -694,7 +694,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     planning_error_message = _planning_error_message(rows)
     n_unlisted = sum(len(r["unlisted"]) for r in rows)
     n_staging = sum(len(r["staging_dirs"]) for r in rows)
-    n_staging_done = sum(len(r["staging_dirs"]) for r in rows if r["status"] == "done")
+    n_staging_done = sum(len(r["staging_dirs"]) for r in rows if r["status"] in ("done", "skipped"))
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
     missing_source_indices = _status_indices(rows, ("missing-source",))
     n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
@@ -848,7 +848,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             )
         if n_staging_done:
             print(
-                f"{n_staging_done} of them belong to done unit(s) (left by an earlier, "
+                f"{n_staging_done} of them belong to done or skipped unit(s) (left by an earlier, "
                 "stopped run) and can be deleted once no job is running."
             )
     _print_input_list_report()

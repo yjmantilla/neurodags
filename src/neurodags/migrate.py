@@ -93,8 +93,10 @@ from neurodags.outputs import (
     dataset_derivatives_base,
     file_fingerprint,
     is_staging_name,
+    looks_like_staging,
     output_prefix,
     output_reference_base,
+    publish_marker,
     read_manifest,
     unit_state,
     write_manifest,
@@ -832,7 +834,7 @@ def _scan_tree(root: str, *, recursive: bool, exclude: Iterable[str] = ()) -> It
             for d in dirnames
             if d != ".neurodags"
             and os.path.normcase(os.path.normpath(os.path.join(dirpath, d))) not in excluded
-            and not is_staging_name(d)  # a run's staging folder, never outputs to migrate
+            and not looks_like_staging(d)  # a run's staging folder, never outputs to migrate
         )
         for name in sorted(filenames):
             if "@" in name and not name.startswith("."):
@@ -2244,7 +2246,8 @@ def _interrupted_move(owned: Mapping[str, Mapping[str, Any]], group: list[Unit])
 #: Why a unit already at its 0.4.0 names gets no ``.done`` in tree-only mode.
 UNCERTIFIED_CHANGED = (
     "incomplete — a file the interrupted migration moved has changed since (a later "
-    "'neurodags run'?), or a part of its split recording did; recompute with neurodags run"
+    "'neurodags run'?), or a part of its split recording did; --apply marks it .error "
+    "(this proof ends with the transaction): recompute with neurodags run"
 )
 UNCERTIFIED_IN_PLACE = (
     "incomplete — files at their 0.4.0 names without a .done (an interrupted "
@@ -2350,9 +2353,8 @@ def _plan_manifests(plan: MigrationPlan) -> None:
             root = trees[unit.tree].root
             if plan.legacy_tree and root not in evidence:
                 tree = trees[unit.tree]
-                evidence[root] = _run_evidence(
-                    root, recursive=tree.recursive is not False, exclude=tree.nested
-                )
+                recursive = tree.kind == "derivatives" if tree.recursive is None else tree.recursive
+                evidence[root] = _run_evidence(root, recursive=recursive, exclude=tree.nested)
             if not plan.legacy_tree or evidence[root]:
                 unit.manifest_reason = UNCERTIFIED_IN_PLACE
                 continue
@@ -3416,6 +3418,16 @@ def _apply_unit(unit: Unit, journal: _Journal, result: ApplyResult) -> None:
     for member in unit.members or [unit]:
         if member.status == "move":
             complete = _apply_member(member, journal, result, new_artifacts, shapes) and complete
+    if unit.manifest_reason == UNCERTIFIED_CHANGED:
+        # Its proof lives only in the unfinished transaction, which this apply closes: an
+        # .error keeps the unit from being certified later (also with --legacy-tree).
+        publish_marker(
+            new_prefix,
+            "error",
+            f"neurodags migrate: {UNCERTIFIED_CHANGED}\n",
+        )
+        result.recompute.append({"unit": unit.old_prefix, "reason": UNCERTIFIED_CHANGED})
+        return
     if unit.manifest_suffixes is None or not complete:
         return
     owners = {tail: member for member in unit.members or [unit] for tail in member.artifacts}
@@ -3469,7 +3481,11 @@ def apply_migration(plan: MigrationPlan) -> ApplyResult:
             for u in tree.units
             if u.status in ("move", "identity")
             and not u.secondary
-            and (u.manifest_suffixes is not None or any(m.moves or m.mne for m in u.members or [u]))
+            and (
+                u.manifest_suffixes is not None
+                or u.manifest_reason == UNCERTIFIED_CHANGED
+                or any(m.moves or m.mne for m in u.members or [u])
+            )
         ]
         if units:
             work.append((tree, units))

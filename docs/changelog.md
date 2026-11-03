@@ -298,8 +298,9 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   only after its `.done` is written: any stop in between (an exception, Ctrl-C,
   `SystemExit`, a kill) keeps it as the trace of a possibly half-published unit; it was
   removed. `status` says which staging folders belong to units without a `.done`
-  (recompute those before deleting them) and which to done units. Only names of the form
-  `.<output prefix>.tmp~<16 hex digits>` count as staging folders.
+  (recompute those before deleting them) and which to done or skipped units. Only names of
+  the form `.<output prefix>.tmp~<16 hex digits>` count as staging folders. A failure before
+  any file was moved still removes it.
 - **`neurodags run` exits `1` when a unit failed**, after processing every requested input
   (it exited `0`; the failed units have `.error` markers). Inputs listed in `--inputs` that
   no longer exist (`missing-source`) are not failures. `run_pipeline` and

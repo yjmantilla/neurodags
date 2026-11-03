@@ -101,10 +101,13 @@ neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
    `code/` and other datasets' nested output trees), a `.done` written by `run` (valid or
    not, of any derivative or dataset) or a run's staging folder (a run stopped after it
    began moving a unit's files keeps it until the unit's `.done` exists; do not delete
-   it). Two pipelines sharing one `derivatives_path` share this check. A file the
-   interrupted migration moved and that changed since is never certified, with or without
-   `--legacy-tree`. Re-running it once nothing is left to certify is a no-op. Running 0.4.0 on a mount before migrating it recomputes its
-   outputs and can make the later migration refuse (two sets of outputs for one unit).
+   it). Two pipelines sharing one `derivatives_path` share this check. A unit with a file
+   the interrupted migration moved and that changed since (or a split recording missing
+   one of its parts) is never certified, with or without `--legacy-tree`: the resuming
+   `--apply` marks it `.error`, so the next `neurodags run` recomputes it. Re-running
+   `--legacy-tree` once nothing is left to certify is a no-op. Running 0.4.0 on a mount
+   before migrating it recomputes its outputs and can make the later migration refuse
+   (two sets of outputs for one unit).
 6. **Check:** `neurodags status pipeline.yml`. Migrated units are counted as `done`, with a
    `(migrated)` column; `--format json --include-files` labels them `done (migrated)`.
    Units without a `.done` (partial or errored ones, see below) show as `incomplete` or
@@ -215,7 +218,8 @@ number of interrupted runs rejoin the parts across both folders. A part already 
 rejoined only if its journal record proves it unchanged since (size and modification time,
 written to disk before the part is moved); a part without that proof (a journal lost in a
 power failure, or one written by a 0.4.0 pre-release) is left where it is, the recording
-stays incomplete, and the next `neurodags run` recomputes it. Before its `.done` is
+stays incomplete (the resuming `--apply` marks it `.error`), and the next `neurodags run`
+recomputes it. Before its `.done` is
 written the recording is loaded in full (every data buffer read): MNE must read exactly the
 listed parts, and the data shape must equal the one recorded before the move.
 

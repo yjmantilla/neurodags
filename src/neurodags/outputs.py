@@ -82,6 +82,7 @@ __all__ = [
     "entry_reference_base",
     "file_fingerprint",
     "is_staging_name",
+    "looks_like_staging",
     "make_staging_dir",
     "manifest_artifacts",
     "marker_path",
@@ -110,7 +111,9 @@ _SPLIT_NAME_RE = re.compile(r"(.+)-([0-9]+)")
 #: Marks a staging folder: ``.<prefix basename>.tmp~<token>``. ``~`` is not allowed in a
 #: suffix, so the name never parses as an output (:func:`neurodags.naming.parse_output_basename`).
 STAGING_TAG = ".tmp~"
-_STAGING_NAME_RE = re.compile(r"\..*@.+" + re.escape(STAGING_TAG) + r"[0-9a-f]{16}")
+_STAGING_NAME_RE = re.compile(
+    r"\..*@.+" + re.escape(STAGING_TAG) + r"[0-9a-f]{16}", re.DOTALL  # any basename, newlines too
+)
 
 UnitStatus = Literal["done", "error", "skipped", "incomplete", "missing"]
 
@@ -339,7 +342,7 @@ def check_legacy_chained_outputs(
                     d
                     for d in dirnames
                     if (dirpath != root or d not in ("code", ".neurodags"))
-                    and not is_staging_name(d)
+                    and not looks_like_staging(d)
                 )
                 for fname in sorted(filenames):
                     yield dirpath, fname
@@ -531,6 +534,12 @@ def is_staging_name(basename: str) -> bool:
     return _STAGING_NAME_RE.fullmatch(basename) is not None
 
 
+def looks_like_staging(basename: str) -> bool:
+    """Whether *basename* is a hidden folder named like a staging folder (``.…tmp~…``):
+    never scanned as outputs. :func:`is_staging_name` decides what counts as one."""
+    return basename.startswith(".") and STAGING_TAG in basename
+
+
 def _staging_glob(prefix: str) -> str:
     directory, base = os.path.split(prefix)
     return os.path.join(directory, glob.escape("." + base + STAGING_TAG) + "*")
@@ -538,7 +547,11 @@ def _staging_glob(prefix: str) -> str:
 
 def staging_dirs(prefix: str) -> list[str]:
     """Staging folders of one unit on disk (live ones of a running job, or left by a killed one)."""
-    return sorted(p for p in glob.glob(_staging_glob(prefix)) if os.path.isdir(p))
+    return sorted(
+        p
+        for p in glob.glob(_staging_glob(prefix))
+        if is_staging_name(os.path.basename(p)) and os.path.isdir(p)
+    )
 
 
 def make_staging_dir(prefix: str) -> str:
@@ -659,13 +672,16 @@ def plan_publication(
     return final, moves + mains
 
 
-def move_staged(ordered: Sequence[tuple[str, str]]) -> None:
-    """Move staged files into place with ``os.replace``, in the given order."""
+def move_staged(ordered: Sequence[tuple[str, str]], moved: list[str] | None = None) -> None:
+    """Move staged files into place with ``os.replace``, in the given order; each target
+    is appended to *moved* once it is in place."""
     for source, target in ordered:
         parent = os.path.dirname(target)
         if parent:
             os.makedirs(parent, exist_ok=True)
         os.replace(source, target)
+        if moved is not None:
+            moved.append(target)
 
 
 # ---------------------------------------------------------------------------

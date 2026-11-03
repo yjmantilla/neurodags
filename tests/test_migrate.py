@@ -2642,7 +2642,9 @@ def test_unfinished_mne_rewrite_owns_only_the_recording_it_verified(
     if replaced:
         assert resumed.manifests == []
         apply_migration(resumed)
-        assert unit_state(prefix, "clean_raw").state == "incomplete"
+        # Marked .error (re-review dccfd45 F1): the proof that it changed ends with the
+        # transaction this apply closes.
+        assert unit_state(prefix, "clean_raw").state == "error"
     else:
         assert len(resumed.manifests) == 1
         apply_migration(resumed)
@@ -2721,6 +2723,13 @@ def test_open_split_move_rejoins_only_parts_it_proves_unchanged(
         assert not [u for u in resumed.manifests if u.new_prefix == prefix]
         if not resumed.refusals:
             apply_migration(resumed)
+        assert unit_state(prefix, "Clean").state != "done"
+        # Re-review dccfd45 F1: once the resume closed the transaction, --legacy-tree (the
+        # preview's hint) must still not certify it: the resume left an .error.
+        again = _plan(pipe, tmp_path, legacy_tree=True)
+        assert not [u for u in again.manifests if u.new_prefix == prefix]
+        if not again.refusals:
+            apply_migration(again)
         assert unit_state(prefix, "Clean").state != "done"
     else:
         assert resumed.refusals == []
@@ -2988,3 +2997,126 @@ def test_legacy_tree_ignores_runs_in_a_nested_dataset_tree(tmp_path):
     apply_migration(plan)
     clean = str(tmp_path / "hpc/derivatives" / f"{RELS[0]}@Clean")
     assert unit_state(clean, "Clean").state == "done"
+
+
+# ---------------------------------------------------------------------------
+# Re-review of dccfd45 (0.4.0 release fixes, round 4)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_tree_evidence_of_a_source_folder_tree_is_not_recursive(tmp_path):
+    """Re-review dccfd45 F2: outputs next to sources: a run in a subfolder (its own tree)
+    does not refuse --legacy-tree for the parent folder."""
+    raw = tmp_path / "raw"
+    (raw / "a" / "b").mkdir(parents=True)
+    (raw / "a" / "x.txt").write_text("x")
+    (raw / "a" / "b" / "y.txt").write_text("y")
+    cfg = {
+        "naming_version": 1,
+        "datasets": {"s": {"name": "S", "file_pattern": "raw/**/*.txt", "source_root": "raw"}},
+        "DerivativeDefinitions": {"Clean": dict(SIMPLE)},
+        "DerivativeList": ["Clean"],
+    }
+    pipe = tmp_path / "p.yml"
+    Path(f"{pipe}{migrate.BACKUP_SUFFIX}").write_text(yaml.safe_dump(cfg))
+    pipe.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    Path(raw / "a" / "x.txt@Clean.nc").write_text("0.3.x")
+    done = str(raw / "a" / "b" / "y.txt@Clean")
+    Path(done + ".nc").write_text("run")
+    _write_run_manifest(done, "Clean", "a/b/y.txt")
+    plan = _plan(pipe, tmp_path, legacy_tree=True)
+    assert plan.refusals == []
+    apply_migration(plan)
+    assert unit_state(str(raw / "a" / "x.txt@Clean"), "Clean").state == "done"
+
+
+@register_node(name="rr_dir", override=True)
+def _rr_dir():
+    def writer(path):
+        Path(path).write_text("main")
+        Path(path + ".d").mkdir()
+        Path(path + ".d/p.txt").write_text("part")
+        return [path, path + ".d/p.txt"]
+
+    return NodeResult({".a.txt": Artifact("x", writer)})
+
+
+def test_failure_before_any_file_moved_removes_staging(tmp_path):
+    """Re-review dccfd45 F3: a publication that fails at its first move published
+    nothing: no staging folder piles up per retry."""
+    from neurodags.dag import run_derivative
+    from neurodags.outputs import staging_dirs
+
+    source = tmp_path / "x.txt"
+    source.write_text("x")
+    base = tmp_path / "out" / "x.txt"
+    base.parent.mkdir()
+    Path(f"{base}@d.a.txt.d").write_text("a file where the run needs a folder")
+    for _ in range(2):
+        with pytest.raises(FileExistsError):
+            run_derivative({"nodes": [{"id": 0, "node": "rr_dir"}]}, "d", str(source), base)
+    assert staging_dirs(f"{base}@d") == []
+    assert os.path.exists(f"{base}@d.error")
+
+
+def test_staging_look_alike_is_neither_staging_nor_output(tmp_path):
+    """Re-review dccfd45 F4/F5: a user folder named like a staging folder is not one of the
+    unit's staging folders (status), and migrate does not scan it as outputs."""
+    from neurodags.outputs import staging_dirs
+
+    pipe = _mini_project(tmp_path)
+    (tmp_path / "out/sub").mkdir()
+    Path(tmp_path / "out/sub/x.txt@Clean.nc").write_text("0.3.x")
+    hidden = tmp_path / "out/sub/.x.txt@Clean.tmp~old"
+    hidden.mkdir()
+    Path(hidden / "x.txt@Clean.nc").write_text("backup copy")
+    assert staging_dirs(str(tmp_path / "out/sub/x.txt@Clean")) == []
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    assert all(not any(str(hidden) in f for f in u.files) for t in plan.trees for u in t.units)
+
+
+def test_changed_moved_file_stays_uncertified_across_applies(tmp_path, monkeypatch):
+    """Re-review dccfd45 (codex F1, claude F1): a plain move interrupted before the
+    manifest, a moved artifact then replaced; another unit's work completes the tree's
+    transaction on the next apply. The changed unit must stay uncertified on every later
+    apply, also with --legacy-tree."""
+    pipe = _mini_project(tmp_path, rels=("sub/x.txt", "sub/y.txt"))
+    _as_tree_only(pipe)
+    for name in ("x", "y"):
+        for suffix in (".a.txt", ".b.txt"):
+            Path(tmp_path / f"out/{name}.txt@Clean{suffix}").write_text("ORIGINAL")
+
+    def crash_before_manifest(*args, **kwargs):
+        raise _Crash("before the first manifest")
+
+    plan = _plan(pipe, tmp_path)
+    assert plan.refusals == []
+    monkeypatch.setattr(migrate, "write_manifest", crash_before_manifest)
+    with pytest.raises(_Crash):
+        apply_migration(plan)
+    monkeypatch.undo()
+    prefix = str(tmp_path / "out/sub/x.txt@Clean")
+    assert os.path.exists(prefix + ".b.txt")  # every move of x done, no .done yet
+    later = tmp_path / "later"
+    later.write_text("NEW RUN, longer")
+    os.replace(later, prefix + ".a.txt")
+    for _ in range(3):
+        again = _plan(pipe, tmp_path, legacy_tree=True)
+        assert not [u for u in again.manifests if u.new_prefix == prefix]
+        if not again.refusals and again.has_work:
+            apply_migration(again)
+        assert unit_state(prefix, "Clean").state != "done"
+    assert os.path.exists(prefix + ".error")
+    assert unit_state(str(tmp_path / "out/sub/y.txt@Clean"), "Clean").state == "done"
+
+
+def test_staging_name_with_a_newline_is_run_evidence(tmp_path):
+    """Re-review dccfd45 codex F2: every name make_staging_dir can create is recognized."""
+    from neurodags.outputs import is_staging_name, make_staging_dir
+
+    folder = tmp_path / "out"
+    folder.mkdir()
+    staging = make_staging_dir(str(folder / "x\ny.txt@Clean"))
+    assert is_staging_name(os.path.basename(staging))
+    assert migrate._run_evidence(str(folder))

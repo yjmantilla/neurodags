@@ -139,7 +139,7 @@ writers have finished, every reported file is moved to the same relative path in
 folder with `os.replace` (atomic within one filesystem, including NFS): continuation files
 (MNE split parts `X-1.fif`, ...) first, each main file last. MNE links split parts by file
 name, so moved parts stay linked. Only then is `.done` written. The staging folder is removed
-afterwards, and also when a writer fails before anything was moved. Once moving has started,
+afterwards, and also on any failure before a file was moved. Once a file has been moved,
 anything that stops the unit before its `.done` exists (an exception, Ctrl-C, a kill) leaves
 the staging folder in place: some files may be new and some old, and the folder is the
 durable trace of that half-published unit.
@@ -186,7 +186,7 @@ tree:
   recompute the unit (`neurodags run`) first. `migrate --legacy-tree` treats any staging
   folder as proof that 0.4.0 wrote the tree, so deleting it first could let a mixed unit be
   certified;
-- a staging folder of a **done** unit is left over from an earlier, stopped run and can be
+- a staging folder of a **done** (or skipped) unit is left over from an earlier, stopped run and can be
   deleted.
 
 (naming-unit-states)=

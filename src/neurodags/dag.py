@@ -892,9 +892,9 @@ def _save_final_artifacts(
        old file or a complete new one, never a partial one.
     5. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
 
-    The staging folder is removed on a failure before step 4 (files a writer wrote without
-    reporting them are discarded with it) and after step 5. Once step 4 has started, any
-    stop before the ``.done`` exists (an exception, Ctrl-C, ``SystemExit``, a kill) leaves it
+    The staging folder is removed on a failure before any file was moved in step 4 (files a
+    writer wrote without reporting them are discarded with it) and after step 5. Once a file
+    has been moved, any stop before the ``.done`` exists (an exception, Ctrl-C, ``SystemExit``, a kill) leaves it
     in place: some files may be new and some old, and the folder is the durable trace of
     that half-published unit (``status`` reports it, ``migrate --legacy-tree`` refuses the
     tree). It is not reused; a later run of the unit uses a fresh one.
@@ -937,7 +937,13 @@ def _save_final_artifacts(
     # From here until the .done exists, the staging folder stays on any stop: the trace of
     # a unit whose files may be part new, part old (status reports it, migrate
     # --legacy-tree refuses the tree).
-    move_staged(ordered)
+    moved: list[str] = []
+    try:
+        move_staged(ordered, moved)
+    except BaseException:
+        if not moved:
+            remove_staging_dir(staging)  # nothing was published
+        raise
     finals = [p for paths in written.values() for p in paths]
     manifest = build_manifest(
         final_prefix,
