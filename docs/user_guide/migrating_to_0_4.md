@@ -97,10 +97,13 @@ neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
    such files could also be left by an interrupted 0.4.0 `run`: without `--legacy-tree`
    they get no `.done` and the next run recomputes them (the preview says how many).
    `--legacy-tree` states that this tree was written by 0.3.x only, so they are certified
-   too. It is refused for an output tree that shows a 0.4.0 run: anywhere in it, a `.done`
-   written by `run` (valid or not, of any derivative or dataset) or a run's staging folder
-   (a run interrupted while publishing keeps it). Re-running it once nothing is left to
-   certify is a no-op. Running 0.4.0 on a mount before migrating it recomputes its
+   too. It is refused for an output tree that shows a 0.4.0 run: anywhere in it (outside
+   `code/` and other datasets' nested output trees), a `.done` written by `run` (valid or
+   not, of any derivative or dataset) or a run's staging folder (a run stopped after it
+   began moving a unit's files keeps it until the unit's `.done` exists; do not delete
+   it). Two pipelines sharing one `derivatives_path` share this check. A file the
+   interrupted migration moved and that changed since is never certified, with or without
+   `--legacy-tree`. Re-running it once nothing is left to certify is a no-op. Running 0.4.0 on a mount before migrating it recomputes its
    outputs and can make the later migration refuse (two sets of outputs for one unit).
 6. **Check:** `neurodags status pipeline.yml`. Migrated units are counted as `done`, with a
    `(migrated)` column; `--format json --include-files` labels them `done (migrated)`.
@@ -208,7 +211,11 @@ A recording whose file name does not change (only its folder) is moved part by p
 rewriting (the parts refer to each other by base name only). Before the first move its
 headers are read (a recording that does not open is left in place) and the complete part
 list, destinations and data shape are written to the journal, once per recording, so any
-number of interrupted runs rejoin the parts across both folders. Before its `.done` is
+number of interrupted runs rejoin the parts across both folders. A part already moved is
+rejoined only if its journal record proves it unchanged since (size and modification time,
+written to disk before the part is moved); a part without that proof (a journal lost in a
+power failure, or one written by a 0.4.0 pre-release) is left where it is, the recording
+stays incomplete, and the next `neurodags run` recomputes it. Before its `.done` is
 written the recording is loaded in full (every data buffer read): MNE must read exactly the
 listed parts, and the data shape must equal the one recorded before the move.
 

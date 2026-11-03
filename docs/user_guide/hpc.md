@@ -357,9 +357,10 @@ Things to keep in mind:
   {ref}`Atomic publication <naming-atomic-publication>`), so a task killed by a time limit,
   preemption or `scancel` (`SIGTERM` or `SIGKILL`) leaves no partial file at an output name and
   no `.done`; the retry recomputes the unit. It may leave its staging folder
-  (`.<output prefix>.tmp~<token>/`), which nothing reads; `neurodags status` counts them.
-  Delete them when no job is writing to the tree, e.g.
-  `find <derivatives_path> -name '.*.tmp~*' -prune -mmin +1440 -exec rm -rf {} +`.
+  (`.<output prefix>.tmp~<token>/`); `neurodags status` counts them. A task stopped while
+  moving files into place leaves a unit that may be half-published, and its staging folder
+  is the trace of that: recompute such units (`status` says which have no `.done`) before
+  deleting their staging folders (see {ref}`Atomic publication <naming-atomic-publication>`).
 - **Never run two tasks on the same unit at once, and never overwrite a unit another task is
   reading.** This is not supported (see {ref}`Concurrency <naming-concurrency>`): interleaved
   publications can mix files of two runs (detected afterwards by the `.done` fingerprints, so

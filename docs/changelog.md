@@ -294,9 +294,12 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
 ### Changed
 
-- A run interrupted by Ctrl-C or `SystemExit` while publishing a unit's files keeps that
-  unit's staging folder (`status` reports it), the trace of a half-published unit; it was
-  removed.
+- Once a run starts moving a unit's files into place, the unit's staging folder is removed
+  only after its `.done` is written: any stop in between (an exception, Ctrl-C,
+  `SystemExit`, a kill) keeps it as the trace of a possibly half-published unit; it was
+  removed. `status` says which staging folders belong to units without a `.done`
+  (recompute those before deleting them) and which to done units. Only names of the form
+  `.<output prefix>.tmp~<16 hex digits>` count as staging folders.
 - **`neurodags run` exits `1` when a unit failed**, after processing every requested input
   (it exited `0`; the failed units have `.error` markers). Inputs listed in `--inputs` that
   no longer exist (`missing-source`) are not failures. `run_pipeline` and

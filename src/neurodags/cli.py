@@ -694,6 +694,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     planning_error_message = _planning_error_message(rows)
     n_unlisted = sum(len(r["unlisted"]) for r in rows)
     n_staging = sum(len(r["staging_dirs"]) for r in rows)
+    n_staging_done = sum(len(r["staging_dirs"]) for r in rows if r["status"] == "done")
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
     missing_source_indices = _status_indices(rows, ("missing-source",))
     n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
@@ -834,11 +835,22 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if n_staging:
         print(
             f"\n{n_staging} staging folder(s) ('.<output prefix>.tmp~<token>') exist: a job is "
-            "writing those units right now, or one was killed while writing them. They are "
-            "ignored and never cleaned up automatically; once no job is running, delete "
-            "them, e.g. find <derivatives_path> -name '.*.tmp~*' -prune -exec rm -rf {} + "
-            "(see --format json --include-files)."
+            "writing those units right now, or one was stopped while writing them; they are "
+            "never reused or cleaned up automatically (see --format json --include-files)."
         )
+        if n_staging - n_staging_done:
+            print(
+                f"{n_staging - n_staging_done} of them belong to unit(s) without a valid .done: "
+                "once no job is running, those units may be half-published (some files new, "
+                "some old). Recompute them (neurodags run) before deleting their staging "
+                "folders: the folder is the only trace, and 'migrate --legacy-tree' relies "
+                "on it."
+            )
+        if n_staging_done:
+            print(
+                f"{n_staging_done} of them belong to done unit(s) (left by an earlier, "
+                "stopped run) and can be deleted once no job is running."
+            )
     _print_input_list_report()
 
     if planning_error_message:

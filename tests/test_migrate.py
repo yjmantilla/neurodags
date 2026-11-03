@@ -2664,13 +2664,19 @@ def _as_tree_only(pipe: Path) -> None:
     pipe.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 
+@pytest.mark.parametrize("part", ["-1.fif", "@Clean.fif"])
+@pytest.mark.parametrize("crash_after", [2, 3])
+@pytest.mark.parametrize("legacy_tree", [False, True])
 @pytest.mark.parametrize("replaced", [False, True])
 def test_open_split_move_rejoins_only_parts_it_proves_unchanged(
-    small_split, tmp_path, monkeypatch, replaced
+    small_split, tmp_path, monkeypatch, replaced, legacy_tree, crash_after, part
 ):
     """Re-review 6477e4d P1: a folder-only split move interrupted after two parts, then a
-    run that replaced a moved continuation: resume must not certify the mixed recording.
-    Untouched, the same interrupted move still completes."""
+    run that replaced a moved continuation: resume must not certify the mixed recording,
+    not even with --legacy-tree (re-review 90a0344, claude 2: the journal proves the part
+    changed). Untouched, the same interrupted move still completes."""
+    if not replaced and part != "-1.fif":
+        pytest.skip("the replaced part only matters when one is replaced")
     pipe = _mini_project(tmp_path)
     _as_tree_only(pipe)
     _place_split(small_split, tmp_path / "out/x.txt@Clean.fif")
@@ -2680,8 +2686,8 @@ def test_open_split_move_rejoins_only_parts_it_proves_unchanged(
     def interrupt_after_two(old_path, new_path):
         real_move(old_path, new_path)
         moved.append(new_path)
-        if len(moved) == 2:
-            raise _Crash("after two parts")
+        if len(moved) == crash_after:
+            raise _Crash(f"after {crash_after} parts")
 
     plan = _plan(pipe, tmp_path)
     assert plan.mode == "tree-only"
@@ -2694,7 +2700,9 @@ def test_open_split_move_rejoins_only_parts_it_proves_unchanged(
     if replaced:  # what a later, interrupted `neurodags run` of the unit leaves
         mne = pytest.importorskip("mne")
         np = pytest.importorskip("numpy")
-        continuation = next(p for p in moved if p.endswith("-1.fif"))
+        target = next((p for p in moved if p.endswith(part)), None)
+        if target is None:
+            pytest.skip(f"{part} not moved before the crash")
         # The same shape and part names, other samples: MNE verification cannot tell.
         other = tmp_path / "later_run" / "x.txt@Clean.fif"
         other.parent.mkdir()
@@ -2705,10 +2713,12 @@ def test_open_split_move_rejoins_only_parts_it_proves_unchanged(
         )
         parts = raw.save(other, split_size="2MB", overwrite=True, verbose="error")
         assert len(parts) == 3
-        os.replace(next(str(p) for p in parts if str(p).endswith("-1.fif")), continuation)
+        os.replace(next(str(p) for p in parts if str(p).endswith(part)), target)
 
-    resumed = _plan(pipe, tmp_path)
+    resumed = _plan(pipe, tmp_path, legacy_tree=legacy_tree)
     if replaced:
+        # Not even planned (apply's MNE check is not what must catch it).
+        assert not [u for u in resumed.manifests if u.new_prefix == prefix]
         if not resumed.refusals:
             apply_migration(resumed)
         assert unit_state(prefix, "Clean").state != "done"
@@ -2803,3 +2813,178 @@ def test_interrupted_publication_keeps_its_staging_folder(tmp_path, monkeypatch)
     assert staging_dirs(f"{base}@pair")
     plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
     assert any("staging folder" in r for r in plan.refusals)
+
+
+# ---------------------------------------------------------------------------
+# Re-review of 90a0344 (0.4.0 release fixes, round 3)
+# ---------------------------------------------------------------------------
+
+
+@register_node(name="rr_one", override=True)
+def _rr_one():
+    return NodeResult({".a.txt": Artifact("NEW", lambda p: Path(p).write_text("NEW"))})
+
+
+@pytest.mark.parametrize(
+    "where", ["second-replace", "write-manifest", "write-manifest-exit", "replace-oserror"]
+)
+def test_publication_keeps_staging_until_done(tmp_path, monkeypatch, where):
+    """Re-review 90a0344 (codex R1, claude 5): any stop after the first file was moved and
+    before the .done exists keeps the staging folder; an Exception also writes .error."""
+    from neurodags import dag, outputs
+    from neurodags.dag import run_derivative
+    from neurodags.outputs import staging_dirs
+
+    source = tmp_path / "x.txt"
+    source.write_text("x")
+    base = tmp_path / "out" / "x.txt"
+    base.parent.mkdir()
+    stop: type[BaseException] = KeyboardInterrupt
+    if where == "second-replace":
+        _interrupt_second_publication(monkeypatch)
+    elif where == "replace-oserror":
+        real, calls = os.replace, []
+
+        def replace(src, dst, *args, **kwargs):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise OSError(5, "I/O error")
+            return real(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(outputs.os, "replace", replace)
+        stop = RuntimeError
+    else:
+        stop = SystemExit if where == "write-manifest-exit" else KeyboardInterrupt
+
+        def interrupt(*args, **kwargs):
+            raise stop("before .done")
+
+        monkeypatch.setattr(dag, "write_manifest", interrupt)
+    with pytest.raises((stop, OSError)):
+        run_derivative({"nodes": [{"id": 0, "node": "rc_pair"}]}, "pair", str(source), base)
+    monkeypatch.undo()
+    prefix = f"{base}@pair"
+    assert staging_dirs(prefix)
+    assert unit_state(prefix, "pair").state != "done"
+    assert os.path.exists(prefix + ".error") == (where == "replace-oserror")
+
+
+@pytest.mark.parametrize("stop", [ValueError, KeyboardInterrupt])
+def test_writer_failure_removes_staging(tmp_path, stop):
+    """Nothing was published: the staging folder goes, whatever stopped the writer."""
+    from neurodags.dag import run_derivative
+    from neurodags.outputs import staging_dirs
+
+    @register_node(name="rr_fails", override=True)
+    def _fails():
+        def writer(path):
+            Path(path).write_text("half")
+            raise stop("writer stopped")
+
+        return NodeResult({".a.txt": Artifact("x", writer)})
+
+    source = tmp_path / "x.txt"
+    source.write_text("x")
+    base = tmp_path / "out" / "x.txt"
+    base.parent.mkdir()
+    with pytest.raises(stop):
+        run_derivative({"nodes": [{"id": 0, "node": "rr_fails"}]}, "f", str(source), base)
+    assert staging_dirs(f"{base}@f") == []
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit])
+def test_run_stopped_before_done_then_legacy_tree_refuses(tmp_path, monkeypatch, stop):
+    """Re-review 90a0344 codex R1: a run stopped after publishing and before its .done,
+    whose producer no longer writes an old artifact: --legacy-tree must not certify the
+    new file together with the stale one."""
+    from neurodags import dag
+    from neurodags.cli import main
+
+    pipe = _mini_project(tmp_path)
+    _as_tree_only(pipe)
+    cfg = yaml.safe_load(pipe.read_text())
+    cfg["DerivativeDefinitions"]["Clean"] = {"nodes": [{"id": 0, "node": "rr_one"}]}
+    pipe.write_text(yaml.safe_dump(cfg))
+    prefix = str(tmp_path / "out/sub/x.txt@Clean")
+    Path(prefix).parent.mkdir()
+    for suffix in (".a.txt", ".b.txt"):
+        Path(prefix + suffix).write_text("OLD")
+
+    def interrupt(*args, **kwargs):
+        raise stop("before .done")
+
+    monkeypatch.setattr(dag, "write_manifest", interrupt)
+    with pytest.raises(stop):
+        main(["run", str(pipe)])
+    monkeypatch.undo()
+    assert main(["migrate", str(pipe), "--legacy-tree", "--apply"]) == 2
+    assert unit_state(prefix, "Clean").state != "done"
+
+
+@pytest.mark.parametrize("kind", ["folder", "symlink"])
+def test_user_folder_resembling_staging_is_not_run_evidence(tmp_path, kind):
+    """Re-review 90a0344 codex R3: only make_staging_dir's names count."""
+    from neurodags.outputs import is_staging_name
+
+    pipe = _mini_project(tmp_path)
+    _as_tree_only(pipe)
+    prefix = tmp_path / "out/sub/x.txt@Clean"
+    prefix.parent.mkdir()
+    Path(f"{prefix}.nc").write_text("0.3.x")
+    look_alike = tmp_path / "out" / ".notes.tmp~backup"
+    if kind == "folder":
+        look_alike.mkdir()
+    else:
+        (tmp_path / "elsewhere").mkdir()
+        look_alike.symlink_to(tmp_path / "elsewhere")
+    assert not is_staging_name(look_alike.name)
+    assert is_staging_name(".x.txt@Clean.tmp~0123456789abcdef")
+    plan = _plan(pipe, tmp_path, legacy_tree=True)
+    assert plan.refusals == []
+    apply_migration(plan)
+    assert unit_state(str(prefix), "Clean").state == "done"
+
+
+def test_legacy_tree_evidence_only_where_a_unit_could_be_certified(tmp_path):
+    """Re-review 90a0344 codex R2: units that cannot be certified anyway (unknown artifact
+    set) do not make --legacy-tree refuse the tree."""
+    pipe = _mini_project(tmp_path, rels=("sub/x.txt", "sub/y.txt"))
+    _as_tree_only(pipe)
+    (tmp_path / "out/sub").mkdir()
+    Path(tmp_path / "out/sub/x.txt@Clean.a.txt").write_text("0.3.x")
+    Path(tmp_path / "out/sub/y.txt@Clean.b.txt").write_text("0.3.x")
+    removed = str(tmp_path / "out/sub/x.txt@Removed")
+    Path(removed + ".nc").write_text("run")
+    _write_run_manifest(removed, "Removed", "sub/x.txt")
+    plan = _plan(pipe, tmp_path, legacy_tree=True)
+    assert plan.refusals == []
+    assert not plan.has_work
+    reasons = {u.manifest_reason for t in plan.trees for u in t.units if u.derivative == "Clean"}
+    assert reasons == {"artifact set of the derivative is unknown"}
+
+
+def test_legacy_tree_ignores_runs_in_a_nested_dataset_tree(tmp_path):
+    """Re-review 90a0344 claude 3: another dataset's derivatives_path nested in this tree
+    (and code/) is not this tree's run evidence, as migrate does not scan it either."""
+    pipe = _two_mount_project(tmp_path)
+    ds = yaml.safe_load((tmp_path / "ds.yml").read_text())
+    ds["other"] = {
+        "name": "Other",
+        "source_root": {"local": "local/raw2", "hpc": "hpc/raw2"},
+        "file_pattern": {"local": "local/raw2/**/*.txt", "hpc": "hpc/raw2/**/*.txt"},
+        "derivatives_path": {"local": "local/derivatives/other", "hpc": "hpc/derivatives/other"},
+    }
+    (tmp_path / "ds.yml").write_text(yaml.safe_dump(ds, sort_keys=False))
+    _sources(tmp_path / "hpc/raw2", RELS[:1])
+    prefix = str(tmp_path / "hpc/derivatives/other" / f"{RELS[0]}@Clean")
+    Path(prefix + ".nc").parent.mkdir(parents=True, exist_ok=True)
+    Path(prefix + ".nc").write_text("computed by 0.4.0")
+    _write_run_manifest(prefix, "Clean", RELS[0])
+    code = tmp_path / "hpc/derivatives/code"
+    code.mkdir()
+    _write_run_manifest(str(code / "x@Clean"), "Clean", RELS[0])
+    plan = _plan(pipe, tmp_path, mount="hpc", legacy_tree=True)
+    assert plan.refusals == []
+    apply_migration(plan)
+    clean = str(tmp_path / "hpc/derivatives" / f"{RELS[0]}@Clean")
+    assert unit_state(clean, "Clean").state == "done"

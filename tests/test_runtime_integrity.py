@@ -844,7 +844,11 @@ def test_status_cli_reports_staging_folders(tmp_path, capsys, monkeypatch):
     assert data["files"][0]["staging_dirs"] == [staging]
 
     assert main(["status", str(pipeline)]) == 1
-    assert "1 staging folder(s)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 staging folder(s)" in out
+    # Re-review 90a0344 (claude 1): never advise deleting the trace of a unit without .done.
+    assert "1 of them belong to unit(s) without a valid .done" in out
+    assert "Recompute them (neurodags run) before deleting" in out
 
 
 # ---------------------------------------------------------------------------

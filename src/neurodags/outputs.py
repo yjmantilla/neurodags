@@ -88,6 +88,8 @@ __all__ = [
     "output_prefix",
     "output_reference_base",
     "publish_marker",
+    "move_staged",
+    "plan_publication",
     "publish_staged",
     "read_manifest",
     "remove_markers",
@@ -108,6 +110,7 @@ _SPLIT_NAME_RE = re.compile(r"(.+)-([0-9]+)")
 #: Marks a staging folder: ``.<prefix basename>.tmp~<token>``. ``~`` is not allowed in a
 #: suffix, so the name never parses as an output (:func:`neurodags.naming.parse_output_basename`).
 STAGING_TAG = ".tmp~"
+_STAGING_NAME_RE = re.compile(r"\..*@.+" + re.escape(STAGING_TAG) + r"[0-9a-f]{16}")
 
 UnitStatus = Literal["done", "error", "skipped", "incomplete", "missing"]
 
@@ -523,8 +526,9 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
 
 
 def is_staging_name(basename: str) -> bool:
-    """Whether *basename* is a staging folder (``.<prefix basename>.tmp~<token>``)."""
-    return basename.startswith(".") and STAGING_TAG in basename
+    """Whether *basename* is a staging folder (``.<prefix basename>.tmp~<token>``, the
+    name :func:`make_staging_dir` gives: an output prefix and a 16-hex-digit token)."""
+    return _STAGING_NAME_RE.fullmatch(basename) is not None
 
 
 def _staging_glob(prefix: str) -> str:
@@ -616,6 +620,17 @@ def publish_staged(
         a file whose name is not owned by the unit (its first path component must start with
         the prefix basename, see :func:`_unit_namespace_problem`). Nothing is moved then.
     """
+    final, ordered = plan_publication(staging, prefix, staged)
+    move_staged(ordered)
+    return final
+
+
+def plan_publication(
+    staging: str, prefix: str, staged: Mapping[str, Sequence[str]]
+) -> tuple[dict[str, list[str]], list[tuple[str, str]]]:
+    """The checks of :func:`publish_staged` (same errors) without moving anything: the final
+    paths per suffix and the ``(staged, final)`` moves in publication order (continuation
+    files first, main files last), for :func:`move_staged`."""
     directory, base = os.path.split(prefix)
     root = os.path.abspath(staging)
     final: dict[str, list[str]] = {}
@@ -641,12 +656,16 @@ def publish_staged(
             target = os.path.join(directory, rel)
             final[suffix].append(target)
             (mains if index == 0 else moves).append((path, target))
-    for source, target in moves + mains:
+    return final, moves + mains
+
+
+def move_staged(ordered: Sequence[tuple[str, str]]) -> None:
+    """Move staged files into place with ``os.replace``, in the given order."""
+    for source, target in ordered:
         parent = os.path.dirname(target)
         if parent:
             os.makedirs(parent, exist_ok=True)
         os.replace(source, target)
-    return final
 
 
 # ---------------------------------------------------------------------------

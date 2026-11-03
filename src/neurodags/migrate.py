@@ -299,6 +299,8 @@ class TreePlan:
     recursive: bool | None = None
     #: Folders another tree of the plan already scans (skipped here).
     skip_dirs: set[str] = field(default_factory=set)
+    #: Nested derivative roots of other datasets (another tree's outputs, not this one's).
+    nested: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1567,6 +1569,7 @@ def _plan_trees(
         nested = [
             r for r in derivative_roots if r != tree.root and r.startswith(tree.root + os.sep)
         ]
+        tree.nested = nested
         # Parts of a split recording an interrupted run was moving (folder-only): each
         # counts at its original location, so the recording is rejoined across folders.
         split_txns = _unfinished_split_moves(tree.journal)
@@ -1957,6 +1960,8 @@ def _plan_split_move(
             "kind": journaled.get("kind") if journaled else None,
             "shape": journaled.get("shape") if journaled else None,
             "journaled": journaled is not None,
+            # Every part the first attempt journaled is still found (not replaced since).
+            "whole": {_path_key(p) for p in logical} == {_path_key(o) for o, _ in pairs},
         }
     )
 
@@ -2215,6 +2220,15 @@ def _owns(owned: Mapping[str, Mapping[str, Any]], path: str, old_prefix: str | N
     return True
 
 
+def _contradicted(owned: Mapping[str, Mapping[str, Any]], path: str) -> bool:
+    """The unfinished migration recorded proof for *path* and the file no longer matches
+    it: something wrote it after the migration did (a later ``neurodags run``)."""
+    record = owned.get(_path_key(path))
+    if record is None or (record.get("fingerprint") is None and record.get("digest") is None):
+        return False
+    return os.path.lexists(path) and not _owns(owned, path)
+
+
 def _interrupted_move(owned: Mapping[str, Mapping[str, Any]], group: list[Unit]) -> bool:
     """*group* (units with disjoint files sharing a target) is one 0.3.x unit an unfinished
     migration was moving: its files at the new name (``identity``) were all moved by that
@@ -2228,6 +2242,10 @@ def _interrupted_move(owned: Mapping[str, Mapping[str, Any]], group: list[Unit])
 
 
 #: Why a unit already at its 0.4.0 names gets no ``.done`` in tree-only mode.
+UNCERTIFIED_CHANGED = (
+    "incomplete — a file the interrupted migration moved has changed since (a later "
+    "'neurodags run'?), or a part of its split recording did; recompute with neurodags run"
+)
 UNCERTIFIED_IN_PLACE = (
     "incomplete — files at their 0.4.0 names without a .done (an interrupted "
     "'neurodags run'?); recompute with neurodags run, or certify them with --legacy-tree "
@@ -2235,21 +2253,27 @@ UNCERTIFIED_IN_PLACE = (
 )
 
 
-def _run_evidence(root: str) -> list[str]:
+def _run_evidence(root: str, *, recursive: bool = True, exclude: Iterable[str] = ()) -> list[str]:
     """What in the output tree *root* shows a neurodags 0.4.0 ``run`` wrote there: a
     readable ``.done`` with ``origin: run`` (valid or not, any derivative or dataset) or a
-    run's staging folder. Read for ``--legacy-tree`` only."""
+    run's staging folder. The folders :func:`_scan_tree` skips are skipped (``code/``,
+    ``.neurodags/``, other datasets' nested trees in *exclude*). Read for ``--legacy-tree``
+    only."""
+    excluded = {os.path.normcase(os.path.normpath(d)) for d in exclude}
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         kept = []
         for name in dirnames:
-            if name == ".neurodags":
-                continue
+            path = os.path.join(dirpath, name)
             if is_staging_name(name):
-                found.append(f"{os.path.join(dirpath, name)} (a neurodags run staging folder)")
-            else:
+                found.append(f"{path} (a neurodags run staging folder)")
+            elif not (
+                name == ".neurodags"
+                or (dirpath == root and name == "code")
+                or os.path.normcase(os.path.normpath(path)) in excluded
+            ):
                 kept.append(name)
-        dirnames[:] = sorted(kept)
+        dirnames[:] = sorted(kept) if recursive else []
         for name in sorted(filenames):
             if name.endswith(".done") and not name.startswith("."):
                 manifest = read_manifest(os.path.join(dirpath, name[: -len(".done")]))
@@ -2278,6 +2302,7 @@ def _plan_manifests(plan: MigrationPlan) -> None:
     # others too, in trees that show no 0.4.0 run.
     owned = _unfinished_ownership(plan) if plan.mode == "tree-only" else None
     evidence: dict[str, list[str]] = {}
+    trees = {u.tree: t for t in plan.trees for u in t.units}
     for unit in _primaries(plan):
         artifacts, markers = _group_view(unit)
         unit.manifest_suffixes = None
@@ -2294,17 +2319,6 @@ def _plan_manifests(plan: MigrationPlan) -> None:
             continue
         if "skip" in markers:
             continue  # .skip is its own state
-        if owned is not None and not all(
-            member.status == "move"
-            or all(_owns(owned, p) for paths in member.artifacts.values() for p in paths)
-            for member in unit.members or [unit]
-        ):
-            root = unit.tree.rpartition("\0")[2]  # a TreePlan key ("\0rest\0<root>" too)
-            if plan.legacy_tree and root not in evidence:
-                evidence[root] = _run_evidence(root)
-            if not plan.legacy_tree or evidence[root]:
-                unit.manifest_reason = UNCERTIFIED_IN_PLACE
-                continue
         info = plan.artifact_sets.get(unit.derivative)
         known = info.get("known") if info else None
         if not known:
@@ -2314,6 +2328,34 @@ def _plan_manifests(plan: MigrationPlan) -> None:
         if missing:
             unit.manifest_reason = f"missing artifact(s) {' '.join(missing)} (partial unit)"
             continue
+        members = unit.members or [unit]
+        if any(not m.get("whole", True) for member in members for m in member.split_moves):
+            unit.manifest_reason = UNCERTIFIED_CHANGED
+            continue
+        if owned is not None and any(
+            _contradicted(owned, p)
+            for member in members
+            for paths in member.artifacts.values()
+            for p in paths
+        ):
+            # Even with --legacy-tree: the journal proves a file changed after the
+            # migration moved it.
+            unit.manifest_reason = UNCERTIFIED_CHANGED
+            continue
+        if owned is not None and not all(
+            member.status == "move"
+            or all(_owns(owned, p) for paths in member.artifacts.values() for p in paths)
+            for member in members
+        ):
+            root = trees[unit.tree].root
+            if plan.legacy_tree and root not in evidence:
+                tree = trees[unit.tree]
+                evidence[root] = _run_evidence(
+                    root, recursive=tree.recursive is not False, exclude=tree.nested
+                )
+            if not plan.legacy_tree or evidence[root]:
+                unit.manifest_reason = UNCERTIFIED_IN_PLACE
+                continue
         # The common set only decides completeness; the manifest lists every artifact of
         # the unit (a unit with an extra artifact keeps it, spec 6).
         unit.manifest_suffixes = list(known) + sorted(s for s in artifacts if s not in known)

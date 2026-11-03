@@ -43,9 +43,10 @@ from neurodags.outputs import (
     file_fingerprint,
     make_staging_dir,
     manifest_artifacts,
+    move_staged,
     output_prefix,
+    plan_publication,
     publish_marker,
-    publish_staged,
     remove_markers,
     remove_staging_dir,
     unit_state,
@@ -887,22 +888,22 @@ def _save_final_artifacts(
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
        untouched in both cases.
     4. Move every staged file into place with ``os.replace``, continuation parts first and
-       main files last (:func:`neurodags.outputs.publish_staged`). Readers see a complete
+       main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
        old file or a complete new one, never a partial one.
     5. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
 
-    The staging folder is removed, also on failure (files a writer wrote without reporting
-    them are discarded with it), except when an interruption that is not an ``Exception``
-    (Ctrl-C, ``SystemExit``) stops step 4: it then stays as the trace of a half-published
-    unit. A process killed before step 5 leaves no ``.done`` (and possibly its staging
-    folder, which nothing reads).
+    The staging folder is removed on a failure before step 4 (files a writer wrote without
+    reporting them are discarded with it) and after step 5. Once step 4 has started, any
+    stop before the ``.done`` exists (an exception, Ctrl-C, ``SystemExit``, a kill) leaves it
+    in place: some files may be new and some old, and the folder is the durable trace of
+    that half-published unit (``status`` reports it, ``migrate --legacy-tree`` refuses the
+    tree). It is not reused; a later run of the unit uses a fresh one.
 
     Returns the manifest path. Errors propagate (the caller writes the ``.error`` marker).
     """
     validate_artifact_suffixes(res.artifacts)
     remove_markers(final_prefix, "done")
     staging = make_staging_dir(final_prefix)
-    publishing = False
     try:
         staged: dict[str, list[str]] = {}
         base = os.path.basename(final_prefix)
@@ -927,18 +928,16 @@ def _save_final_artifacts(
         # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
         # and mtime): a file another process replaces before our .done no longer matches.
         staged_prints = [file_fingerprint(p) for paths in staged.values() for p in paths]
-        publishing = True
-        written = publish_staged(staging, final_prefix, staged)
-        publishing = False
-    except Exception:
-        publishing = False  # the caller writes the .error marker
+        written, ordered = plan_publication(staging, final_prefix, staged)
+    except BaseException:
+        remove_staging_dir(
+            staging
+        )  # nothing published yet (on Exception, the caller writes .error)
         raise
-    finally:
-        # Interrupted while publishing (Ctrl-C, SystemExit): some files may be new and some
-        # old, with no .done or .error. The staging folder stays as the trace of it (status
-        # reports it, migrate --legacy-tree refuses the tree).
-        if not publishing:
-            remove_staging_dir(staging)
+    # From here until the .done exists, the staging folder stays on any stop: the trace of
+    # a unit whose files may be part new, part old (status reports it, migrate
+    # --legacy-tree refuses the tree).
+    move_staged(ordered)
     finals = [p for paths in written.values() for p in paths]
     manifest = build_manifest(
         final_prefix,
@@ -949,6 +948,7 @@ def _save_final_artifacts(
         fingerprints=dict(zip(finals, staged_prints, strict=True)),
     )
     manifest_path = write_manifest(final_prefix, manifest)
+    remove_staging_dir(staging)
     remove_markers(final_prefix, "error", "skip")
     log.debug("Published completion manifest", path=manifest_path)
     return manifest_path
