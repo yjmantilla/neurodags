@@ -228,7 +228,11 @@ the output folder, and each must belong to the unit: the first component of its 
 followed by `.` (or an MNE split tail `-1`, `-2`, ...), or be exactly the prefix used as a
 folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, which every
 unit of the folder would share, fails the unit before anything is replaced. A reported file
-outside the staging folder also fails the unit, and unreported files are discarded. Writers
+outside the staging folder also fails the unit, and unreported files are discarded. The
+exception is an MNE split part (`X-1.fif`, `X.fif-1.gz`, ...) of a reported recording: a
+writer that saves an MNE object and returns `None` would lose the parts of a recording
+larger than its split size, so the unit fails instead. Return what MNE's `save()` returns
+(`lambda p: raw.save(p, overwrite=True)`) or use `neurodags.writers.save_mne`. Writers
 that ignore `path` and write somewhere fixed cannot be published atomically and are not
 supported.
 

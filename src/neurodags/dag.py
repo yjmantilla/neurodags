@@ -40,6 +40,7 @@ from neurodags.nodes import get_node
 from neurodags.outputs import (
     build_manifest,
     check_artifact_ownership,
+    check_unreported_split_parts,
     file_fingerprint,
     make_staging_dir,
     manifest_artifacts,
@@ -886,7 +887,8 @@ def _save_final_artifacts(
        reports (:func:`neurodags.outputs.writer_paths`). A writer whose target another
        artifact already reported is not run, and two artifacts reporting the same file fail
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
-       untouched in both cases.
+       untouched in both cases. MNE split parts a writer wrote without reporting them
+       fail the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
     4. Move every staged file into place with ``os.replace``, continuation parts first and
        main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
        old file or a complete new one, never a partial one.
@@ -925,6 +927,7 @@ def _save_final_artifacts(
                     exc_info=True,
                 )
                 raise
+        check_unreported_split_parts(staging, staged)
         # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
         # and mtime): a file another process replaces before our .done no longer matches.
         staged_prints = [file_fingerprint(p) for paths in staged.values() for p in paths]

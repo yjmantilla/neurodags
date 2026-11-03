@@ -68,7 +68,7 @@ def _internal_function_name(data) -> NodeResult:
 
 ## Artifact Types
 
-The `item` field holds the in-memory object; `writer` is a callable that receives a full file path and saves it. It returns the list of files it wrote, or `None` (any non-list value counts as `None`) meaning exactly that path; a writer that creates extra files must return them all, because the `.done` manifest is built from these reports (see {ref}`Writer contract <naming-writer-contract>`). Common patterns:
+The `item` field holds the in-memory object; `writer` is a callable that receives a full file path and saves it. It returns the list of files it wrote, or `None` (any non-list value counts as `None`) meaning exactly that path; a writer that creates extra files must return them all, because the `.done` manifest is built from these reports (see {ref}`Writer contract <naming-writer-contract>`). For MNE objects use `save_mne` (or return what `save()` returns): a writer that saves an MNE recording larger than its split size and returns `None` fails the unit. Common patterns:
 
 ```python
 # xarray DataArray → NetCDF (recommended for numerical results)

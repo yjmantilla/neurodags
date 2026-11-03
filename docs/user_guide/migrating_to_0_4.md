@@ -24,6 +24,22 @@
    now sorted).
 ```
 
+(mixed-versions)=
+
+```{admonition} Do not mix versions on one output tree
+:class: warning
+
+After `neurodags migrate --apply`, use 0.4.x for every job that writes to that tree.
+neurodags 0.3.x ignores `naming_version`, finds no outputs under the new names and
+recomputes everything under the old names next to them. Update every environment that
+writes to the tree (cluster virtual environments, colleagues, SLURM arrays already queued)
+before or together with the migration.
+
+If you cannot migrate a project yet, pin `neurodags<0.4`. Packages that depend on neurodags
+should declare an upper bound: `neurodags>=0.3.6,<0.4` until they handle the 0.4.0 file and
+column names, then `neurodags>=0.4,<0.5`.
+```
+
 neurodags 0.4.0 changes how outputs are named, where they go and when they count as done
 (see {doc}`naming`). A 0.3.x configuration is refused by every command until it declares
 `naming_version: 1`, and 0.3.x outputs have no `.done` manifest, so they would all be

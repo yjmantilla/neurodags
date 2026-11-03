@@ -22,7 +22,7 @@ built-in `basic_preprocessing` node, and writes an MNE Report with the PSD after
 averaged across channels (`average_psd: true`). No custom code is needed.
 
 Copy both files, edit the dataset's `source_root` / `file_pattern` / `derivatives_path`
-(or set the environment variables they use), then. Relative paths in the datasets file are
+(or set the environment variables they use), then run the commands below. Relative paths in the datasets file are
 resolved against that file's folder, and the pipeline file starts with `naming_version: 1`
 (both required since 0.4.0):
 

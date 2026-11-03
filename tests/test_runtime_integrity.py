@@ -227,6 +227,32 @@ def test_split_recording_is_published_atomically_and_reloads(tmp_path):
     np.testing.assert_allclose(loaded.get_data(), big.get_data())
 
 
+@pytest.mark.parametrize("suffix", [".fif", ".fif.gz"])
+def test_writer_not_reporting_its_split_parts_fails_the_unit(tmp_path, suffix):
+    """Ship review 8adb7eb B1: a writer that saves a split MNE recording and returns None
+    reported only the main file; its parts were deleted with the staging folder and the
+    .done certified a truncated recording. The unit now fails and nothing is published."""
+    big = mne.io.RawArray(
+        np.arange(4 * 200_000, dtype=float).reshape(4, 200_000) * 1e-9,
+        mne.create_info(4, 1000, "eeg"),
+    )
+
+    def writer(path):
+        big.save(path, split_size="2MB", overwrite=True, verbose="error")  # returns nothing
+
+    @register_node(name="rt_split_unreported", override=True)
+    def node():
+        return NodeResult({suffix: Artifact(big, writer)})
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="split parts it did not report"):
+        run_derivative(_single("rt_split_unreported"), "Rec", str(base), base)
+    prefix = str(base) + "@Rec"
+    assert unit_state(prefix, "Rec").state == "error"
+    assert not os.path.exists(prefix + suffix)
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
 @needs_fork
 def test_original_race_schedule_certifies_only_complete_files(tmp_path, procs):
     """Astra's R2 schedule: B enters its writer while A is in its own, A publishes, then B

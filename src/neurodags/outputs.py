@@ -77,6 +77,7 @@ __all__ = [
     "build_manifest",
     "check_artifact_ownership",
     "check_legacy_chained_outputs",
+    "check_unreported_split_parts",
     "check_output_collisions",
     "dataset_derivatives_base",
     "entry_reference_base",
@@ -520,6 +521,50 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
             "two artifacts of one unit write the same file, so one would overwrite the "
             f"other: {'; '.join(conflicts)}. Rename an artifact suffix (an MNE recording "
             "'<prefix>.X.fif' may also write '<prefix>.X-1.fif', ...)."
+        )
+
+
+def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[str]]) -> None:
+    """Refuse MNE split parts a writer wrote into *staging* without reporting them.
+
+    A writer that saves an MNE object larger than its split size and returns ``None``
+    (``def w(path): raw.save(path)``) reports only the main file; its continuation parts
+    (``X-1.fif``, ``X.fif-1.gz``, ...) would be discarded with the staging folder and the
+    ``.done`` would certify a truncated recording.
+
+    Parameters
+    ----------
+    staging : str
+        The unit's staging folder.
+    written : mapping of suffix to paths
+        The files each artifact reported.
+
+    Raises
+    ------
+    RuntimeError
+        Naming the unreported parts and the artifacts they belong to.
+    """
+    from neurodags.iterators import neuromag_split_part
+
+    def key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+    owner = {key(p): suffix for suffix, paths in written.items() for p in paths}
+    missing: list[str] = []
+    for dirpath, _dirs, files in os.walk(staging):
+        for fname in sorted(files):
+            path = os.path.join(dirpath, fname)
+            if key(path) in owner:
+                continue
+            part = neuromag_split_part(path)
+            if part is not None and key(part[0]) in owner:
+                missing.append(f"{fname} (artifact {owner[key(part[0])]!r})")
+    if missing:
+        raise RuntimeError(
+            "an artifact writer wrote MNE split parts it did not report: "
+            f"{', '.join(missing)}. Return every file written (MNE's save() returns them; "
+            "e.g. writer=lambda p: raw.save(p, overwrite=True)) or use "
+            "neurodags.writers.save_mne."
         )
 
 

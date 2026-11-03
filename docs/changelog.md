@@ -10,6 +10,11 @@ changes are breaking: 0.3.x configurations are refused until they declare `namin
 `neurodags migrate` converts a 0.3.x configuration and its existing outputs in one previewed
 pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
+If you cannot migrate a project yet, pin `neurodags<0.4`; packages that depend on neurodags
+should declare an upper bound (`neurodags>=0.3.6,<0.4` or `neurodags>=0.4,<0.5`). After
+migrating, run only 0.4.x on that output tree (see
+{ref}`do not mix versions <mixed-versions>`).
+
 ### Breaking
 
 - **`naming_version: 1` is required** at the top level of every pipeline configuration. A
@@ -263,7 +268,11 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `None` = exactly `path`); the `.done` manifest is built from these reports and every
   reported file must exist. New `neurodags.writers.save_mne(obj, path, **kwargs)` returns
   every part of an MNE split recording (`X.fif`, `X-1.fif`, ...), used by the built-in
-  preprocessing nodes.
+  preprocessing nodes. Files a writer does not report are discarded, except MNE split parts
+  of a reported recording: a writer that saves an MNE object and returns `None`
+  (`def w(p): raw.save(p)`, which worked in 0.3.x) fails the unit with `.error` when MNE split
+  the recording, instead of certifying a truncated one. Return what `save()` returns or use
+  `save_mne`.
 - **`neurodags.naming`** (#49, #50): pure functions that define the 0.4.0 naming rules in one
   place: derivative-name grammar and validation (`check_derivative_names`: string keys,
   reserved `SourceFile`, case-insensitive uniqueness, the `X`/`X-1` split-file rule), the
