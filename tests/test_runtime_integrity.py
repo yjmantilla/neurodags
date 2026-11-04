@@ -342,6 +342,122 @@ def test_split_check_matches_reports_through_a_link(tmp_path, layout):
     assert unit_state(str(base) + "@Rec", "Rec").state == "error"
 
 
+def _run_split_writer(tmp_path, writer, suffix=".fif"):
+    @register_node(name="rt_split_custom", override=True)
+    def node():
+        return NodeResult({suffix: Artifact(None, writer)})
+
+    base = _source(tmp_path)
+    run_derivative(_single("rt_split_custom"), "Rec", str(base), base)
+    return str(base) + "@Rec"
+
+
+def test_split_part_reported_only_through_a_hard_link_fails_the_unit(tmp_path):
+    """Review fa8ebd1 #1a: a hard link to X-1.fif reported instead of X-1.fif matched it by
+    inode, publication moved only the link, and .done certified a recording whose part
+    X-1.fif was gone."""
+    big = _split_raw()
+
+    def writer(path):
+        files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        os.link(files[1], path + ".part1")
+        return [files[0], path + ".part1", *files[2:]]
+
+    with pytest.raises(RuntimeError, match="did not report every file of an MNE split"):
+        _run_split_writer(tmp_path, writer)
+
+
+def test_hard_link_copies_reported_with_the_parts_are_all_published(tmp_path):
+    """Review fa8ebd1 B1: originals and hard-link copies are separate names; deduplicating
+    them by inode dropped the originals and the recording became unreadable."""
+    big = _split_raw()
+
+    def writer(path):
+        files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        reported = [files[0]]
+        for i, part in enumerate(files[1:], 1):
+            os.link(part, f"{path}.copy{i}")
+            reported += [f"{path}.copy{i}", part]
+        return reported
+
+    prefix = _run_split_writer(tmp_path, writer)
+    state = unit_state(prefix, "Rec")
+    assert state.state == "done"
+    assert len(state.artifacts[".fif"]) == 7
+    loaded = mne.io.read_raw_fif(prefix + ".fif", preload=True, verbose="error")
+    assert loaded.n_times == big.n_times
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_parts_reported_through_a_folder_link_are_published_where_they_are(tmp_path):
+    """Review fa8ebd1 #1b: parts reported through a link to the staging folder were
+    published into a folder named like the link, away from their entry."""
+    big = _split_raw()
+
+    def writer(path):
+        files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        alias = Path(path + ".alias")
+        alias.symlink_to(Path(path).parent, target_is_directory=True)
+        return [files[0]] + [str(alias / Path(f).name) for f in files[1:]]
+
+    prefix = _run_split_writer(tmp_path, writer)
+    assert unit_state(prefix, "Rec").state == "done"
+    assert not os.path.exists(prefix + ".fif.alias")
+    loaded = mne.io.read_raw_fif(prefix + ".fif", preload=True, verbose="error")
+    assert loaded.n_times == big.n_times
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_reported_file_link_is_published_as_its_target(tmp_path):
+    """Review fa8ebd1 #1c/#2: a reported symbolic link was moved itself (dangling) and, kept
+    as the first spelling, dropped the real file."""
+
+    def writer(path):
+        Path(path).write_text("x")
+        os.symlink(os.path.basename(path), path + ".lnk")
+        return [path + ".lnk", path]
+
+    prefix = _run_split_writer(tmp_path, writer, suffix=".txt")
+    state = unit_state(prefix, "Rec")
+    assert state.state == "done"
+    assert state.artifacts[".txt"] == [prefix + ".txt"]
+    assert not os.path.lexists(prefix + ".txt.lnk")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_reported_link_to_a_file_outside_staging_fails_the_unit(tmp_path):
+    """Review fa8ebd1 #6: a link to a file elsewhere passed every check and .done
+    certified a file neurodags does not control."""
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("not ours")
+
+    def writer(path):
+        os.symlink(elsewhere, path)
+        return [path]
+
+    with pytest.raises(RuntimeError, match="resolves outside the folder it was given"):
+        _run_split_writer(tmp_path, writer, suffix=".txt")
+
+
+def test_artifacts_that_are_hard_links_of_each_other_are_both_published(tmp_path):
+    """Review fa8ebd1 #4: two artifacts hard-linked to one file are two names, not one
+    file claimed twice."""
+
+    @register_node(name="rt_linked_artifacts", override=True)
+    def node():
+        def write_a(path):
+            Path(path).write_text("same")
+
+        def write_b(path):
+            os.link(path[: -len(".b.txt")] + ".a.txt", path)
+
+        return NodeResult({".a.txt": Artifact(None, write_a), ".b.txt": Artifact(None, write_b)})
+
+    base = _source(tmp_path)
+    run_derivative(_single("rt_linked_artifacts"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "done"
+
+
 def test_split_parts_join_without_their_entry(tmp_path):
     """Review 87f3ef6 F2: continuations are one recording even when the writer removed
     the entry; reporting one of them alone fails."""

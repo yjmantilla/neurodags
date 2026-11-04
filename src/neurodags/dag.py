@@ -39,6 +39,7 @@ from neurodags.naming import (
 from neurodags.nodes import get_node
 from neurodags.outputs import (
     build_manifest,
+    canonical_reports,
     check_artifact_ownership,
     check_unreported_split_parts,
     file_fingerprint,
@@ -884,7 +885,8 @@ def _save_final_artifacts(
     2. Delete the old ``.done``, so a crash from here on leaves the unit unfinished.
     3. Run every writer on its final basename inside a fresh hidden staging folder next to
        the outputs (:func:`neurodags.outputs.make_staging_dir`) and record the files it
-       reports (:func:`neurodags.outputs.writer_paths`). A writer whose target another
+       reports (:func:`neurodags.outputs.writer_paths`), spelled as the entries they are in
+       the staging folder (:func:`neurodags.outputs.canonical_reports`). A writer whose target another
        artifact already reported is not run, and two artifacts reporting the same file fail
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
        untouched in both cases. An MNE split recording of which a writer reported only
@@ -915,7 +917,9 @@ def _save_final_artifacts(
                 log.debug("Processed artifact", name=artifact_name, file=artifact)
                 # Do not overwrite a file an earlier artifact wrote (e.g. its MNE split part).
                 check_artifact_ownership({**staged, artifact_name: [artifact_path]})
-                staged[artifact_name] = writer_paths(artifact_path, artifact.writer(artifact_path))
+                staged[artifact_name] = canonical_reports(
+                    staging, writer_paths(artifact_path, artifact.writer(artifact_path))
+                )
                 check_artifact_ownership(staged)
                 log.debug("Saved artifact", file=artifact_path, files=staged[artifact_name])
             except Exception as e:

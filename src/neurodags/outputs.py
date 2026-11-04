@@ -78,6 +78,7 @@ __all__ = [
     "check_artifact_ownership",
     "check_legacy_chained_outputs",
     "check_unreported_split_parts",
+    "canonical_reports",
     "check_output_collisions",
     "dataset_derivatives_base",
     "entry_reference_base",
@@ -442,19 +443,6 @@ def check_legacy_chained_outputs(
 # ---------------------------------------------------------------------------
 
 
-def _file_identity(path: str) -> tuple[Any, ...]:
-    """What identifies the file *path* names: ``(st_dev, st_ino)`` when it exists, so
-    symbolic links, hard links and case or ``//`` spellings of one file compare equal;
-    otherwise (or where a filesystem reports no inode number) its lexical key."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        st = None
-    if st is not None and st.st_ino:
-        return st.st_dev, st.st_ino
-    return ("path", os.path.normcase(lexical_path_key(os.path.abspath(os.fspath(path)))))
-
-
 def writer_paths(target: str, returned: Any) -> list[str]:
     """Normalize what an artifact writer returned into the list of files it wrote.
 
@@ -497,11 +485,54 @@ def writer_paths(target: str, returned: Any) -> list[str]:
             f"{missing}. A writer must return the paths it wrote, or None after writing "
             "exactly the target path."
         )
-    # One file reported twice (another spelling, a link): keep its first spelling.
-    unique: dict[tuple[Any, ...], str] = {}
-    for p in paths:
-        unique.setdefault(_file_identity(p), p)
-    return list(unique.values())
+    return paths
+
+
+def canonical_reports(staging: str, paths: Sequence[str]) -> list[str]:
+    """The files a writer reported, spelled as the directory entries they are in *staging*.
+
+    Each path is resolved (:func:`os.path.realpath`: symbolic links, ``..``, ``//``) and
+    re-spelled below *staging* with every component exactly as the folder lists it, so the
+    split-recording check (:func:`check_unreported_split_parts`) and publication see the
+    same names. A link the writer reported is replaced by its target (the link itself is
+    discarded with the staging folder); hard links stay separate names. Duplicates are
+    dropped, keeping the first.
+
+    Raises
+    ------
+    RuntimeError
+        If a reported file resolves outside *staging*, or names an entry with other letter
+        case than the folder lists (a case-insensitive filesystem).
+    """
+    base = os.path.realpath(staging)
+    lexical_base = lexical_path_key(os.path.abspath(staging))
+    out: dict[str, str] = {}
+    for path in paths:
+        rel = os.path.relpath(os.path.realpath(path), base)
+        parts = rel.split(os.sep)
+        if os.path.isabs(rel) or rel == os.curdir or parts[0] == os.pardir:
+            lexical = lexical_path_key(os.path.abspath(path))
+            try:
+                inside = os.path.commonpath([lexical, lexical_base]) == lexical_base
+            except ValueError:  # another drive (Windows)
+                inside = False
+            if not inside:
+                out.setdefault(os.path.normcase(lexical), path)  # plan_publication refuses it
+                continue
+            raise RuntimeError(
+                f"artifact writer reported {path!r}, which resolves outside the folder it "
+                "was given (also through a symbolic link)."
+            )
+        here = staging
+        for part in parts:
+            if part not in os.listdir(here):
+                raise RuntimeError(
+                    f"artifact writer reported {path!r}, but {os.path.join(here, part)!r} "
+                    "is not spelled as on disk (letter case)."
+                )
+            here = os.path.join(here, part)
+        out.setdefault(os.path.normcase(here), here)
+    return list(out.values())
 
 
 def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
@@ -521,10 +552,11 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
     RuntimeError
         Naming every file claimed by more than one artifact.
     """
-    owners: dict[tuple[Any, ...], tuple[str, list[str]]] = {}
+    owners: dict[str, tuple[str, list[str]]] = {}
     for suffix, paths in written.items():
         for path in paths:
-            _name, group = owners.setdefault(_file_identity(path), (os.fspath(path), []))
+            key = os.path.normcase(os.path.realpath(os.fspath(path)))
+            _name, group = owners.setdefault(key, (os.fspath(path), []))
             if suffix not in group:
                 group.append(suffix)
     conflicts = [
@@ -555,9 +587,8 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     and BIDS names that differ only in ``_split-NN_``. The unit prefix is part of the name,
     so a source named ``..._split-01_meg.fif`` makes the BIDS rule apply to its outputs
     too, and the neuromag rule then keeps the recording together. A recording with both
-    reported and unreported files fails. Reported files are matched by file identity
-    (device and inode), so a report through a symbolic link, a hard link or another
-    spelling of the path still counts.
+    reported and unreported files fails. *written* must hold the spellings
+    :func:`canonical_reports` returns, the ones publication moves.
 
     Parameters
     ----------
@@ -613,16 +644,13 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     groups: dict[str, list[str]] = {}
     for k in paths:
         groups.setdefault(find(k), []).append(k)
-    # Reported files are matched by file identity, not spelling: a writer may report a
-    # file through a link or another spelling of its staging path.
-    owner = {_file_identity(p): suffix for suffix, reported in written.items() for p in reported}
+    owner = {key(p): suffix for suffix, reported in written.items() for p in reported}
     missing: list[str] = []
     for members in groups.values():
-        ids = {k: _file_identity(paths[k]) for k in members}
-        reported = [k for k in members if ids[k] in owner]
+        reported = [k for k in members if k in owner]
         if reported and len(reported) < len(members):
-            suffixes = sorted({owner[ids[k]] for k in reported})
-            names = sorted(os.path.basename(paths[k]) for k in members if ids[k] not in owner)
+            suffixes = sorted({owner[k] for k in reported})
+            names = sorted(os.path.basename(paths[k]) for k in members if k not in owner)
             missing.extend(f"{n} (artifact {', '.join(map(repr, suffixes))})" for n in names)
     if missing:
         raise RuntimeError(
