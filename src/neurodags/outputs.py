@@ -442,6 +442,19 @@ def check_legacy_chained_outputs(
 # ---------------------------------------------------------------------------
 
 
+def _file_identity(path: str) -> tuple[Any, ...]:
+    """What identifies the file *path* names: ``(st_dev, st_ino)`` when it exists, so
+    symbolic links, hard links and case or ``//`` spellings of one file compare equal;
+    otherwise (or where a filesystem reports no inode number) its lexical key."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        st = None
+    if st is not None and st.st_ino:
+        return st.st_dev, st.st_ino
+    return ("path", os.path.normcase(lexical_path_key(os.path.abspath(os.fspath(path)))))
+
+
 def writer_paths(target: str, returned: Any) -> list[str]:
     """Normalize what an artifact writer returned into the list of files it wrote.
 
@@ -484,7 +497,11 @@ def writer_paths(target: str, returned: Any) -> list[str]:
             f"{missing}. A writer must return the paths it wrote, or None after writing "
             "exactly the target path."
         )
-    return paths
+    # One file reported twice (another spelling, a link): keep its first spelling.
+    unique: dict[tuple[Any, ...], str] = {}
+    for p in paths:
+        unique.setdefault(_file_identity(p), p)
+    return list(unique.values())
 
 
 def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
@@ -504,16 +521,15 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
     RuntimeError
         Naming every file claimed by more than one artifact.
     """
-    owners: dict[str, list[str]] = {}
+    owners: dict[tuple[Any, ...], tuple[str, list[str]]] = {}
     for suffix, paths in written.items():
         for path in paths:
-            key = os.path.normcase(os.path.abspath(os.fspath(path)))
-            group = owners.setdefault(key, [])
+            _name, group = owners.setdefault(_file_identity(path), (os.fspath(path), []))
             if suffix not in group:
                 group.append(suffix)
     conflicts = [
-        f"{os.path.basename(key)} (artifacts {', '.join(repr(s) for s in suffixes)})"
-        for key, suffixes in owners.items()
+        f"{os.path.basename(name)} (artifacts {', '.join(repr(s) for s in suffixes)})"
+        for name, suffixes in owners.values()
         if len(suffixes) > 1
     ]
     if conflicts:
@@ -534,12 +550,14 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
 
     The FIF files in *staging* are joined into recordings by the rules discovery uses
     (:func:`neurodags.iterators.find_split_continuations`), each one wherever it applies,
-    so a file can be joined by both: a continuation ``X-1.fif`` (``X.fif-1.gz``) with its
-    entry ``X.fif`` (``X.fif.gz``) when that is in *staging*, and BIDS names that differ
-    only in ``_split-NN_``. The unit prefix is part of the name, so a source named
-    ``..._split-01_meg.fif`` makes the BIDS rule apply to its outputs too, and the
-    neuromag rule then keeps the recording together. A recording with both reported and
-    unreported files fails.
+    so a file can be joined by both: continuations ``X-1.fif``, ``X-2.fif``, ...
+    (``X.fif-1.gz``, ...) with each other and with their entry ``X.fif`` (``X.fif.gz``),
+    and BIDS names that differ only in ``_split-NN_``. The unit prefix is part of the name,
+    so a source named ``..._split-01_meg.fif`` makes the BIDS rule apply to its outputs
+    too, and the neuromag rule then keeps the recording together. A recording with both
+    reported and unreported files fails. Reported files are matched by file identity
+    (device and inode), so a report through a symbolic link, a hard link or another
+    spelling of the path still counts.
 
     Parameters
     ----------
@@ -582,7 +600,10 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     bids_first: dict[str, str] = {}
     for k, path in paths.items():
         part = neuromag_split_part(path)
-        if part is not None and key(part[0]) in paths:
+        if part is not None:
+            # Joined through the entry's name even when the entry is gone, so the parts of
+            # one recording stay together.
+            parent.setdefault(key(part[0]), key(part[0]))
             union(k, key(part[0]))
         dirpath, fname = os.path.split(path)
         if bids_split.search(fname):
@@ -592,13 +613,16 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     groups: dict[str, list[str]] = {}
     for k in paths:
         groups.setdefault(find(k), []).append(k)
-    owner = {key(p): suffix for suffix, reported in written.items() for p in reported}
+    # Reported files are matched by file identity, not spelling: a writer may report a
+    # file through a link or another spelling of its staging path.
+    owner = {_file_identity(p): suffix for suffix, reported in written.items() for p in reported}
     missing: list[str] = []
     for members in groups.values():
-        reported = [k for k in members if k in owner]
+        ids = {k: _file_identity(paths[k]) for k in members}
+        reported = [k for k in members if ids[k] in owner]
         if reported and len(reported) < len(members):
-            suffixes = sorted({owner[k] for k in reported})
-            names = sorted(os.path.basename(paths[k]) for k in members if k not in owner)
+            suffixes = sorted({owner[ids[k]] for k in reported})
+            names = sorted(os.path.basename(paths[k]) for k in members if ids[k] not in owner)
             missing.extend(f"{n} (artifact {', '.join(map(repr, suffixes))})" for n in names)
     if missing:
         raise RuntimeError(

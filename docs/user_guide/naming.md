@@ -235,8 +235,8 @@ BIDS names that differ only in `_split-NN_`), the unit fails instead of certifyi
 truncated recording. That happens with a writer that saves an MNE object larger than its
 split size and returns `None`, or returns only part of the list MNE's `save()` returns. Use
 `neurodags.writers.save_mne`, which returns every part. A writer's own scratch files must
-not be named like split parts of a FIF it reports (`X-1.fif` next to `X.fif`): they are
-indistinguishable from a lost part. Writers
+not be named like split parts of a FIF it reports (`X-1.fif` next to `X.fif`, or a name
+that differs from it only in `_split-NN_`): they are indistinguishable from a lost part. Writers
 that ignore `path` and write somewhere fixed cannot be published atomically and are not
 supported.
 

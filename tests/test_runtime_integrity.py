@@ -309,6 +309,78 @@ def test_split_check_compares_reported_paths_lexically(tmp_path):
     assert unit_state(str(base) + "@Rec", "Rec").state == "error"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+@pytest.mark.parametrize("layout", ["self", "real"])
+def test_split_check_matches_reports_through_a_link(tmp_path, layout):
+    """Review 87f3ef6 S1: a writer reporting part of a recording through a symbolic link
+    inside staging made the recording look wholly unreported (the walk sees the real
+    paths), and the .done certified 5,000 of 200,000 samples."""
+    big = _split_raw()
+
+    def writer(path):
+        if layout == "self":  # a link to the staging folder itself
+            files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+            alias = Path(path + ".alias")
+            alias.symlink_to(Path(path).parent, target_is_directory=True)
+        else:  # saved through a link to a real folder of the unit
+            real = Path(path + ".real")
+            real.mkdir()
+            alias = Path(path + ".alias")
+            alias.symlink_to(real, target_is_directory=True)
+            files = big.save(
+                str(alias / Path(path).name), split_size="2MB", overwrite=True, verbose="error"
+            )
+        return [str(alias / Path(files[-1]).name)]
+
+    @register_node(name="rt_split_link", override=True)
+    def node():
+        return NodeResult({".fif": Artifact(big, writer)})
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="did not report every file of an MNE split"):
+        run_derivative(_single("rt_split_link"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "error"
+
+
+def test_split_parts_join_without_their_entry(tmp_path):
+    """Review 87f3ef6 F2: continuations are one recording even when the writer removed
+    the entry; reporting one of them alone fails."""
+    big = _split_raw()
+
+    def writer(path):
+        files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        os.remove(files[0])
+        return files[1:2]
+
+    @register_node(name="rt_split_no_entry", override=True)
+    def node():
+        return NodeResult({".fif": Artifact(big, writer)})
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="did not report every file of an MNE split"):
+        run_derivative(_single("rt_split_no_entry"), "Rec", str(base), base)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="'//' is a UNC prefix on Windows")
+def test_one_file_reported_under_two_spellings_is_published_once(tmp_path):
+    """Review 87f3ef6 F3: [p, '//' + p] scheduled two moves of one file; the second failed
+    after the first had published it."""
+
+    @register_node(name="rt_twice", override=True)
+    def node():
+        def writer(path):
+            Path(path).write_text("x")
+            return [path, "/" + os.path.abspath(path)]
+
+        return NodeResult({".txt": Artifact("x", writer)})
+
+    base = _source(tmp_path)
+    run_derivative(_single("rt_twice"), "Rec", str(base), base)
+    state = unit_state(str(base) + "@Rec", "Rec")
+    assert state.state == "done"
+    assert state.artifacts[".txt"] == [str(base) + "@Rec.txt"]
+
+
 @pytest.mark.parametrize(
     ("suffix", "naming", "source"),
     [
