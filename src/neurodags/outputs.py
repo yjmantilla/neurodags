@@ -532,10 +532,14 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     the list MNE returns reports only some. The files it left out would be discarded with
     the staging folder and the ``.done`` would certify a truncated recording.
 
-    The FIF files in *staging* are grouped by recording, with the rules discovery uses
-    (:func:`neurodags.iterators.find_split_continuations`): ``X.fif`` with ``X-1.fif``,
-    ``X-2.fif``, ... (``X.fif.gz`` with ``X.fif-1.gz``, ...), and BIDS names that differ
-    only in ``_split-NN_``. A group with both reported and unreported files fails.
+    The FIF files in *staging* are joined into recordings by the rules discovery uses
+    (:func:`neurodags.iterators.find_split_continuations`), each one wherever it applies,
+    so a file can be joined by both: a continuation ``X-1.fif`` (``X.fif-1.gz``) with its
+    entry ``X.fif`` (``X.fif.gz``) when that is in *staging*, and BIDS names that differ
+    only in ``_split-NN_``. The unit prefix is part of the name, so a source named
+    ``..._split-01_meg.fif`` makes the BIDS rule apply to its outputs too, and the
+    neuromag rule then keeps the recording together. A recording with both reported and
+    unreported files fails.
 
     Parameters
     ----------
@@ -554,33 +558,47 @@ def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[st
     bids_split = re.compile(r"_split-\d+_")
 
     def key(path: str) -> str:
-        return os.path.normcase(os.path.abspath(os.fspath(path)))
+        return os.path.normcase(lexical_path_key(os.path.abspath(os.fspath(path))))
 
-    def recording(path: str) -> tuple[str, str] | None:
-        part = neuromag_split_part(path)  # X-1.fif, X.fif-1.gz (only FIF entries)
-        if part is not None:
-            return "neuromag", key(part[0])
-        if not path.lower().endswith((".fif", ".fif.gz")):
-            return None
-        dirpath, fname = os.path.split(path)
-        if bids_split.search(fname):
-            return "bids", key(os.path.join(dirpath, bids_split.sub("_split-_", fname)))
-        return "neuromag", key(path)
-
-    owner = {key(p): suffix for suffix, paths in written.items() for p in paths}
-    groups: dict[tuple[str, str], list[str]] = {}
+    # Every FIF file or neuromag part in staging, by key.
+    paths: dict[str, str] = {}
     for dirpath, _dirs, files in os.walk(staging):
         for fname in sorted(files):
             path = os.path.join(dirpath, fname)
-            group = recording(path)
-            if group is not None:
-                groups.setdefault(group, []).append(path)
+            if neuromag_split_part(path) or path.lower().endswith((".fif", ".fif.gz")):
+                paths[key(path)] = path
+
+    parent = {k: k for k in paths}
+
+    def find(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def union(a: str, b: str) -> None:
+        parent[find(a)] = find(b)
+
+    bids_first: dict[str, str] = {}
+    for k, path in paths.items():
+        part = neuromag_split_part(path)
+        if part is not None and key(part[0]) in paths:
+            union(k, key(part[0]))
+        dirpath, fname = os.path.split(path)
+        if bids_split.search(fname):
+            group = key(os.path.join(dirpath, bids_split.sub("_split-_", fname)))
+            union(k, bids_first.setdefault(group, k))
+
+    groups: dict[str, list[str]] = {}
+    for k in paths:
+        groups.setdefault(find(k), []).append(k)
+    owner = {key(p): suffix for suffix, reported in written.items() for p in reported}
     missing: list[str] = []
-    for paths in groups.values():
-        reported = [p for p in paths if key(p) in owner]
-        if reported and len(reported) < len(paths):
-            suffixes = sorted({owner[key(p)] for p in reported})
-            names = [os.path.basename(p) for p in paths if key(p) not in owner]
+    for members in groups.values():
+        reported = [k for k in members if k in owner]
+        if reported and len(reported) < len(members):
+            suffixes = sorted({owner[k] for k in reported})
+            names = sorted(os.path.basename(paths[k]) for k in members if k not in owner)
             missing.extend(f"{n} (artifact {', '.join(map(repr, suffixes))})" for n in names)
     if missing:
         raise RuntimeError(

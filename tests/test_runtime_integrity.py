@@ -234,23 +234,39 @@ def _split_raw():
     )
 
 
+_BIDS_SOURCE = "sub-01_task-rest_split-01_meg.fif"  # a BIDS split entry discovery keeps
+
+
 @pytest.mark.parametrize(
-    ("suffix", "naming", "keep"),
+    ("suffix", "naming", "keep", "source"),
     [
-        (".fif", "neuromag", None),  # def w(p): raw.save(p)  -> reports only X.fif
-        (".fif.gz", "neuromag", None),
-        (".fif", "neuromag", slice(0, 2)),
-        (".fif", "neuromag", slice(1, None)),  # entry left out: would reload truncated
-        (".eeg_raw.fif", "bids", slice(0, 1)),
-        (".eeg_raw.fif.gz", "bids", slice(0, 2)),
-        (".eeg_raw.fif", "bids", slice(1, None)),
+        (".fif", "neuromag", None, "source"),  # def w(p): raw.save(p) -> reports only X.fif
+        (".fif.gz", "neuromag", None, "source"),
+        (".fif", "neuromag", slice(0, 2), "source"),
+        (".fif", "neuromag", slice(1, None), "source"),  # entry left out: reloads truncated
+        (".eeg_raw.fif", "bids", slice(0, 1), "source"),
+        (".eeg_raw.fif.gz", "bids", slice(0, 2), "source"),
+        (".eeg_raw.fif", "bids", slice(1, None), "source"),
+        # review 1aa9f2b R1: the unit prefix carries _split-01_ from a BIDS split source
+        (".fif", "neuromag", None, _BIDS_SOURCE),
+        (".fif", "neuromag", slice(0, 1), _BIDS_SOURCE),
+        (".fif", "neuromag", slice(1, None), _BIDS_SOURCE),
+        (".fif.gz", "neuromag", None, _BIDS_SOURCE),
+        (".eeg_raw.fif", "bids", slice(1, None), _BIDS_SOURCE),
+        # ... and suffixes ending in a numeric tail
+        (".x-1.fif", "neuromag", slice(0, 1), "source"),
+        (".x-1.fif", "neuromag", slice(1, None), "source"),
+        (".eeg_raw-1.fif", "bids", slice(0, 1), "source"),
+        (".eeg_raw-1.fif", "bids", slice(1, None), "source"),
     ],
 )
-def test_writer_not_reporting_its_split_parts_fails_the_unit(tmp_path, suffix, naming, keep):
-    """Ship review 8adb7eb B1 and review 2b670e4 A/B: a writer that saved a split MNE
-    recording but reported only some of its files (None, or a slice of what save()
-    returns) had the others deleted with the staging folder, and the .done certified a
-    truncated recording. The unit now fails and nothing is published."""
+def test_writer_not_reporting_its_split_parts_fails_the_unit(
+    tmp_path, suffix, naming, keep, source
+):
+    """Ship review 8adb7eb B1, reviews 2b670e4 A/B and 1aa9f2b R1: a writer that saved a
+    split MNE recording but reported only some of its files (None, or a slice of what
+    save() returns) had the others deleted with the staging folder, and the .done
+    certified a truncated recording. The unit now fails and nothing is published."""
     big = _split_raw()
 
     def writer(path):
@@ -264,12 +280,68 @@ def test_writer_not_reporting_its_split_parts_fails_the_unit(tmp_path, suffix, n
     def node():
         return NodeResult({suffix: Artifact(big, writer)})
 
-    base = _source(tmp_path)
+    base = tmp_path / source
+    base.write_text("source")
     with pytest.raises(RuntimeError, match="did not report every file of an MNE split"):
         run_derivative(_single("rt_split_unreported"), "Rec", str(base), base)
     prefix = str(base) + "@Rec"
     assert unit_state(prefix, "Rec").state == "error"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["source", "source@Rec.error"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [source, source + "@Rec.error"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="'//' is a UNC prefix on Windows")
+def test_split_check_compares_reported_paths_lexically(tmp_path):
+    """Review 1aa9f2b R2: a writer reporting '//tmp/...' for '/tmp/...' (the same file)
+    made every file of the recording look unreported, so the check never ran."""
+    big = _split_raw()
+
+    def writer(path):
+        files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        return ["/" + os.path.abspath(f) for f in files[1:]]
+
+    @register_node(name="rt_split_alias", override=True)
+    def node():
+        return NodeResult({".fif": Artifact(big, writer)})
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="did not report every file of an MNE split"):
+        run_derivative(_single("rt_split_alias"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "error"
+
+
+@pytest.mark.parametrize(
+    ("suffix", "naming", "source"),
+    [
+        (".fif", "neuromag", _BIDS_SOURCE),
+        (".x-1.fif", "neuromag", "source"),
+        (".eeg_raw-1.fif", "bids", "source"),
+        (".eeg_raw.fif", "bids", _BIDS_SOURCE),
+    ],
+)
+def test_split_recording_reported_in_full_is_published(tmp_path, suffix, naming, source):
+    big = _split_raw()
+
+    @register_node(name="rt_split_full", override=True)
+    def node():
+        return NodeResult(
+            {
+                suffix: Artifact(
+                    big,
+                    lambda p: big.save(
+                        p, split_size="2MB", split_naming=naming, overwrite=True, verbose="error"
+                    ),
+                )
+            }
+        )
+
+    base = tmp_path / source
+    base.write_text("source")
+    run_derivative(_single("rt_split_full"), "Rec", str(base), base)
+    state = unit_state(str(base) + "@Rec", "Rec")
+    assert state.state == "done"
+    assert len(state.artifacts[suffix]) > 2
+    loaded = mne.io.read_raw_fif(state.artifacts[suffix][0], preload=True, verbose="error")
+    assert loaded.n_times == big.n_times
 
 
 @pytest.mark.parametrize("suffix", [".eeg_raw.fif", ".eeg_raw.fif.gz"])

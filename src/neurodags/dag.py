@@ -887,8 +887,8 @@ def _save_final_artifacts(
        reports (:func:`neurodags.outputs.writer_paths`). A writer whose target another
        artifact already reported is not run, and two artifacts reporting the same file fail
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
-       untouched in both cases. MNE split parts a writer wrote without reporting them
-       fail the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
+       untouched in both cases. An MNE split recording of which a writer reported only
+       some files fails the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
     4. Move every staged file into place with ``os.replace``, continuation parts first and
        main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
        old file or a complete new one, never a partial one.
