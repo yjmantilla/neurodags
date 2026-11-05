@@ -45,6 +45,7 @@ partially written one. A staging folder left by a killed process is ignored ever
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
@@ -75,18 +76,25 @@ __all__ = [
     "UnitState",
     "UnitStatus",
     "build_manifest",
+    "canonical_reports",
     "check_artifact_ownership",
     "check_legacy_chained_outputs",
     "check_output_collisions",
+    "check_reports_unchanged",
+    "check_unreported_split_parts",
     "dataset_derivatives_base",
     "entry_reference_base",
     "file_fingerprint",
+    "file_identity",
     "is_staging_name",
+    "looks_like_staging",
     "make_staging_dir",
     "manifest_artifacts",
     "marker_path",
+    "move_staged",
     "output_prefix",
     "output_reference_base",
+    "plan_publication",
     "publish_marker",
     "publish_staged",
     "read_manifest",
@@ -108,6 +116,9 @@ _SPLIT_NAME_RE = re.compile(r"(.+)-([0-9]+)")
 #: Marks a staging folder: ``.<prefix basename>.tmp~<token>``. ``~`` is not allowed in a
 #: suffix, so the name never parses as an output (:func:`neurodags.naming.parse_output_basename`).
 STAGING_TAG = ".tmp~"
+_STAGING_NAME_RE = re.compile(
+    r"\..*@.+" + re.escape(STAGING_TAG) + r"[0-9a-f]{16}", re.DOTALL  # any basename, newlines too
+)
 
 UnitStatus = Literal["done", "error", "skipped", "incomplete", "missing"]
 
@@ -336,7 +347,7 @@ def check_legacy_chained_outputs(
                     d
                     for d in dirnames
                     if (dirpath != root or d not in ("code", ".neurodags"))
-                    and not is_staging_name(d)
+                    and not looks_like_staging(d)
                 )
                 for fname in sorted(filenames):
                     yield dirpath, fname
@@ -480,6 +491,127 @@ def writer_paths(target: str, returned: Any) -> list[str]:
     return paths
 
 
+def canonical_reports(staging: str, paths: Sequence[str]) -> list[str]:
+    """The files a writer reported, spelled as the directory entries they are in *staging*.
+
+    Each path is resolved (:func:`os.path.realpath`: folder links, ``..``, ``//``) and
+    re-spelled below *staging* with every component exactly as the folder lists it, so the
+    split-recording check (:func:`check_unreported_split_parts`) and publication see the
+    same names. Hard links stay separate names. Duplicates are dropped, keeping the first.
+
+    Raises
+    ------
+    RuntimeError
+        If a reported file resolves outside *staging*, is itself a symbolic link (publishing
+        its target would rename the file), or names an entry with other letter case than the
+        folder lists (a case-insensitive filesystem).
+    """
+    base = os.path.realpath(staging)
+    lexical_base = os.path.normcase(lexical_path_key(os.path.abspath(staging)))
+    listings: dict[str, frozenset[str]] = {}
+    out: dict[str, str] = {}
+    for path in paths:
+        try:
+            rel = os.path.relpath(os.path.realpath(path), base)
+        except ValueError:  # another drive (Windows)
+            rel = os.pardir
+        parts = rel.split(os.sep)
+        if os.path.isabs(rel) or rel == os.curdir or parts[0] == os.pardir:
+            lexical = os.path.normcase(lexical_path_key(os.path.abspath(path)))
+            try:
+                inside = os.path.commonpath([lexical, lexical_base]) == lexical_base
+            except ValueError:  # another drive (Windows)
+                inside = False
+            if not inside:
+                out.setdefault(lexical, path)  # plan_publication refuses it
+                continue
+            raise RuntimeError(
+                f"artifact writer reported {path!r}, which resolves outside the folder it "
+                "was given (also through a symbolic link)."
+            )
+        if os.path.islink(path):
+            raise RuntimeError(
+                f"artifact writer reported {path!r}, which is a symbolic link; report the "
+                "file it points to instead."
+            )
+        here = staging
+        for part in parts:
+            if here not in listings:
+                listings[here] = frozenset(os.listdir(here))
+            if part not in listings[here]:
+                raise RuntimeError(
+                    f"artifact writer reported {path!r}, but {os.path.join(here, part)!r} "
+                    "is not spelled as on disk (letter case)."
+                )
+            here = os.path.join(here, part)
+        out.setdefault(os.path.normcase(here), here)
+    return list(out.values())
+
+
+def file_identity(path: str) -> tuple[int, int]:
+    """``(size, mtime_ns)`` of the entry *path* (a link itself, not followed).
+
+    Inode and device numbers are left out: some filesystems (FAT, CIFS ``noserverino``,
+    FUSE without ``use_ino``) may renumber an unchanged file during a run.
+    """
+    st = os.lstat(path)
+    return st.st_size, st.st_mtime_ns
+
+
+def check_reports_unchanged(
+    staging: str,
+    staged: Mapping[str, Sequence[str]],
+    identities: Mapping[str, Sequence[tuple[int, int]]],
+) -> None:
+    """Refuse files that were removed or changed after the writer that reported them returned.
+
+    A later artifact's writer can remove, move, replace (by a link, a hard link or a copy) or
+    rewrite a file an earlier artifact reported; the ``.done`` would then certify a file its
+    writer did not write (for example the first part of an MNE split recording replaced by
+    its last part). Changes are detected by size and modification time, not by content: a
+    same-size rewrite that keeps the modification time (restored, or within one tick of a
+    coarse filesystem clock) is not seen.
+
+    Parameters
+    ----------
+    staging : str
+        The unit's staging folder.
+    staged : mapping of suffix to paths
+        Each artifact's files, as :func:`canonical_reports` returned them after its writer.
+    identities : mapping of suffix to identities
+        :func:`file_identity` of each of those files, taken right after its writer.
+
+    Raises
+    ------
+    RuntimeError
+        If a file is gone, is now a link, changed size or modification time, or is no
+        longer reached under the same spelling inside *staging*.
+    """
+    for suffix, paths in staged.items():
+        changed = []
+        for path, identity in zip(paths, identities[suffix], strict=True):
+            try:
+                if file_identity(path) != identity:
+                    changed.append(path)
+            except OSError:
+                changed.append(path)
+        if not changed:
+            try:
+                again = canonical_reports(staging, paths)
+                changed = [p for p, q in zip(paths, again, strict=False) if p != q]
+                if not changed and len(again) != len(paths):
+                    changed = list(paths)
+            except (RuntimeError, OSError):
+                changed = list(paths)
+        if changed:
+            raise RuntimeError(
+                f"files of artifact {suffix!r} were removed or changed after its writer "
+                f"returned (by a later artifact's writer, or a file the writer left open?): "
+                f"{changed}. A writer may read files another artifact reported, but must not "
+                "change them or open them for writing."
+            )
+
+
 def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
     """Refuse a file claimed by two artifacts of one unit.
 
@@ -497,16 +629,16 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
     RuntimeError
         Naming every file claimed by more than one artifact.
     """
-    owners: dict[str, list[str]] = {}
+    owners: dict[str, tuple[str, list[str]]] = {}
     for suffix, paths in written.items():
         for path in paths:
-            key = os.path.normcase(os.path.abspath(os.fspath(path)))
-            group = owners.setdefault(key, [])
+            key = os.path.normcase(os.path.realpath(os.fspath(path)))
+            _name, group = owners.setdefault(key, (os.fspath(path), []))
             if suffix not in group:
                 group.append(suffix)
     conflicts = [
-        f"{os.path.basename(key)} (artifacts {', '.join(repr(s) for s in suffixes)})"
-        for key, suffixes in owners.items()
+        f"{os.path.basename(name)} (artifacts {', '.join(repr(s) for s in suffixes)})"
+        for name, suffixes in owners.values()
         if len(suffixes) > 1
     ]
     if conflicts:
@@ -517,13 +649,108 @@ def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:
         )
 
 
+def check_unreported_split_parts(staging: str, written: Mapping[str, Sequence[str]]) -> None:
+    """Refuse an MNE split recording of which a writer reported only some files.
+
+    A writer that saves an MNE object larger than its split size and returns ``None``
+    (``def w(path): raw.save(path)``) reports only the first file; a writer that slices
+    the list MNE returns reports only some. The files it left out would be discarded with
+    the staging folder and the ``.done`` would certify a truncated recording.
+
+    The FIF files in *staging* are joined into recordings by the rules discovery uses
+    (:func:`neurodags.iterators.find_split_continuations`), each one wherever it applies,
+    so a file can be joined by both: continuations ``X-1.fif``, ``X-2.fif``, ...
+    (``X.fif-1.gz``, ...) with each other and with their entry ``X.fif`` (``X.fif.gz``),
+    and BIDS names that differ only in ``_split-NN_``. The unit prefix is part of the name,
+    so a source named ``..._split-01_meg.fif`` makes the BIDS rule apply to its outputs
+    too, and the neuromag rule then keeps the recording together. A recording with both
+    reported and unreported files fails. *written* must hold the spellings
+    :func:`canonical_reports` returns, the ones publication moves.
+
+    Parameters
+    ----------
+    staging : str
+        The unit's staging folder.
+    written : mapping of suffix to paths
+        The files each artifact reported.
+
+    Raises
+    ------
+    RuntimeError
+        Naming the unreported files and the artifacts their recording belongs to.
+    """
+    from neurodags.iterators import neuromag_split_part
+
+    bids_split = re.compile(r"_split-\d+_")
+
+    def key(path: str) -> str:
+        return os.path.normcase(lexical_path_key(os.path.abspath(os.fspath(path))))
+
+    # Every FIF file or neuromag part in staging, by key.
+    paths: dict[str, str] = {}
+    for dirpath, _dirs, files in os.walk(staging):
+        for fname in sorted(files):
+            path = os.path.join(dirpath, fname)
+            if neuromag_split_part(path) or path.lower().endswith((".fif", ".fif.gz")):
+                paths[key(path)] = path
+
+    parent = {k: k for k in paths}
+
+    def find(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def union(a: str, b: str) -> None:
+        parent[find(a)] = find(b)
+
+    bids_first: dict[str, str] = {}
+    for k, path in paths.items():
+        part = neuromag_split_part(path)
+        if part is not None:
+            # Joined through the entry's name even when the entry is gone, so the parts of
+            # one recording stay together.
+            parent.setdefault(key(part[0]), key(part[0]))
+            union(k, key(part[0]))
+        dirpath, fname = os.path.split(path)
+        if bids_split.search(fname):
+            group = key(os.path.join(dirpath, bids_split.sub("_split-_", fname)))
+            union(k, bids_first.setdefault(group, k))
+
+    groups: dict[str, list[str]] = {}
+    for k in paths:
+        groups.setdefault(find(k), []).append(k)
+    owner = {key(p): suffix for suffix, reported in written.items() for p in reported}
+    missing: list[str] = []
+    for members in groups.values():
+        reported = [k for k in members if k in owner]
+        if reported and len(reported) < len(members):
+            suffixes = sorted({owner[k] for k in reported})
+            names = sorted(os.path.basename(paths[k]) for k in members if k not in owner)
+            missing.extend(f"{n} (artifact {', '.join(map(repr, suffixes))})" for n in names)
+    if missing:
+        raise RuntimeError(
+            "an artifact writer did not report every file of an MNE split recording: "
+            f"{', '.join(missing)}. Return every file written (neurodags.writers.save_mne "
+            "does) and do not leave other files named like split parts."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Atomic publication (spec 6.2)
 # ---------------------------------------------------------------------------
 
 
 def is_staging_name(basename: str) -> bool:
-    """Whether *basename* is a staging folder (``.<prefix basename>.tmp~<token>``)."""
+    """Whether *basename* is a staging folder (``.<prefix basename>.tmp~<token>``, the
+    name :func:`make_staging_dir` gives: an output prefix and a 16-hex-digit token)."""
+    return _STAGING_NAME_RE.fullmatch(basename) is not None
+
+
+def looks_like_staging(basename: str) -> bool:
+    """Whether *basename* is a hidden folder named like a staging folder (``.…tmp~…``):
+    never scanned as outputs. :func:`is_staging_name` decides what counts as one."""
     return basename.startswith(".") and STAGING_TAG in basename
 
 
@@ -534,7 +761,11 @@ def _staging_glob(prefix: str) -> str:
 
 def staging_dirs(prefix: str) -> list[str]:
     """Staging folders of one unit on disk (live ones of a running job, or left by a killed one)."""
-    return sorted(p for p in glob.glob(_staging_glob(prefix)) if os.path.isdir(p))
+    return sorted(
+        p
+        for p in glob.glob(_staging_glob(prefix))
+        if is_staging_name(os.path.basename(p)) and os.path.isdir(p)
+    )
 
 
 def make_staging_dir(prefix: str) -> str:
@@ -552,6 +783,18 @@ def make_staging_dir(prefix: str) -> str:
 
 def remove_staging_dir(path: str) -> None:
     """Delete a staging folder (after publishing or after a failure)."""
+    shutil.rmtree(path, ignore_errors=True)
+    if not os.path.lexists(path):
+        return
+    # A writer left a folder unreadable or unwritable: restore access and try again.
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o700)
+    for dirpath, dirnames, _ in os.walk(path):
+        for name in dirnames:
+            sub = os.path.join(dirpath, name)
+            if not os.path.islink(sub):
+                with contextlib.suppress(OSError):
+                    os.chmod(sub, 0o700)
     shutil.rmtree(path, ignore_errors=True)
 
 
@@ -616,6 +859,17 @@ def publish_staged(
         a file whose name is not owned by the unit (its first path component must start with
         the prefix basename, see :func:`_unit_namespace_problem`). Nothing is moved then.
     """
+    final, ordered = plan_publication(staging, prefix, staged)
+    move_staged(ordered)
+    return final
+
+
+def plan_publication(
+    staging: str, prefix: str, staged: Mapping[str, Sequence[str]]
+) -> tuple[dict[str, list[str]], list[tuple[str, str]]]:
+    """The checks of :func:`publish_staged` (same errors) without moving anything: the final
+    paths per suffix and the ``(staged, final)`` moves in publication order (continuation
+    files first, main files last), for :func:`move_staged`."""
     directory, base = os.path.split(prefix)
     root = os.path.abspath(staging)
     final: dict[str, list[str]] = {}
@@ -624,7 +878,10 @@ def publish_staged(
     for suffix, paths in staged.items():
         final[suffix] = []
         for index, path in enumerate(paths):
-            rel = os.path.relpath(os.path.abspath(path), root)
+            try:
+                rel = os.path.relpath(os.path.abspath(path), root)
+            except ValueError:  # another drive (Windows)
+                rel = os.pardir
             if rel == os.curdir or rel.startswith(os.pardir) or os.path.isabs(rel):
                 raise RuntimeError(
                     f"artifact writer for {suffix!r} reported {path!r}, outside the path it "
@@ -641,12 +898,19 @@ def publish_staged(
             target = os.path.join(directory, rel)
             final[suffix].append(target)
             (mains if index == 0 else moves).append((path, target))
-    for source, target in moves + mains:
+    return final, moves + mains
+
+
+def move_staged(ordered: Sequence[tuple[str, str]], moved: list[str] | None = None) -> None:
+    """Move staged files into place with ``os.replace``, in the given order; each target
+    is appended to *moved* once it is in place."""
+    for source, target in ordered:
         parent = os.path.dirname(target)
         if parent:
             os.makedirs(parent, exist_ok=True)
         os.replace(source, target)
-    return final
+        if moved is not None:
+            moved.append(target)
 
 
 # ---------------------------------------------------------------------------

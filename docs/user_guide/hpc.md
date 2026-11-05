@@ -357,9 +357,10 @@ Things to keep in mind:
   {ref}`Atomic publication <naming-atomic-publication>`), so a task killed by a time limit,
   preemption or `scancel` (`SIGTERM` or `SIGKILL`) leaves no partial file at an output name and
   no `.done`; the retry recomputes the unit. It may leave its staging folder
-  (`.<output prefix>.tmp~<token>/`), which nothing reads; `neurodags status` counts them.
-  Delete them when no job is writing to the tree, e.g.
-  `find <derivatives_path> -name '.*.tmp~*' -prune -mmin +1440 -exec rm -rf {} +`.
+  (`.<output prefix>.tmp~<token>/`); `neurodags status` counts them. A task stopped while
+  moving files into place leaves a unit that may be half-published, and its staging folder
+  is the trace of that: recompute such units (`status` says which have no `.done`) before
+  deleting their staging folders (see {ref}`Atomic publication <naming-atomic-publication>`).
 - **Never run two tasks on the same unit at once, and never overwrite a unit another task is
   reading.** This is not supported (see {ref}`Concurrency <naming-concurrency>`): interleaved
   publications can mix files of two runs (detected afterwards by the `.done` fingerprints, so
@@ -423,6 +424,6 @@ run_pipeline(config, inputs="inputs.tsv", only_index=index, skip_errors=True)
 | Outputs computed on another mount | Copy the derivatives tree as is with `rsync -a` or `cp -a`: manifests list files relative to their folder and record their size and modification time, so the copy verifies on the new mount as long as the paths below `source_root` are the same (a plain `cp` changes mtimes and the units are recomputed) |
 | Debugging | Run `dry_run=True` first; check `has_error_marker` column for prior failures |
 | `--only-index` errors | An unknown or negative index is an error (exit `2`), never ignored: size the array from `count-inputs --inputs inputs.tsv`, and pass the same `--inputs` list to `status` and the workers |
-| Upgrading from 0.3.x | File indices changed once (sorted discovery) and the templates changed (frozen input list, `load_pipeline_configuration`, `base_dir=`): regenerate the scripts with `neurodags slurm-script` and run `neurodags migrate` once per output tree (see {doc}`migrating_to_0_4`) |
+| Upgrading from 0.3.x | File indices changed once (sorted discovery) and the templates changed (frozen input list, `load_pipeline_configuration`, `base_dir=`): regenerate the scripts with `neurodags slurm-script` and run `neurodags migrate` once per output tree, on each mount **before** its first 0.4.0 job (`neurodags migrate pipeline.yml -m hpc --legacy-tree --apply` after the configuration was migrated elsewhere; see {doc}`migrating_to_0_4`) |
 | Array size limit | Most clusters cap at 1000–10000 tasks; split `--array` into index-range batches (e.g. `0-999`, `1000-1999`). With a frozen `inputs.tsv`, each task ID maps to the same file in every batch, so range batching is safe and idempotent — cached files are skipped automatically on resubmit |
 | Index order | Files are sorted by their path below `source_root` in code-point order (`sub-10` before `sub-2`); zero-pad labels (`sub-02`) for a natural order |

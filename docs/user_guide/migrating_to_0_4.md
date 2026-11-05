@@ -11,15 +11,35 @@
    resolve every `REFUSED` line. The most common one is a
    [pilot copy next to a full-run copy](#pilot-duplicates).
 4. **Apply once per output tree / mount**: `neurodags migrate pipeline.yml --apply`, then
-   `neurodags migrate pipeline.yml -m hpc --apply` on the other machine.
+   `neurodags migrate pipeline.yml -m hpc --legacy-tree --apply` on the other machine,
+   **before** running 0.4.0 there (see [another mount's tree](#second-mount)).
 5. **Check** with `neurodags status pipeline.yml` (migrated units show as `done` with a
    `(migrated)` count).
 6. **Rebuild dataframes** with `neurodags dataframe` (column names changed).
 7. **Update downstream code** with the report's `column_map` (`X__error` → `X.error`,
-   coordinate encoding), and edit chained `file_pattern`s that name old `@Token` outputs.
+   coordinate encoding), and edit chained `file_pattern`s and scripts that name old
+   `@Token` outputs (see [Consumers of output file names](#file-name-consumers)).
 8. **Regenerate SLURM scripts and input lists**: `neurodags slurm-script ...`, then
    `neurodags inputs pipeline.yml -o inputs.tsv` (file indices changed once: discovery is
    now sorted).
+```
+
+(mixed-versions)=
+
+```{admonition} Do not mix versions on one output tree
+:class: warning
+
+After `neurodags migrate --apply`, use 0.4.x for every job that writes to that tree.
+neurodags 0.3.x ignores `naming_version` and the `.done` manifests. Depending on the
+derivative name and folder, it recomputes outputs under the old names, or takes the 0.4.0
+files (including the `.done` file itself) as its own cached outputs and reuses or
+overwrites them. Update every environment that
+writes to the tree (cluster virtual environments, colleagues, SLURM arrays already queued)
+before or together with the migration.
+
+If you cannot migrate a project yet, pin `neurodags<0.4`. Packages that depend on neurodags
+should declare an upper bound: `neurodags>=0.3.6,<0.4` until they handle the 0.4.0 file and
+column names, then `neurodags>=0.4,<0.5`.
 ```
 
 neurodags 0.4.0 changes how outputs are named, where they go and when they count as done
@@ -43,7 +63,7 @@ It **previews by default** and changes nothing until you add `--apply`.
 ```text
 neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
                   [--apply] [--report plan.json] [--map OLD=NEW ...]
-                  [--legacy-cwd DIR] [--no-synthesize]
+                  [--legacy-cwd DIR] [--no-synthesize] [--legacy-tree]
                   [--source-root DATASET[:MOUNT]=PATH ...] [--upstream-map OLDTOKEN=NEWNAME ...]
 ```
 
@@ -76,11 +96,36 @@ neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
    after every move succeeded. Re-running is safe: an applied plan is a no-op
    (`Nothing to migrate`), and an interrupted run continues where it stopped.
 
+   (second-mount)=
+
    On a second machine or mount (say `hpc`), run it again there after the configuration
-   was migrated: `neurodags migrate pipeline.yml -m hpc --apply`. The configuration is
-   already at `naming_version: 1`, so only that mount's tree is migrated. Keep the
-   `pipeline.yml.bak-0.3` backup next to the pipeline (it shows the configuration was
-   migrated by this tool) and pass the same `--map` options as the first time.
+   was migrated, **before any 0.4.0 `run` on that mount**:
+
+   ```bash
+   neurodags migrate pipeline.yml -m hpc --legacy-tree             # preview
+   neurodags migrate pipeline.yml -m hpc --legacy-tree --apply
+   ```
+
+   The configuration is already at `naming_version: 1`, so only that mount's tree is
+   migrated. Keep the `pipeline.yml.bak-0.3` backup next to the pipeline (it shows the
+   configuration was migrated by this tool) and pass the same `--map` options as the first
+   time. Outputs whose names change are moved and certified either way. Outputs whose
+   names do **not** change (a derivative already spelled `CleanLegacy` in the YAML, or
+   pinned with `--map`) are already at their 0.4.0 names, and with a 0.4.0 configuration
+   such files could also be left by an interrupted 0.4.0 `run`: without `--legacy-tree`
+   they get no `.done` and the next run recomputes them (the preview says how many).
+   `--legacy-tree` states that this tree was written by 0.3.x only, so they are certified
+   too. It is refused for an output tree that shows a 0.4.0 run: anywhere in it (outside
+   `code/` and other datasets' nested output trees), a `.done` written by `run` (valid or
+   not, of any derivative or dataset) or a run's staging folder (a run stopped after it
+   began moving a unit's files keeps it until the unit's `.done` exists; do not delete
+   it). Two pipelines sharing one `derivatives_path` share this check. A unit with a file
+   the interrupted migration moved and that changed since (or a split recording missing
+   one of its parts) is never certified, with or without `--legacy-tree`: the resuming
+   `--apply` marks it `.error`, so the next `neurodags run` recomputes it. Re-running
+   `--legacy-tree` once nothing is left to certify is a no-op. Running 0.4.0 on a mount
+   before migrating it recomputes its outputs and can make the later migration refuse
+   (two sets of outputs for one unit).
 6. **Check:** `neurodags status pipeline.yml`. Migrated units are counted as `done`, with a
    `(migrated)` column; `--format json --include-files` labels them `done (migrated)`.
    Units without a `.done` (partial or errored ones, see below) show as `incomplete` or
@@ -89,7 +134,9 @@ neurodags migrate pipeline.yml [-d datasets.yml] [-m/--mount-point NAME]
    [Dataframe consumers](#dataframe-consumers)).
 8. **Update downstream code** (analysis scripts, notebooks, other pipelines) using the
    column map of the report, and patterns such as `*@CleanPrep.fif` that refer to output
-   file names (printed by the preview, never edited by migrate; see
+   file names (the preview prints those it finds in the YAML files next to the pipeline;
+   scripts and notebooks are yours to check; migrate never edits them; see
+   [Consumers of output file names](#file-name-consumers) and
    [Chained pipelines](#chained-pipelines)).
 9. **Regenerate HPC scripts**: file indices changed once (sorted discovery) and the
    `slurm-script` templates now use a frozen `inputs.tsv`; regenerate them and the list (see
@@ -185,7 +232,12 @@ A recording whose file name does not change (only its folder) is moved part by p
 rewriting (the parts refer to each other by base name only). Before the first move its
 headers are read (a recording that does not open is left in place) and the complete part
 list, destinations and data shape are written to the journal, once per recording, so any
-number of interrupted runs rejoin the parts across both folders. Before its `.done` is
+number of interrupted runs rejoin the parts across both folders. A part already moved is
+rejoined only if its journal record proves it unchanged since (size and modification time,
+written to disk before the part is moved); a part without that proof (a journal lost in a
+power failure, or one written by a 0.4.0 pre-release) is left where it is, the recording
+stays incomplete (the resuming `--apply` marks it `.error`), and the next `neurodags run`
+recomputes it. Before its `.done` is
 written the recording is loaded in full (every data buffer read): MNE must read exactly the
 listed parts, and the data shape must equal the one recorded before the move.
 
@@ -294,6 +346,27 @@ legacy_column_to_new("psd__error", ["psd"])                # 'psd.error'
 
 The reliable path is to rebuild the dataframe from the (unchanged) artifacts with 0.4.0.
 
+(file-name-consumers)=
+
+## Consumers of output file names
+
+Scripts that find outputs by file name (`glob("**/sub-01*@CleanFixed.nc")`) see two
+changes; migrate never edits them:
+
+- **The `@Token` is the YAML name, verbatim.** 0.3.x wrote the CamelCase form
+  (`clean_fixed` → `@CleanFixed`); 0.4.0 writes `@clean_fixed`. A derivative already
+  spelled in CamelCase in the YAML (`CleanFixed`) keeps its token. The preview's move list
+  shows every old → new name. To keep the old tokens instead, rename the derivative while
+  migrating: `--map clean_fixed=CleanFixed` (on every mount, with `--legacy-tree` on the
+  others, see [another mount's tree](#second-mount)).
+- **Folders** follow the source tree below `source_root`. Full-run trees already did; trees
+  of pilot runs on a subset of files (flat or shallower in 0.3.x) move. `**/` globs are not
+  affected.
+
+File **indices** changed once too (discovery is sorted): an index list, array ID or
+`--only-index` value saved with 0.3.x points at another file now. Regenerate them from
+`neurodags inputs` (see {doc}`hpc`).
+
 (chained-pipelines)=
 
 ## Chained pipelines
@@ -398,4 +471,6 @@ Nothing is applied while any of these remains:
   leave it unchanged.
 - Skipped datasets (`skip: true`) get a `source_root` but their outputs are not moved; to
   migrate them later, un-skip them and run migrate again (it then works on the tree only,
-  which requires the `pipeline.yml.bak-0.3` backup next to the pipeline).
+  which requires the `pipeline.yml.bak-0.3` backup next to the pipeline). Their outputs
+  whose names do not change need `--legacy-tree`, which is refused once 0.4.0 has run in
+  that tree; they are then recomputed.

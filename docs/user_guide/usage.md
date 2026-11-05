@@ -98,8 +98,16 @@ neurodags run pipeline.yml --max-files-per-dataset 10   # first 10 files (sorted
 neurodags run pipeline.yml --only-index 0 5 12   # process only files at these indices (unknown index = error)
 neurodags run pipeline.yml --inputs inputs.tsv   # use a frozen input list instead of discovery
 neurodags run pipeline.yml --skip-errors          # skip files that already have a .error marker
-neurodags run pipeline.yml --raise-on-error       # stop immediately on first failure
+neurodags run pipeline.yml --raise-on-error       # fail with the first failure (see below)
 ```
+
+`run` processes every selected input and exits `1` when a unit failed in this call (its
+`.error` marker is written), `0` otherwise. Units skipped by `--skip-errors` are not
+failures of this call, so a `--skip-errors` rerun can exit `0` while `.error` markers
+remain (`neurodags status` lists them). With `--raise-on-error`, every input of the
+current derivative is still processed; the command then fails with a `RuntimeError`
+naming the first failure in input order (traceback, exit 1) and runs no further
+derivative (also for a listed input that no longer exists).
 
 **Config snapshot (automatic provenance):**
 
@@ -298,7 +306,7 @@ A 0.3.x configuration is refused until it is migrated. `neurodags migrate` adds 
 ```bash
 neurodags migrate pipeline.yml --report plan.json        # preview: prints the plan, changes nothing
 neurodags migrate pipeline.yml --apply                   # rewrite config, move outputs, write .done
-neurodags migrate pipeline.yml -m hpc --apply            # then each other mount's output tree
+neurodags migrate pipeline.yml -m hpc --legacy-tree --apply   # each other mount's tree, before any 0.4.0 run there
 ```
 
 Exit code `2` when the plan is refused (nothing is changed). See {doc}`migrating_to_0_4`.

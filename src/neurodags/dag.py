@@ -39,13 +39,18 @@ from neurodags.naming import (
 from neurodags.nodes import get_node
 from neurodags.outputs import (
     build_manifest,
+    canonical_reports,
     check_artifact_ownership,
+    check_reports_unchanged,
+    check_unreported_split_parts,
     file_fingerprint,
+    file_identity,
     make_staging_dir,
     manifest_artifacts,
+    move_staged,
     output_prefix,
+    plan_publication,
     publish_marker,
-    publish_staged,
     remove_markers,
     remove_staging_dir,
     unit_state,
@@ -882,18 +887,26 @@ def _save_final_artifacts(
     2. Delete the old ``.done``, so a crash from here on leaves the unit unfinished.
     3. Run every writer on its final basename inside a fresh hidden staging folder next to
        the outputs (:func:`neurodags.outputs.make_staging_dir`) and record the files it
-       reports (:func:`neurodags.outputs.writer_paths`). A writer whose target another
+       reports (:func:`neurodags.outputs.writer_paths`), spelled as the entries they are in
+       the staging folder (:func:`neurodags.outputs.canonical_reports`). A writer whose target another
        artifact already reported is not run, and two artifacts reporting the same file fail
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
-       untouched in both cases.
+       untouched in both cases. An MNE split recording of which a writer reported only
+       some files fails the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
+       After the last writer, a file that is gone, now a link, or has another size or
+       modification time than when its own writer returned fails the unit
+       (:func:`neurodags.outputs.check_reports_unchanged`).
     4. Move every staged file into place with ``os.replace``, continuation parts first and
-       main files last (:func:`neurodags.outputs.publish_staged`). Readers see a complete
+       main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
        old file or a complete new one, never a partial one.
     5. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
 
-    The staging folder is always removed, also on failure; files a writer wrote without
-    reporting them are discarded with it. A process killed before step 5 leaves no
-    ``.done`` (and possibly its staging folder, which nothing reads).
+    The staging folder is removed on a failure before any file was moved in step 4 (files a
+    writer wrote without reporting them are discarded with it) and after step 5. Once a file
+    has been moved, any stop before the ``.done`` exists (an exception, Ctrl-C, ``SystemExit``, a kill) leaves it
+    in place: some files may be new and some old, and the folder is the durable trace of
+    that half-published unit (``status`` reports it, ``migrate --legacy-tree`` refuses the
+    tree). It is not reused; a later run of the unit uses a fresh one.
 
     Returns the manifest path. Errors propagate (the caller writes the ``.error`` marker).
     """
@@ -902,6 +915,7 @@ def _save_final_artifacts(
     staging = make_staging_dir(final_prefix)
     try:
         staged: dict[str, list[str]] = {}
+        identities: dict[str, list[tuple[int, int]]] = {}
         base = os.path.basename(final_prefix)
         for artifact_name, artifact in res.artifacts.items():
             artifact_path = os.path.join(staging, base + artifact_name)
@@ -909,7 +923,10 @@ def _save_final_artifacts(
                 log.debug("Processed artifact", name=artifact_name, file=artifact)
                 # Do not overwrite a file an earlier artifact wrote (e.g. its MNE split part).
                 check_artifact_ownership({**staged, artifact_name: [artifact_path]})
-                staged[artifact_name] = writer_paths(artifact_path, artifact.writer(artifact_path))
+                staged[artifact_name] = canonical_reports(
+                    staging, writer_paths(artifact_path, artifact.writer(artifact_path))
+                )
+                identities[artifact_name] = [file_identity(p) for p in staged[artifact_name]]
                 check_artifact_ownership(staged)
                 log.debug("Saved artifact", file=artifact_path, files=staged[artifact_name])
             except Exception as e:
@@ -921,12 +938,28 @@ def _save_final_artifacts(
                     exc_info=True,
                 )
                 raise
+        # A later writer may have removed or changed an earlier artifact's file.
+        check_reports_unchanged(staging, staged, identities)
+        check_unreported_split_parts(staging, staged)
         # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
         # and mtime): a file another process replaces before our .done no longer matches.
         staged_prints = [file_fingerprint(p) for paths in staged.values() for p in paths]
-        written = publish_staged(staging, final_prefix, staged)
-    finally:
-        remove_staging_dir(staging)
+        written, ordered = plan_publication(staging, final_prefix, staged)
+    except BaseException:
+        remove_staging_dir(
+            staging
+        )  # nothing published yet (on Exception, the caller writes .error)
+        raise
+    # From here until the .done exists, the staging folder stays on any stop: the trace of
+    # a unit whose files may be part new, part old (status reports it, migrate
+    # --legacy-tree refuses the tree).
+    moved: list[str] = []
+    try:
+        move_staged(ordered, moved)
+    except BaseException:
+        if not moved:
+            remove_staging_dir(staging)  # nothing was published
+        raise
     finals = [p for paths in written.values() for p in paths]
     manifest = build_manifest(
         final_prefix,
@@ -937,6 +970,7 @@ def _save_final_artifacts(
         fingerprints=dict(zip(finals, staged_prints, strict=True)),
     )
     manifest_path = write_manifest(final_prefix, manifest)
+    remove_staging_dir(staging)
     remove_markers(final_prefix, "error", "skip")
     log.debug("Published completion manifest", path=manifest_path)
     return manifest_path

@@ -139,13 +139,16 @@ writers have finished, every reported file is moved to the same relative path in
 folder with `os.replace` (atomic within one filesystem, including NFS): continuation files
 (MNE split parts `X-1.fif`, ...) first, each main file last. MNE links split parts by file
 name, so moved parts stay linked. Only then is `.done` written. The staging folder is removed
-afterwards, and also when a writer fails.
+afterwards, and also on any failure before a file was moved. Once a file has been moved,
+anything that stops the unit before its `.done` exists (an exception, Ctrl-C, a kill) leaves
+the staging folder in place: some files may be new and some old, and the folder is the
+durable trace of that half-published unit.
 
 Consequences:
 
 - No file under an output name is ever partially written: a process killed at any point (an
   exception, Ctrl-C, `SIGTERM`, `kill -9`, a scheduler timeout) leaves no `.done` over
-  half-written files and nothing that blocks the next run.
+  half-written or mixed files and nothing that blocks the next run.
 - Each file of a unit and its fingerprint are checked against the `.done`, so a unit whose
   files were replaced or mixed after publication is not `done` (see above).
 - Writers must write inside the folder of the path they are given, under names that start
@@ -171,16 +174,20 @@ unit, and readers do not hold a snapshot. Therefore:
 Run dependencies before their consumers (the per-file pattern or chained arrays in {doc}`hpc`)
 and finish or cancel jobs before overwriting units they use.
 
-A process killed before it could clean up leaves its staging folder behind. Staging folders are
-ignored by discovery, `status`, dataframe collection, `migrate` and the 0.3.x output check;
-their names never parse as outputs (`~` is not allowed in a suffix). They are **never deleted
-automatically**, because a live one may belong to a job still running. `neurodags status`
-reports how many exist (JSON: `staging_dirs`, per file with `--include-files`). Delete them when
-no job is writing to the output tree, for example those older than a day:
+A process stopped before it could clean up leaves its staging folder behind. Staging folders
+are ignored by discovery, `status` states, dataframe collection, `migrate` scans and the 0.3.x
+output check; their names never parse as outputs (`~` is not allowed in a suffix). They are
+**never deleted automatically**, because a live one may belong to a job still running.
+`neurodags status` reports how many exist and how many belong to units without a `.done`
+(JSON: `staging_dirs`, per file with `--include-files`). Once no job is writing to the output
+tree:
 
-```bash
-find <derivatives_path> -name '.*.tmp~*' -prune -mmin +1440 -exec rm -rf {} +
-```
+- a staging folder of a unit **without** a valid `.done` may mark a half-published unit:
+  recompute the unit (`neurodags run`) first. `migrate --legacy-tree` treats any staging
+  folder as proof that 0.4.0 wrote the tree, so deleting it first could let a mixed unit be
+  certified;
+- a staging folder of a **done** (or skipped) unit is left over from an earlier, stopped run and can be
+  deleted.
 
 (naming-unit-states)=
 
@@ -221,7 +228,24 @@ the output folder, and each must belong to the unit: the first component of its 
 followed by `.` (or an MNE split tail `-1`, `-2`, ...), or be exactly the prefix used as a
 folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, which every
 unit of the folder would share, fails the unit before anything is replaced. A reported file
-outside the staging folder also fails the unit, and unreported files are discarded. Writers
+outside the staging folder (also through a symbolic link) fails the unit, and so does a
+reported file that is itself a symbolic link (report the file it points to); files reached
+through a linked folder are published where they really are. A writer may read files
+another artifact of the unit reported, but must not change them or open them for writing
+(h5py or netCDF4 mode `"a"`/`"r+"`, `np.memmap` mode `"r+"`: even an open that changes
+nothing updates the modification time). A reported file that is gone, now a link, or has
+another size or modification time than when its own writer returned fails the unit; the
+check compares this metadata, not the contents.
+Unreported files are discarded. The
+exception is MNE split recordings: when the staging folder holds a recording of which only
+some files were reported (`X.fif` with `X-1.fif`, ..., `X.fif.gz` with `X.fif-1.gz`, ..., or
+BIDS names that differ only in `_split-NN_`), the unit fails instead of certifying a
+truncated recording. That happens with a writer that saves an MNE object larger than its
+split size and returns `None`, or returns only part of the list MNE's `save()` returns. Use
+`neurodags.writers.save_mne`, which returns every part. A writer's own scratch files must
+not be named like split parts of a FIF it reports (`X-1.fif` next to `X.fif`, `X-2.fif`
+next to `X-1.fif` even without `X.fif`, or a name that differs from it only in
+`_split-NN_`): they are indistinguishable from a lost part. Writers
 that ignore `path` and write somewhere fixed cannot be published atomically and are not
 supported.
 

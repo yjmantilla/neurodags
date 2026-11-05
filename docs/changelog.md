@@ -10,6 +10,11 @@ changes are breaking: 0.3.x configurations are refused until they declare `namin
 `neurodags migrate` converts a 0.3.x configuration and its existing outputs in one previewed
 pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
+If you cannot migrate a project yet, pin `neurodags<0.4`; packages that depend on neurodags
+should declare an upper bound (`neurodags>=0.3.6,<0.4` or `neurodags>=0.4,<0.5`). After
+migrating, run only 0.4.x on that output tree (see
+{ref}`do not mix versions <mixed-versions>`).
+
 ### Breaking
 
 - **`naming_version: 1` is required** at the top level of every pipeline configuration. A
@@ -219,7 +224,10 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   cross-filesystem moves and invalid 0.4.0 names (rename with `--map`) are refused before
   anything changes. `--apply` keeps a journal
   (`<derivatives_path>/.neurodags/migrate-journal.json`), so an interrupted run resumes, and
-  re-running an applied plan is a no-op. `--report` writes the plan as JSON with a dataframe
+  re-running an applied plan is a no-op. On another mount after the configuration was
+  migrated, `--legacy-tree` also certifies outputs whose names do not change (refused when
+  the tree shows a 0.4.0 run); without it they are recomputed, and the preview says so
+  instead of "up to date". `--report` writes the plan as JSON with a dataframe
   column map (`name__error` → `name.error`; best-effort coordinate re-encoding,
   `neurodags.migrate.legacy_column_to_new`). See the new guide
   {doc}`user_guide/migrating_to_0_4`.
@@ -260,7 +268,14 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
   `None` = exactly `path`); the `.done` manifest is built from these reports and every
   reported file must exist. New `neurodags.writers.save_mne(obj, path, **kwargs)` returns
   every part of an MNE split recording (`X.fif`, `X-1.fif`, ...), used by the built-in
-  preprocessing nodes.
+  preprocessing nodes. Files a writer does not report are discarded, except files of an MNE
+  split recording (neuromag or BIDS split names) of which the writer reported only some: a
+  writer that saves an MNE object and returns `None` (`def w(p): raw.save(p)`, which worked
+  in 0.3.x) or part of `save()`'s list fails the unit with `.error` when MNE split the
+  recording, instead of certifying a truncated one. Use `save_mne`. A reported file that
+  is a symbolic link, or resolves outside the folder the writer was given, fails the unit.
+  So does a file that is gone, now a link, or has another size or modification time than
+  when its own writer returned (a later writer may read earlier artifacts, not change them).
 - **`neurodags.naming`** (#49, #50): pure functions that define the 0.4.0 naming rules in one
   place: derivative-name grammar and validation (`check_derivative_names`: string keys,
   reserved `SourceFile`, case-insensitive uniqueness, the `X`/`X-1` split-file rule), the
@@ -291,6 +306,18 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
 ### Changed
 
+- Once a run starts moving a unit's files into place, the unit's staging folder is removed
+  only after its `.done` is written: any stop in between (an exception, Ctrl-C,
+  `SystemExit`, a kill) keeps it as the trace of a possibly half-published unit; it was
+  removed. `status` says which staging folders belong to units without a `.done`
+  (recompute those before deleting them) and which to done or skipped units. Only names of
+  the form `.<output prefix>.tmp~<16 hex digits>` count as staging folders. A failure before
+  any file was moved still removes it.
+- **`neurodags run` exits `1` when a unit failed**, after processing every requested input
+  (it exited `0`; the failed units have `.error` markers). Inputs listed in `--inputs` that
+  no longer exist (`missing-source`) are not failures. `run_pipeline` and
+  `iterate_derivative_pipeline` take `failures=` (a list that receives one record per
+  failed unit).
 - **One enumeration per invocation** (#41): `run_pipeline` discovers the inputs once and shares
   them with every derivative (it rediscovered per derivative), and `build_derivative_dataframe`
   scans once (it scanned twice).
