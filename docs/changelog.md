@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.4.0)
+## 0.4.0 — 2026-11-05
 
 0.4.0 gives every output one identity: derivative names are used verbatim on disk, output
 folders depend only on the configuration and each file's path below the new `source_root`,
