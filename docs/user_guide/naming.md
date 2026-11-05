@@ -230,9 +230,12 @@ folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, 
 unit of the folder would share, fails the unit before anything is replaced. A reported file
 outside the staging folder (also through a symbolic link) fails the unit, and so does a
 reported file that is itself a symbolic link (report the file it points to); files reached
-through a linked folder are published where they really are. A writer must not touch
-files another artifact of the unit reported: one that is removed, moved, replaced (by a
-link, a hard link or a copy) or rewritten after its own writer returned fails the unit.
+through a linked folder are published where they really are. A writer may read files
+another artifact of the unit reported, but must not change them or open them for writing
+(h5py or netCDF4 mode `"a"`/`"r+"`, `np.memmap` mode `"r+"`: even an open that changes
+nothing updates the modification time). A reported file that is gone, now a link, or has
+another size or modification time than when its own writer returned fails the unit; the
+check compares this metadata, not the contents.
 Unreported files are discarded. The
 exception is MNE split recordings: when the staging folder holds a recording of which only
 some files were reported (`X.fif` with `X-1.fif`, ..., `X.fif.gz` with `X.fif-1.gz`, ..., or

@@ -893,8 +893,8 @@ def _save_final_artifacts(
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
        untouched in both cases. An MNE split recording of which a writer reported only
        some files fails the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
-       After the last writer, a file removed or changed since its own writer returned
-       (moved, replaced by a link, a hard link or a copy, rewritten) fails the unit
+       After the last writer, a file that is gone, now a link, or has another size or
+       modification time than when its own writer returned fails the unit
        (:func:`neurodags.outputs.check_reports_unchanged`).
     4. Move every staged file into place with ``os.replace``, continuation parts first and
        main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
@@ -915,7 +915,7 @@ def _save_final_artifacts(
     staging = make_staging_dir(final_prefix)
     try:
         staged: dict[str, list[str]] = {}
-        identities: dict[str, list[tuple[int, int, int, int]]] = {}
+        identities: dict[str, list[tuple[int, int]]] = {}
         base = os.path.basename(final_prefix)
         for artifact_name, artifact in res.artifacts.items():
             artifact_path = os.path.join(staging, base + artifact_name)

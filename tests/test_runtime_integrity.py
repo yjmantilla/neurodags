@@ -439,9 +439,21 @@ def test_split_parts_reported_as_links_to_renamed_payloads_fail_the_unit(tmp_pat
         _run_split_writer(tmp_path, writer)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    os.name == "nt", reason="symbolic links need privileges on Windows"
+)
+
+
 @pytest.mark.parametrize(
-    "change", ["link_inside", "link_outside", "remove", "hard_link", "copy", "rewrite"]
+    "change",
+    [
+        pytest.param("link_inside", marks=_NEEDS_SYMLINKS),
+        pytest.param("link_outside", marks=_NEEDS_SYMLINKS),
+        "remove",
+        "hard_link",
+        "copy",
+        "rewrite",
+    ],
 )
 def test_later_writer_changing_an_earlier_artifact_fails_the_unit(tmp_path, change):
     """Review dbb251b B1 / 0f4bcde F1: a later writer replaced an earlier artifact's checked
@@ -485,6 +497,64 @@ def test_later_writer_changing_an_earlier_artifact_fails_the_unit(tmp_path, chan
     base = _source(tmp_path)
     with pytest.raises(RuntimeError, match="'.fif' were removed or changed after its writer"):
         run_derivative(_single("rt_later_writer"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "error"
+    assert not any(".tmp~" in p.name for p in tmp_path.iterdir())
+
+
+def test_later_writer_reading_earlier_artifacts_is_published(tmp_path):
+    """Review 5ff2926 #7: reading an earlier artifact (a split recording, lazily) must not
+    look like a change."""
+    big = _split_raw()
+    seen = []
+
+    def recording_writer(path):
+        return save_mne(big, path, split_size="2MB", overwrite=True, verbose="error")
+
+    def summary_writer(path):
+        raw = mne.io.read_raw_fif(path[: -len(".json")] + ".fif", preload=False, verbose="error")
+        seen.append(raw.n_times)
+        raw.get_data(start=0, stop=10)
+        raw.close()
+        Path(path).write_text(json.dumps({"n_times": int(raw.n_times)}))
+
+    @register_node(name="rt_later_reader", override=True)
+    def node():
+        return NodeResult(
+            {".fif": Artifact(big, recording_writer), ".json": Artifact(None, summary_writer)}
+        )
+
+    base = _source(tmp_path)
+    run_derivative(_single("rt_later_reader"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "done"
+    assert seen == [big.n_times]
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX permissions (not enforced for root)",
+)
+def test_later_writer_locking_an_earlier_folder_fails_and_cleans_up(tmp_path):
+    """Review 5ff2926 #4: a folder made unreadable by a later writer raised a bare
+    PermissionError and left the staging folder behind."""
+
+    def figs_writer(path):
+        os.mkdir(path)
+        Path(path, "plot.png").write_text("png")
+        return [os.path.join(path, "plot.png")]
+
+    def metadata_writer(path):
+        os.chmod(path[: -len(".json")] + ".figs", 0o300)
+        Path(path).write_text("{}")
+
+    @register_node(name="rt_later_lock", override=True)
+    def node():
+        return NodeResult(
+            {".figs": Artifact(None, figs_writer), ".json": Artifact(None, metadata_writer)}
+        )
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="'.figs' were removed or changed after its writer"):
+        run_derivative(_single("rt_later_lock"), "Rec", str(base), base)
     assert unit_state(str(base) + "@Rec", "Rec").state == "error"
     assert not any(".tmp~" in p.name for p in tmp_path.iterdir())
 

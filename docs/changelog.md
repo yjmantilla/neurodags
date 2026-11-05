@@ -274,7 +274,8 @@ migrating, run only 0.4.x on that output tree (see
   in 0.3.x) or part of `save()`'s list fails the unit with `.error` when MNE split the
   recording, instead of certifying a truncated one. Use `save_mne`. A reported file that
   is a symbolic link, or resolves outside the folder the writer was given, fails the unit.
-  So does a file a later artifact's writer removes or changes after its own writer returned.
+  So does a file that is gone, now a link, or has another size or modification time than
+  when its own writer returned (a later writer may read earlier artifacts, not change them).
 - **`neurodags.naming`** (#49, #50): pure functions that define the 0.4.0 naming rules in one
   place: derivative-name grammar and validation (`check_derivative_names`: string keys,
   reserved `SourceFile`, case-insensitive uniqueness, the `X`/`X-1` split-file rule), the

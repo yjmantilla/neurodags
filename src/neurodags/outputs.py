@@ -45,6 +45,7 @@ partially written one. A staging folder left by a killed process is ignored ever
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
@@ -547,23 +548,29 @@ def canonical_reports(staging: str, paths: Sequence[str]) -> list[str]:
     return list(out.values())
 
 
-def file_identity(path: str) -> tuple[int, int, int, int]:
-    """``(device, inode, size, mtime_ns)`` of the entry *path* (a link itself, not followed)."""
+def file_identity(path: str) -> tuple[int, int]:
+    """``(size, mtime_ns)`` of the entry *path* (a link itself, not followed).
+
+    Inode and device numbers are left out: some filesystems (FAT, CIFS ``noserverino``,
+    FUSE without ``use_ino``) may renumber an unchanged file during a run.
+    """
     st = os.lstat(path)
-    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns
+    return st.st_size, st.st_mtime_ns
 
 
 def check_reports_unchanged(
     staging: str,
     staged: Mapping[str, Sequence[str]],
-    identities: Mapping[str, Sequence[tuple[int, int, int, int]]],
+    identities: Mapping[str, Sequence[tuple[int, int]]],
 ) -> None:
     """Refuse files that were removed or changed after the writer that reported them returned.
 
     A later artifact's writer can remove, move, replace (by a link, a hard link or a copy) or
     rewrite a file an earlier artifact reported; the ``.done`` would then certify a file its
     writer did not write (for example the first part of an MNE split recording replaced by
-    its last part).
+    its last part). Changes are detected by size and modification time, not by content: a
+    same-size rewrite that keeps the modification time (restored, or within one tick of a
+    coarse filesystem clock) is not seen.
 
     Parameters
     ----------
@@ -577,7 +584,7 @@ def check_reports_unchanged(
     Raises
     ------
     RuntimeError
-        If a file is gone, is another file, changed size or modification time, or is no
+        If a file is gone, is now a link, changed size or modification time, or is no
         longer reached under the same spelling inside *staging*.
     """
     for suffix, paths in staged.items():
@@ -590,15 +597,18 @@ def check_reports_unchanged(
                 changed.append(path)
         if not changed:
             try:
-                if canonical_reports(staging, paths) != list(paths):
+                again = canonical_reports(staging, paths)
+                changed = [p for p, q in zip(paths, again, strict=False) if p != q]
+                if not changed and len(again) != len(paths):
                     changed = list(paths)
-            except RuntimeError:
+            except (RuntimeError, OSError):
                 changed = list(paths)
         if changed:
             raise RuntimeError(
                 f"files of artifact {suffix!r} were removed or changed after its writer "
-                f"returned (by a later artifact's writer?): {changed}. A writer must not "
-                "touch files another artifact reported."
+                f"returned (by a later artifact's writer, or a file the writer left open?): "
+                f"{changed}. A writer may read files another artifact reported, but must not "
+                "change them or open them for writing."
             )
 
 
@@ -773,6 +783,18 @@ def make_staging_dir(prefix: str) -> str:
 
 def remove_staging_dir(path: str) -> None:
     """Delete a staging folder (after publishing or after a failure)."""
+    shutil.rmtree(path, ignore_errors=True)
+    if not os.path.lexists(path):
+        return
+    # A writer left a folder unreadable or unwritable: restore access and try again.
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o700)
+    for dirpath, dirnames, _ in os.walk(path):
+        for name in dirnames:
+            sub = os.path.join(dirpath, name)
+            if not os.path.islink(sub):
+                with contextlib.suppress(OSError):
+                    os.chmod(sub, 0o700)
     shutil.rmtree(path, ignore_errors=True)
 
 
