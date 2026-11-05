@@ -272,7 +272,8 @@ migrating, run only 0.4.x on that output tree (see
   split recording (neuromag or BIDS split names) of which the writer reported only some: a
   writer that saves an MNE object and returns `None` (`def w(p): raw.save(p)`, which worked
   in 0.3.x) or part of `save()`'s list fails the unit with `.error` when MNE split the
-  recording, instead of certifying a truncated one. Use `save_mne`.
+  recording, instead of certifying a truncated one. Use `save_mne`. A reported file that
+  is a symbolic link, or resolves outside the folder the writer was given, fails the unit.
 - **`neurodags.naming`** (#49, #50): pure functions that define the 0.4.0 naming rules in one
   place: derivative-name grammar and validation (`check_derivative_names`: string keys,
   reserved `SourceFile`, case-insensitive uniqueness, the `X`/`X-1` split-file rule), the

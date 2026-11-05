@@ -491,41 +491,51 @@ def writer_paths(target: str, returned: Any) -> list[str]:
 def canonical_reports(staging: str, paths: Sequence[str]) -> list[str]:
     """The files a writer reported, spelled as the directory entries they are in *staging*.
 
-    Each path is resolved (:func:`os.path.realpath`: symbolic links, ``..``, ``//``) and
+    Each path is resolved (:func:`os.path.realpath`: folder links, ``..``, ``//``) and
     re-spelled below *staging* with every component exactly as the folder lists it, so the
     split-recording check (:func:`check_unreported_split_parts`) and publication see the
-    same names. A link the writer reported is replaced by its target (the link itself is
-    discarded with the staging folder); hard links stay separate names. Duplicates are
-    dropped, keeping the first.
+    same names. Hard links stay separate names. Duplicates are dropped, keeping the first.
 
     Raises
     ------
     RuntimeError
-        If a reported file resolves outside *staging*, or names an entry with other letter
-        case than the folder lists (a case-insensitive filesystem).
+        If a reported file resolves outside *staging*, is itself a symbolic link (publishing
+        its target would rename the file), or names an entry with other letter case than the
+        folder lists (a case-insensitive filesystem).
     """
     base = os.path.realpath(staging)
-    lexical_base = lexical_path_key(os.path.abspath(staging))
+    lexical_base = os.path.normcase(lexical_path_key(os.path.abspath(staging)))
+    listings: dict[str, frozenset[str]] = {}
     out: dict[str, str] = {}
     for path in paths:
-        rel = os.path.relpath(os.path.realpath(path), base)
+        try:
+            rel = os.path.relpath(os.path.realpath(path), base)
+        except ValueError:  # another drive (Windows)
+            rel = os.pardir
         parts = rel.split(os.sep)
         if os.path.isabs(rel) or rel == os.curdir or parts[0] == os.pardir:
-            lexical = lexical_path_key(os.path.abspath(path))
+            lexical = os.path.normcase(lexical_path_key(os.path.abspath(path)))
             try:
                 inside = os.path.commonpath([lexical, lexical_base]) == lexical_base
             except ValueError:  # another drive (Windows)
                 inside = False
             if not inside:
-                out.setdefault(os.path.normcase(lexical), path)  # plan_publication refuses it
+                out.setdefault(lexical, path)  # plan_publication refuses it
                 continue
             raise RuntimeError(
                 f"artifact writer reported {path!r}, which resolves outside the folder it "
                 "was given (also through a symbolic link)."
             )
+        if os.path.islink(path):
+            raise RuntimeError(
+                f"artifact writer reported {path!r}, which is a symbolic link; report the "
+                "file it points to instead."
+            )
         here = staging
         for part in parts:
-            if part not in os.listdir(here):
+            if here not in listings:
+                listings[here] = frozenset(os.listdir(here))
+            if part not in listings[here]:
                 raise RuntimeError(
                     f"artifact writer reported {path!r}, but {os.path.join(here, part)!r} "
                     "is not spelled as on disk (letter case)."

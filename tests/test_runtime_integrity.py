@@ -408,7 +408,7 @@ def test_parts_reported_through_a_folder_link_are_published_where_they_are(tmp_p
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
-def test_reported_file_link_is_published_as_its_target(tmp_path):
+def test_reported_file_link_fails_the_unit(tmp_path):
     """Review fa8ebd1 #1c/#2: a reported symbolic link was moved itself (dangling) and, kept
     as the first spelling, dropped the real file."""
 
@@ -417,11 +417,26 @@ def test_reported_file_link_is_published_as_its_target(tmp_path):
         os.symlink(os.path.basename(path), path + ".lnk")
         return [path + ".lnk", path]
 
-    prefix = _run_split_writer(tmp_path, writer, suffix=".txt")
-    state = unit_state(prefix, "Rec")
-    assert state.state == "done"
-    assert state.artifacts[".txt"] == [prefix + ".txt"]
-    assert not os.path.lexists(prefix + ".txt.lnk")
+    with pytest.raises(RuntimeError, match="is a symbolic link"):
+        _run_split_writer(tmp_path, writer, suffix=".txt")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_split_parts_reported_as_links_to_renamed_payloads_fail_the_unit(tmp_path):
+    """Review bedfaa6 B1: parts renamed to payload files and reported through links at
+    their split names were published under the payload names, and .done certified a
+    recording MNE cannot open."""
+    big = _split_raw()
+
+    def writer(path):
+        files = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        for i, part in enumerate(files):
+            os.replace(part, f"{path}.payload{i}")
+            os.symlink(os.path.basename(f"{path}.payload{i}"), part)
+        return files
+
+    with pytest.raises(RuntimeError, match="is a symbolic link"):
+        _run_split_writer(tmp_path, writer)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")

@@ -228,8 +228,9 @@ the output folder, and each must belong to the unit: the first component of its 
 followed by `.` (or an MNE split tail `-1`, `-2`, ...), or be exactly the prefix used as a
 folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, which every
 unit of the folder would share, fails the unit before anything is replaced. A reported file
-outside the staging folder (also through a symbolic link) fails the unit, a reported
-symbolic link inside it is published as the file it points to, and unreported files are
+outside the staging folder (also through a symbolic link) fails the unit, and so does a
+reported file that is itself a symbolic link (report the file it points to); files reached
+through a linked folder are published where they really are. Unreported files are
 discarded. The
 exception is MNE split recordings: when the staging folder holds a recording of which only
 some files were reported (`X.fif` with `X-1.fif`, ..., `X.fif.gz` with `X.fif-1.gz`, ..., or
