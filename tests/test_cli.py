@@ -767,6 +767,8 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
     assert rc == 1
     assert set(data) == {
         "config",
+        "mount_point",
+        "mount_point_source",
         "n_files",
         "derivatives",
         "grand_total",

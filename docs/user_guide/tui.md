@@ -13,22 +13,23 @@ pip install neurodags[tui]
 ## Launching the TUI
 
 Launch the TUI with the unified CLI. You can pass the path to a pipeline
-configuration file and optionally a datasets configuration file:
+configuration file and optionally a datasets configuration file and a mount point
+(`-m`, which sets `NEURODAGS_MOUNT_POINT` for the app; see {ref}`mount-point-override`):
 
 ```bash
-neurodags tui [pipeline.yml] [-d datasets.yml]
+neurodags tui [pipeline.yml] [-d datasets.yml] [-m MOUNT]
 ```
 
 Legacy alias:
 
 ```bash
-neurodags-tui [pipeline.yml] [-d datasets.yml]
+neurodags-tui [pipeline.yml] [-d datasets.yml] [-m MOUNT]
 ```
 
 Module entry point:
 
 ```bash
-python -m neurodags.tui [pipeline.yml] [-d datasets.yml]
+python -m neurodags.tui [pipeline.yml] [-d datasets.yml] [-m MOUNT]
 ```
 
 The `-d` path is relative to the directory you launch from (the 0.3.5 fallback to the pipeline

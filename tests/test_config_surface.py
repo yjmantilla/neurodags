@@ -410,7 +410,8 @@ def test_source_root_mount_map_needs_active_entry(tmp_path):
     )
     _, problems = inspect_dataset_paths(datasets, mount)
     assert problems == ["datasets.a.source_root: no entry for mount point 'hpc' (available: local)"]
-    with pytest.raises(KeyError):
+    # A clean configuration error naming the available mounts (#66), not a bare KeyError.
+    with pytest.raises(DatasetConfigError, match=r"'hpc' \(available: local\)"):
         resolve_dataset_paths(datasets, mount)
 
 

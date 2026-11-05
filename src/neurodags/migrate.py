@@ -82,6 +82,7 @@ from typing import Any
 import yaml
 
 from neurodags._legacy import snake_to_camel
+from neurodags.datasets import MOUNT_SOURCE_LABELS, resolve_mount_point
 from neurodags.definitions import DatasetConfig
 from neurodags.iterators import discover_inputs, neuromag_split_name, neuromag_split_part
 from neurodags.loaders import UniqueKeySafeLoader, check_pipeline_names, load_configuration
@@ -319,6 +320,9 @@ class MigrationPlan:
     notes: list[str] = field(default_factory=list)
     chained_patterns: list[str] = field(default_factory=list)
     column_map: dict[str, Any] = field(default_factory=dict)
+    #: Where ``mount`` came from: ``argument`` (-m), ``environment``
+    #: (NEURODAGS_MOUNT_POINT), ``pipeline`` or ``unset`` (see resolve_mount_point).
+    mount_source: str = "pipeline"
     #: Journal state of an interrupted ``--apply``: the last ``mne-*`` entry per rewrite
     #: transaction, open split moves, and recorded duplicates (by target prefix).
     _mne_txns: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
@@ -361,6 +365,7 @@ class MigrationPlan:
             "pipeline": self.pipeline,
             "datasets_file": self.datasets_file,
             "mount": self.mount,
+            "mount_source": self.mount_source,
             "legacy_cwd": self.legacy_cwd,
             "mode": self.mode,
             "config": {
@@ -1037,8 +1042,9 @@ def plan_migration(
     datasets : path-like, optional
         A datasets YAML used instead of the pipeline's ``datasets`` (the CLI ``-d``).
     mount : str, optional
-        Mount point to migrate (default: the pipeline's ``mount_point``). Run once per
-        output tree, i.e. once per mount.
+        Mount point to migrate (the CLI's ``-m/--mount-point``). Default: the
+        ``NEURODAGS_MOUNT_POINT`` environment variable, then the pipeline's
+        ``mount_point``. Run once per output tree, i.e. once per mount.
     renames : mapping or iterable of ``"OLD=NEW"``, optional
         Derivative renames (``--map``). Default: keep the YAML spelling verbatim.
     legacy_cwd : path-like, optional
@@ -1089,11 +1095,12 @@ def plan_migration(
     source = _datasets_source(
         pipeline_path, config, os.fspath(datasets) if datasets is not None else None
     )
-    active_mount = mount if mount is not None else config.get("mount_point")
+    active_mount, mount_source = resolve_mount_point(config.get("mount_point"), mount)
     plan = MigrationPlan(
         pipeline=pipeline_path,
         datasets_file=None if source.inline else source.path,
         mount=active_mount,
+        mount_source=mount_source,
         legacy_cwd=cwd if mode == "legacy" else None,
         mode=mode,
         synthesize=synthesize,
@@ -2419,7 +2426,12 @@ def format_preview(plan: MigrationPlan, *, apply: bool = False) -> str:
     lines.append(f"pipeline:    {plan.pipeline}")
     if plan.datasets_file:
         lines.append(f"datasets:    {plan.datasets_file}")
-    lines.append(f"mount:       {plan.mount if plan.mount is not None else '(none)'}")
+    if plan.mount is None:
+        lines.append("mount:       (none)")
+    else:
+        # A stale NEURODAGS_MOUNT_POINT would migrate another mount's tree: show the source.
+        source = MOUNT_SOURCE_LABELS.get(plan.mount_source, plan.mount_source)
+        lines.append(f"mount:       {plan.mount} (from {source})")
     if plan.mode == "legacy":
         lines.append(
             f"legacy cwd:  {plan.legacy_cwd}  (0.3.x resolved relative dataset paths here; "

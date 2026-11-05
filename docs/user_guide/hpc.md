@@ -87,9 +87,14 @@ the run, including resubmissions, has finished.
 The selection given to `slurm-script` is carried into every generated command and worker:
 `-d datasets.yml` (resolved against the directory you run `slurm-script` from, and written
 into the script as an absolute path) is passed to `neurodags inputs`/`count-inputs` and as
-`datasets_configuration=` to `run_pipeline`, and `--derivative` limits what the workers run
+`datasets_configuration=` to `run_pipeline`, `--derivative` limits what the workers run
 (per-file workers pass `derivatives=[...]`; flat and chained arrays only list the selected
-derivatives). Paths are shell-quoted, and the Python part of each worker is a quoted heredoc
+derivatives), and `-m NAME` is passed to `neurodags inputs`/`count-inputs` and exported as
+`NEURODAGS_MOUNT_POINT` in every worker, after the environment activation (without `-m`, a
+value exported where you submit, or the YAML's `mount_point`, applies; the per-file and flat
+jobs only see a submit-side value when sbatch exports your environment, its default unless
+`SBATCH_EXPORT` or a site policy says otherwise, so prefer `-m`). Each job log shows
+the active mount point and its source. Paths are shell-quoted, and the Python part of each worker is a quoted heredoc
 (`python - "$PIPELINE" ... <<'EOF'`) that reads them from `sys.argv`, so unusual file names
 (spaces, quotes, `$`) reach `run_pipeline` unchanged.
 
@@ -411,7 +416,7 @@ run_pipeline(config, inputs="inputs.tsv", only_index=index, skip_errors=True)
 
 | Concern | Recommendation |
 |---------|---------------|
-| Cluster paths differ from local | Set `mount_point: hpc` in `pipeline.yml`; give `source_root`, `file_pattern` and `derivatives_path` an `hpc:` entry each (`neurodags validate` prints the resolved values for the active mount) |
+| Cluster paths differ from local | Give `source_root`, `file_pattern` and `derivatives_path` an `hpc:` entry each and select it on the cluster without editing `pipeline.yml`: `export NEURODAGS_MOUNT_POINT=hpc` in the job (what `slurm-script -m hpc` writes) or `-m hpc` per command. `neurodags validate -m hpc` prints the resolved values for that mount |
 | Relative dataset paths | Since 0.4.0 they are resolved against the datasets YAML's directory, not the job's working directory; a config passed as a dict needs `base_dir=` (the generated `slurm-script` templates pass it) |
 | Node has multiple cores | Set `n_jobs: -1` for intra-job file parallelism (combine with array jobs for two-level parallelism) |
 | Partial reruns | Caching is automatic — resubmit the full array; units with a valid `.done` manifest are skipped, and tasks killed mid-write (no `.done`) are recomputed; nothing needs to be unlocked or cleaned first |

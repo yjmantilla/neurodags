@@ -167,7 +167,36 @@ pass; start with the upgrade checklist in {doc}`user_guide/migrating_to_0_4`.
 
 ### Added
 
-- **`neurodags migrate pipeline.yml [-d DATASETS] [--mount NAME] [--apply] [--report plan.json]
+- **Choose the mount point without editing the pipeline** (#66): `-m/--mount-point NAME` on
+  `validate`, `run`, `dry-run`, `status`, `count-inputs`, `inputs`, `dataframe`,
+  `slurm-script`, `migrate` and `tui`; `mount_point=` on `run_pipeline`,
+  `iterate_derivative_pipeline`, `build_derivative_dataframe`, `enumerate_pipeline_inputs`,
+  `get_all_files_from_pipeline_configuration` and
+  `get_datasets_and_mount_point_from_pipeline_configuration`; and the `NEURODAGS_MOUNT_POINT`
+  environment variable. Precedence: flag/argument, then the variable, then the YAML's
+  `mount_point` (an empty `mount_point=''` or variable counts as unset; `-m ''` is
+  rejected; a YAML `mount_point: ''` is used as is). A
+  `mount_point` key set in a dict config is the YAML level, so the variable overrides it:
+  pass `mount_point=` instead. `validate`, `status` and the `migrate` preview show the
+  active mount and its source (`status --format json`: `mount_point`, `mount_point_source`);
+  `run_pipeline` and `build_derivative_dataframe` log them at INFO, and `neurodags run`
+  records them in `code/neurodags_env.json`. `slurm-script -m NAME` exports
+  `NEURODAGS_MOUNT_POINT` in the generated jobs (after the environment activation) and adds
+  `-m NAME` to the `inputs`/`count-inputs` commands; it refuses a mount that no dataset's
+  map defines (the paths themselves are not checked, they may exist only on the cluster).
+  `neurodags-tui` accepts `-m` too.
+  `migrate --mount` (earlier 0.4.0 development spelling) still works. New helper:
+  `neurodags.datasets.resolve_mount_point`.
+- An active mount point missing from a dataset's mount map is now a clean error naming the
+  available mount points, not a bare `KeyError` traceback: `neurodags.utils.MountPointError`
+  (a `DatasetConfigError` that is still a `KeyError`), exit `2` in `run`, `dry-run`,
+  `status`, `inputs`, `count-inputs`, `dataframe`, `migrate` and `slurm-script -m`
+  (`validate` lists it with its other problems and exits `1`, as before).
+  `enumerate_pipeline_inputs` and `get_all_files_from_pipeline_configuration` now check the
+  dataset paths first, like `run_pipeline`, so they also refuse a mount map that lacks the
+  active mount in any field (`derivatives_path` included). A `DatasetConfigError` now
+  survives pickling with its message intact.
+- **`neurodags migrate pipeline.yml [-d DATASETS] [-m/--mount-point NAME] [--apply] [--report plan.json]
   [--map OLD=NEW] [--legacy-cwd DIR] [--no-synthesize] [--source-root DATASET[:MOUNT]=PATH]
   [--upstream-map OLDTOKEN=NEWNAME]`** (#49, #50, #27): upgrades a 0.3.x project in one
   pass, previewing by default. The configuration gets `naming_version: 1`, a `source_root`

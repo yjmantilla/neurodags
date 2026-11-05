@@ -130,7 +130,7 @@ DerivativeList:
 
 ## Mount Points
 
-`datasets.yml` supports environment-specific path resolution. The `mount_point` key in `pipeline.yml` selects which path set to use:
+`datasets.yml` supports environment-specific path resolution. The `mount_point` key in `pipeline.yml` selects which path set to use (`-m/--mount-point` or the `NEURODAGS_MOUNT_POINT` environment variable select another one without editing the file, see {ref}`mount-point-override`):
 
 ```yaml
 # pipeline.yml

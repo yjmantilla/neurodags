@@ -222,6 +222,10 @@ def get_path(
     return path
 
 
+#: Environment variable that selects the mount point when no explicit one is given (#66).
+MOUNT_POINT_ENV = "NEURODAGS_MOUNT_POINT"
+
+
 class DatasetConfigError(ValueError):
     """One or more dataset definitions are invalid (all problems are listed together)."""
 
@@ -229,6 +233,20 @@ class DatasetConfigError(ValueError):
         self.problems = list(problems)
         lines = "\n".join(f"  - {p}" for p in self.problems)
         super().__init__(f"invalid dataset configuration:\n{lines}")
+
+    def __reduce__(self):
+        # Rebuild from the problems (loky workers send exceptions back pickled).
+        return type(self), (self.problems,)
+
+
+class MountPointError(DatasetConfigError, KeyError):
+    """A dataset's mount-point map has no entry for the active mount point.
+
+    Also a :class:`KeyError`, which :func:`resolve_dataset_paths` raised for this before.
+    """
+
+    # KeyError would quote the message (its __str__ shows the key's repr).
+    __str__ = ValueError.__str__
 
 
 #: Path fields of a dataset that are resolved like ``file_pattern`` (spec §1.3).
@@ -262,8 +280,9 @@ def resolve_config_path(
     """
     if isinstance(path, dict) and mount_point is None:
         raise ValueError(
-            f"{field} is a mount-point map ({', '.join(map(str, path))}) but the pipeline "
-            "configuration sets no 'mount_point'."
+            f"{field} is a mount-point map ({', '.join(map(str, path))}) but no mount point "
+            "is set: set 'mount_point' in the pipeline, pass -m/--mount-point, or set "
+            "NEURODAGS_MOUNT_POINT."
         )
     resolved = get_path(path, mount_point=mount_point, field=field)
     if not isinstance(resolved, str):
@@ -438,11 +457,37 @@ def effective_derivatives_base(
     return os.path.join(derivatives_path, *subdir.split("/"))
 
 
-def _format_resolution_error(exc: BaseException, field: str, value: Any, mount_point: Any) -> str:
+def _format_resolution_error(
+    exc: BaseException, field: str, value: Any, mount_point: Any, mount_source: str | None
+) -> str:
     if isinstance(exc, KeyError):
         available = ", ".join(map(str, value)) if isinstance(value, dict) else "?"
-        return f"{field}: no entry for mount point {mount_point!r} (available: {available})"
+        message = f"{field}: no entry for mount point {mount_point!r} (available: {available})"
+        if mount_source == "environment":
+            # A stale variable inherited from the shell or the job is the likely cause.
+            message += f"; the mount point was set by ${MOUNT_POINT_ENV}"
+        return message
     return str(exc)
+
+
+def missing_mount_entries(datasets: Mapping[str, Any], mount_point: Any) -> list[str]:
+    """Messages for the path-field maps of active datasets that lack *mount_point*.
+
+    Only the map keys are checked, not the paths (they may exist on another host).
+    """
+    problems: list[str] = []
+    for name, cfg in datasets.items():
+        if getattr(cfg, "skip", False):
+            continue
+        for attr in DATASET_PATH_FIELDS:
+            value = getattr(cfg, attr, None)
+            if isinstance(value, dict) and mount_point not in value:
+                problems.append(
+                    _format_resolution_error(
+                        KeyError(mount_point), f"datasets.{name}.{attr}", value, mount_point, None
+                    )
+                )
+    return problems
 
 
 def inspect_dataset_paths(
@@ -450,6 +495,7 @@ def inspect_dataset_paths(
     mount_point: str | None = None,
     *,
     strict: bool = False,
+    mount_source: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Resolve and check the path fields of every dataset; collect the problems.
 
@@ -470,8 +516,13 @@ def inspect_dataset_paths(
     mount_point : str, optional
         The active mount point.
     strict : bool, default False
-        Re-raise path-resolution errors (unset variables, missing mount entries,
-        relative paths without a base directory) instead of collecting them.
+        Raise path-resolution errors (unset variables, relative paths without a base
+        directory) instead of collecting them; a missing mount entry raises
+        :class:`MountPointError` naming the available mount points.
+    mount_source : str, optional
+        Where *mount_point* came from (a :func:`neurodags.datasets.resolve_mount_point`
+        token); ``"environment"`` makes a missing-entry message name
+        ``NEURODAGS_MOUNT_POINT``.
 
     Returns
     -------
@@ -496,11 +547,28 @@ def inspect_dataset_paths(
             except (ValueError, KeyError) as exc:
                 if skipped:  # only resolved for the source_root suggestion
                     continue
+                if strict and isinstance(exc, KeyError):
+                    # An unknown mount point: name the available ones (a clean CLI error).
+                    raise MountPointError(
+                        [
+                            _format_resolution_error(
+                                exc,
+                                f"datasets.{name}.{attr}",
+                                getattr(cfg, attr, None),
+                                mount_point,
+                                mount_source,
+                            )
+                        ]
+                    ) from exc
                 if strict:
                     raise
                 problems.append(
                     _format_resolution_error(
-                        exc, f"datasets.{name}.{attr}", getattr(cfg, attr, None), mount_point
+                        exc,
+                        f"datasets.{name}.{attr}",
+                        getattr(cfg, attr, None),
+                        mount_point,
+                        mount_source,
                     )
                 )
 
@@ -574,6 +642,8 @@ def _shared_derivatives_path_problems(
 def resolve_dataset_paths(
     datasets: Mapping[str, Any],
     mount_point: str | None = None,
+    *,
+    mount_source: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve and validate the path fields of every active dataset.
 
@@ -590,6 +660,8 @@ def resolve_dataset_paths(
         :func:`neurodags.datasets.get_datasets_and_mount_point_from_pipeline_configuration`).
     mount_point : str, optional
         The active mount point.
+    mount_source : str, optional
+        Where *mount_point* came from, see :func:`inspect_dataset_paths`.
 
     Returns
     -------
@@ -602,12 +674,15 @@ def resolve_dataset_paths(
     ValueError
         If any active path field references an unset/empty environment variable, or
         is relative without a base directory.
-    KeyError
-        If a mount-point map lacks the active mount point.
+    MountPointError
+        If a mount-point map lacks the active mount point (naming the available ones).
+        A :class:`DatasetConfigError` and a :class:`KeyError`.
     DatasetConfigError
         If any configuration check fails (all problems are listed).
     """
-    resolved, problems = inspect_dataset_paths(datasets, mount_point, strict=True)
+    resolved, problems = inspect_dataset_paths(
+        datasets, mount_point, strict=True, mount_source=mount_source
+    )
     if problems:
         raise DatasetConfigError(problems)
     return resolved

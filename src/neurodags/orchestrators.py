@@ -11,7 +11,11 @@ import structlog
 from joblib import Parallel, delayed
 
 from neurodags.dag import collect_derivative_for_dataframe, run_derivative
-from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.datasets import (
+    _load_datasets_mount_and_source,
+    get_datasets_and_mount_point_from_pipeline_configuration,
+    resolve_mount_point,
+)
 from neurodags.definitions import DatasetConfig
 from neurodags.derivatives import get_derivative, list_derivatives
 from neurodags.derivatives.pipeline import register_derivatives_from_dict
@@ -298,6 +302,7 @@ def iterate_derivative_pipeline(
     joblib_prefer: str | None = None,
     *,
     base_dir: str | os.PathLike | None = None,
+    mount_point: str | None = None,
     inputs: str | os.PathLike | None = None,
     enumeration: InputEnumeration | None = None,
 ) -> pd.DataFrame | None:
@@ -351,6 +356,10 @@ def iterate_derivative_pipeline(
         ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
         against that file's directory instead. Without it, relative dataset paths in a
         mapping are an error.
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key (the CLI's
+        ``-m/--mount-point``). Without it, the ``NEURODAGS_MOUNT_POINT`` environment
+        variable, then the key, are used.
     inputs : str | os.PathLike, optional
         Frozen input list written by ``neurodags inputs`` (relative paths resolve against
         the current working directory). It replaces discovery for selection and indexing;
@@ -388,12 +397,15 @@ def iterate_derivative_pipeline(
             "No 'DerivativeDefinitions' found in the configuration. Skipping derivative registration."
         )
 
-    datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_configuration, datasets_input=datasets_configuration, base_dir=base_dir
+    datasets_configs, mount_point, mount_source = _load_datasets_mount_and_source(
+        pipeline_configuration,
+        datasets_input=datasets_configuration,
+        base_dir=base_dir,
+        mount_point=mount_point,
     )
     # Preflight: unresolved paths, missing/invalid source_root, invalid
     # derivatives_subdir and shared derivatives_path fail before any file is touched.
-    resolve_dataset_paths(datasets_configs, mount_point)
+    resolve_dataset_paths(datasets_configs, mount_point, mount_source=mount_source)
 
     # One enumeration per invocation (spec §8): run_pipeline passes its own down.
     if enumeration is None:
@@ -647,6 +659,7 @@ def _snapshot_pipeline_config(
     mount_point: Any,
     *,
     datasets_configuration: str | os.PathLike | None = None,
+    mount_point_source: str | None = None,
 ) -> None:
     """Copy pipeline config files into each dataset's ``derivatives_path/code/``.
 
@@ -666,6 +679,9 @@ def _snapshot_pipeline_config(
     - ``neurodags_version`` — installed package version (if discoverable).
     - ``neurodags_git_commit`` — HEAD commit of the neurodags source repo (if
       the package is installed from a git checkout).
+    - ``mount_point`` — the active mount point, and ``mount_point_source`` — where it
+      came from (``argument``, ``environment``, ``pipeline`` or ``unset``), since the
+      copied YAML does not show an override.
 
     Each unique ``derivatives_path/code/`` directory receives its own copy.
     Datasets that have no ``derivatives_path`` are silently skipped.  Any
@@ -707,6 +723,9 @@ def _snapshot_pipeline_config(
 
     # ---- neurodags version info ------------------------------------------------
     version_info: dict = {"snapshot_time": datetime.now(timezone.utc).isoformat()}
+    version_info["mount_point"] = mount_point
+    if mount_point_source is not None:
+        version_info["mount_point_source"] = mount_point_source
     try:
         import importlib.metadata
 
@@ -776,6 +795,7 @@ def run_pipeline(
     joblib_prefer: str | None = None,
     *,
     base_dir: str | os.PathLike | None = None,
+    mount_point: str | None = None,
     inputs: str | os.PathLike | None = None,
     enumeration: InputEnumeration | None = None,
 ) -> pd.DataFrame | None:
@@ -826,6 +846,10 @@ def run_pipeline(
         ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
         against that file's directory instead. Without it, relative dataset paths in a
         mapping are an error.
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key (the CLI's
+        ``-m/--mount-point``). Without it, the ``NEURODAGS_MOUNT_POINT`` environment
+        variable, then the key, are used.
     inputs : str | os.PathLike, optional
         Frozen input list written by ``neurodags inputs`` (relative paths resolve against
         the current working directory); replaces discovery for selection and indexing. See
@@ -853,15 +877,23 @@ def run_pipeline(
     # swallowed by the per-file error records (#28).
     try:
         _ds_configs, _mount = get_datasets_and_mount_point_from_pipeline_configuration(
-            pipeline_configuration, datasets_input=datasets_configuration, base_dir=base_dir
+            pipeline_configuration,
+            datasets_input=datasets_configuration,
+            base_dir=base_dir,
+            mount_point=mount_point,
         )
     except Exception as _load_err:
         # Loading errors resurface (and raise) when each derivative loads the
         # datasets itself; only the snapshot is skipped here, as before.
         log.warning("Could not load datasets before execution", error=str(_load_err))
         _ds_configs = None
+    # Where the mount came from (-m/mount_point=, NEURODAGS_MOUNT_POINT or the YAML), logged
+    # so job logs show it, and recorded in the snapshot.
+    mount_source = resolve_mount_point(config.get("mount_point"), mount_point)[1]
     if _ds_configs is not None:
-        resolve_dataset_paths(_ds_configs, _mount)
+        resolve_dataset_paths(_ds_configs, _mount, mount_source=mount_source)
+        # After the preflight, so a configuration error stays the first line on stderr.
+        log.info("Active mount point", mount_point=_mount, source=mount_source)
         # One enumeration per invocation, shared by every derivative (spec §8). Done
         # before the snapshot so a bad input list or index fails before any write.
         if enumeration is None:
@@ -897,6 +929,7 @@ def run_pipeline(
                 _ds_configs,
                 _mount,
                 datasets_configuration=datasets_configuration,
+                mount_point_source=mount_source,
             )
         except Exception as _snap_err:
             log.warning("Config snapshot failed — pipeline continues", error=str(_snap_err))
@@ -928,6 +961,7 @@ def run_pipeline(
             joblib_backend=joblib_backend,
             joblib_prefer=joblib_prefer,
             base_dir=base_dir,
+            mount_point=mount_point,
             inputs=None if enumeration is not None else inputs,
             enumeration=enumeration,
         )
@@ -951,6 +985,7 @@ def build_derivative_dataframe(
     raise_on_error: bool = False,
     n_jobs: int | None = None,
     base_dir: str | os.PathLike | None = None,
+    mount_point: str | None = None,
     inputs: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
     """
@@ -999,6 +1034,10 @@ def build_derivative_dataframe(
         ``new_definitions`` of a dict pipeline. Datasets read from a YAML file resolve
         against that file's directory instead. Without it, relative dataset paths in a
         mapping are an error.
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key (the CLI's
+        ``-m/--mount-point``). Without it, the ``NEURODAGS_MOUNT_POINT`` environment
+        variable, then the key, are used.
     inputs : str | os.PathLike, optional
         Frozen input list written by ``neurodags inputs``; replaces discovery for selection
         and indexing. Listed files that no longer exist (``missing-source``) get no row.
@@ -1073,11 +1112,15 @@ def build_derivative_dataframe(
         )
         return pd.DataFrame(columns=["index", "dataset", "file_path"])
 
-    datasets_configs, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_configuration, datasets_input=datasets_configuration, base_dir=base_dir
+    datasets_configs, mount_point, mount_source = _load_datasets_mount_and_source(
+        pipeline_configuration,
+        datasets_input=datasets_configuration,
+        base_dir=base_dir,
+        mount_point=mount_point,
     )
     # Preflight (#28): fail on unresolved ~/$VARS before any directory is touched.
-    resolve_dataset_paths(datasets_configs, mount_point)
+    resolve_dataset_paths(datasets_configs, mount_point, mount_source=mount_source)
+    log.info("Active mount point", mount_point=mount_point, source=mount_source)
 
     # One enumeration (spec §8); the layout roots come from the unlimited discovery.
     enumeration = enumerate_inputs(

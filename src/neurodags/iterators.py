@@ -5,7 +5,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.datasets import _load_datasets_mount_and_source
 from neurodags.definitions import DatasetConfig
 from neurodags.loggers import get_logger
 from neurodags.utils import (
@@ -14,6 +14,7 @@ from neurodags.utils import (
     lexical_path_key,
     relative_to_source_root,
     resolve_dataset_field,
+    resolve_dataset_paths,
 )
 
 log = get_logger(__name__)
@@ -953,15 +954,20 @@ def enumerate_pipeline_inputs(
     drop_split_continuations: bool = True,
     inputs: str | os.PathLike | None = None,
     base_dir=None,
+    mount_point: str | None = None,
 ) -> InputEnumeration:
     """Load the datasets of a pipeline configuration and enumerate its inputs.
 
     Parameters are those of :func:`get_all_files_from_pipeline_configuration` and
-    :func:`enumerate_inputs`.
+    :func:`enumerate_inputs`. The dataset paths are checked first, as in
+    :func:`neurodags.orchestrators.run_pipeline`
+    (:func:`neurodags.utils.resolve_dataset_paths`), so an unknown mount point raises
+    :class:`neurodags.utils.MountPointError`.
     """
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_input, datasets_input=datasets_input, base_dir=base_dir
+    datasets, mount_point, mount_source = _load_datasets_mount_and_source(
+        pipeline_input, datasets_input=datasets_input, base_dir=base_dir, mount_point=mount_point
     )
+    resolve_dataset_paths(datasets, mount_point, mount_source=mount_source)
     return enumerate_inputs(
         datasets,
         mount_point,
@@ -1026,6 +1032,7 @@ def get_all_files_from_pipeline_configuration(
     drop_split_continuations=True,
     *,
     base_dir=None,
+    mount_point=None,
 ):
     """
     Given a pipeline configuration and an optional datasets configuration,
@@ -1046,6 +1053,9 @@ def get_all_files_from_pipeline_configuration(
     base_dir : path-like, optional
         Directory that relative dataset paths of in-memory mappings resolve against
         (see :func:`get_datasets_and_mount_point_from_pipeline_configuration`).
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key (then
+        ``NEURODAGS_MOUNT_POINT``, then the key).
 
     Returns
     -------
@@ -1064,5 +1074,6 @@ def get_all_files_from_pipeline_configuration(
         max_files_per_dataset=max_files_per_dataset,
         drop_split_continuations=drop_split_continuations,
         base_dir=base_dir,
+        mount_point=mount_point,
     )
     return enumeration.files_per_dataset, enumeration.all_files, enumeration.source_roots
