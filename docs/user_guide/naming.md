@@ -230,8 +230,10 @@ folder. So `x.vhdr@Clean.fif.figs/plot.png` is accepted, while `figs/plot.png`, 
 unit of the folder would share, fails the unit before anything is replaced. A reported file
 outside the staging folder (also through a symbolic link) fails the unit, and so does a
 reported file that is itself a symbolic link (report the file it points to); files reached
-through a linked folder are published where they really are. Unreported files are
-discarded. The
+through a linked folder are published where they really are. A writer must not touch
+files another artifact of the unit reported: one that is removed, moved, replaced (by a
+link, a hard link or a copy) or rewritten after its own writer returned fails the unit.
+Unreported files are discarded. The
 exception is MNE split recordings: when the staging folder holds a recording of which only
 some files were reported (`X.fif` with `X-1.fif`, ..., `X.fif.gz` with `X.fif-1.gz`, ..., or
 BIDS names that differ only in `_split-NN_`), the unit fails instead of certifying a

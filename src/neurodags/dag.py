@@ -41,8 +41,10 @@ from neurodags.outputs import (
     build_manifest,
     canonical_reports,
     check_artifact_ownership,
+    check_reports_unchanged,
     check_unreported_split_parts,
     file_fingerprint,
+    file_identity,
     make_staging_dir,
     manifest_artifacts,
     move_staged,
@@ -891,8 +893,9 @@ def _save_final_artifacts(
        the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
        untouched in both cases. An MNE split recording of which a writer reported only
        some files fails the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
-       These checks run again on every artifact's files after the last writer, which may
-       have removed or replaced an earlier artifact's file.
+       After the last writer, a file removed or changed since its own writer returned
+       (moved, replaced by a link, a hard link or a copy, rewritten) fails the unit
+       (:func:`neurodags.outputs.check_reports_unchanged`).
     4. Move every staged file into place with ``os.replace``, continuation parts first and
        main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
        old file or a complete new one, never a partial one.
@@ -912,6 +915,7 @@ def _save_final_artifacts(
     staging = make_staging_dir(final_prefix)
     try:
         staged: dict[str, list[str]] = {}
+        identities: dict[str, list[tuple[int, int, int, int]]] = {}
         base = os.path.basename(final_prefix)
         for artifact_name, artifact in res.artifacts.items():
             artifact_path = os.path.join(staging, base + artifact_name)
@@ -922,6 +926,7 @@ def _save_final_artifacts(
                 staged[artifact_name] = canonical_reports(
                     staging, writer_paths(artifact_path, artifact.writer(artifact_path))
                 )
+                identities[artifact_name] = [file_identity(p) for p in staged[artifact_name]]
                 check_artifact_ownership(staged)
                 log.debug("Saved artifact", file=artifact_path, files=staged[artifact_name])
             except Exception as e:
@@ -933,13 +938,8 @@ def _save_final_artifacts(
                     exc_info=True,
                 )
                 raise
-        # Again after the last writer: a later one may have removed or replaced an earlier
-        # artifact's file (with a link, for example).
-        staged = {
-            name: canonical_reports(staging, writer_paths(paths[0], paths))
-            for name, paths in staged.items()
-        }
-        check_artifact_ownership(staged)
+        # A later writer may have removed or changed an earlier artifact's file.
+        check_reports_unchanged(staging, staged, identities)
         check_unreported_split_parts(staging, staged)
         # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
         # and mtime): a file another process replaces before our .done no longer matches.

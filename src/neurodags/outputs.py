@@ -77,12 +77,14 @@ __all__ = [
     "build_manifest",
     "check_artifact_ownership",
     "check_legacy_chained_outputs",
+    "check_reports_unchanged",
     "check_unreported_split_parts",
     "canonical_reports",
     "check_output_collisions",
     "dataset_derivatives_base",
     "entry_reference_base",
     "file_fingerprint",
+    "file_identity",
     "is_staging_name",
     "looks_like_staging",
     "make_staging_dir",
@@ -543,6 +545,61 @@ def canonical_reports(staging: str, paths: Sequence[str]) -> list[str]:
             here = os.path.join(here, part)
         out.setdefault(os.path.normcase(here), here)
     return list(out.values())
+
+
+def file_identity(path: str) -> tuple[int, int, int, int]:
+    """``(device, inode, size, mtime_ns)`` of the entry *path* (a link itself, not followed)."""
+    st = os.lstat(path)
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns
+
+
+def check_reports_unchanged(
+    staging: str,
+    staged: Mapping[str, Sequence[str]],
+    identities: Mapping[str, Sequence[tuple[int, int, int, int]]],
+) -> None:
+    """Refuse files that were removed or changed after the writer that reported them returned.
+
+    A later artifact's writer can remove, move, replace (by a link, a hard link or a copy) or
+    rewrite a file an earlier artifact reported; the ``.done`` would then certify a file its
+    writer did not write (for example the first part of an MNE split recording replaced by
+    its last part).
+
+    Parameters
+    ----------
+    staging : str
+        The unit's staging folder.
+    staged : mapping of suffix to paths
+        Each artifact's files, as :func:`canonical_reports` returned them after its writer.
+    identities : mapping of suffix to identities
+        :func:`file_identity` of each of those files, taken right after its writer.
+
+    Raises
+    ------
+    RuntimeError
+        If a file is gone, is another file, changed size or modification time, or is no
+        longer reached under the same spelling inside *staging*.
+    """
+    for suffix, paths in staged.items():
+        changed = []
+        for path, identity in zip(paths, identities[suffix], strict=True):
+            try:
+                if file_identity(path) != identity:
+                    changed.append(path)
+            except OSError:
+                changed.append(path)
+        if not changed:
+            try:
+                if canonical_reports(staging, paths) != list(paths):
+                    changed = list(paths)
+            except RuntimeError:
+                changed = list(paths)
+        if changed:
+            raise RuntimeError(
+                f"files of artifact {suffix!r} were removed or changed after its writer "
+                f"returned (by a later artifact's writer?): {changed}. A writer must not "
+                "touch files another artifact reported."
+            )
 
 
 def check_artifact_ownership(written: Mapping[str, Sequence[str]]) -> None:

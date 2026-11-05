@@ -440,11 +440,14 @@ def test_split_parts_reported_as_links_to_renamed_payloads_fail_the_unit(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
-@pytest.mark.parametrize("change", ["link_inside", "link_outside", "remove"])
+@pytest.mark.parametrize(
+    "change", ["link_inside", "link_outside", "remove", "hard_link", "copy", "rewrite"]
+)
 def test_later_writer_changing_an_earlier_artifact_fails_the_unit(tmp_path, change):
-    """Review dbb251b B1: a later writer replaced an earlier artifact's checked file with a
-    link (to its last split part, or to a file moved outside staging) and .done certified
-    5,000 of 200,000 samples, or a link to a file neurodags does not control."""
+    """Review dbb251b B1 / 0f4bcde F1: a later writer replaced an earlier artifact's checked
+    file (by a link to its last split part, a link to a file moved outside staging, a hard
+    link or a copy) and .done certified 5,000 of 200,000 samples, or a file neurodags does
+    not control."""
     big = _split_raw()
     parts = []
     outside = tmp_path / "payload.fif"
@@ -460,8 +463,17 @@ def test_later_writer_changing_an_earlier_artifact_fails_the_unit(tmp_path, chan
         elif change == "link_outside":
             os.replace(parts[1], outside)
             os.symlink(outside, parts[1])
-        else:
+        elif change == "remove":
             os.unlink(parts[1])
+        elif change == "hard_link":
+            os.unlink(parts[0])
+            os.link(parts[-1], parts[0])
+        elif change == "copy":
+            shutil.copy(parts[-1], parts[0])
+        else:
+            with open(parts[0], "r+b") as f:
+                f.seek(-1, os.SEEK_END)
+                f.write(b"x")
         Path(path).write_text("{}")
 
     @register_node(name="rt_later_writer", override=True)
@@ -471,10 +483,38 @@ def test_later_writer_changing_an_earlier_artifact_fails_the_unit(tmp_path, chan
         )
 
     base = _source(tmp_path)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="'.fif' were removed or changed after its writer"):
         run_derivative(_single("rt_later_writer"), "Rec", str(base), base)
     assert unit_state(str(base) + "@Rec", "Rec").state == "error"
     assert not any(".tmp~" in p.name for p in tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_later_writer_rerouting_an_earlier_folder_fails_the_unit(tmp_path):
+    """Review 0f4bcde F2: a later writer renamed an earlier artifact's folder and linked the
+    old name to it; the manifest listed a path the earlier writer never reported."""
+
+    def figs_writer(path):
+        os.mkdir(path)
+        Path(path, "plot.png").write_text("png")
+        return [os.path.join(path, "plot.png")]
+
+    def metadata_writer(path):
+        figs = path[: -len(".json")] + ".figs"
+        os.replace(figs, figs + ".moved")
+        os.symlink(os.path.basename(figs) + ".moved", figs, target_is_directory=True)
+        Path(path).write_text("{}")
+
+    @register_node(name="rt_later_reroute", override=True)
+    def node():
+        return NodeResult(
+            {".figs": Artifact(None, figs_writer), ".json": Artifact(None, metadata_writer)}
+        )
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError, match="'.figs' were removed or changed after its writer"):
+        run_derivative(_single("rt_later_reroute"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "error"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
