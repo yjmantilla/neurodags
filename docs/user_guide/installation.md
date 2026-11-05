@@ -18,9 +18,13 @@ pip install neurodags
 pip install neurodags[tui]
 ```
 
-The core install provides the `neurodags` CLI, including `run`, `dry-run`,
-`dataframe`, `dag`, `view`, and `validate`. The `tui` subcommand requires the
-optional `[tui]` extra.
+The core install provides the `neurodags` CLI, including `validate`, `run`,
+`dry-run`, `status`, `inputs`, `count-inputs`, `dataframe`, `dag`, `view`,
+`slurm-script` and `migrate`. The `tui` subcommand requires the optional `[tui]`
+extra.
+
+Upgrading a 0.3.x project? 0.4.0 refuses 0.3.x configurations until they are
+converted with `neurodags migrate`; see {doc}`migrating_to_0_4`.
 
 ## Development Install
 

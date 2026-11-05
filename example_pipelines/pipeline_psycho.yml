@@ -1,3 +1,4 @@
+naming_version: 1
 datasets: datasets_psycho.yml
 mount_point: local
 new_definitions: null

@@ -43,13 +43,16 @@ def _write_project(root: Path, *, node_name: str, save: bool = True) -> Path:
     ds = {
         "d": {
             "name": "d",
-            # Relative to the process cwd, which is what the issue is about.
+            # Relative paths: since 0.4.0 they resolve against this YAML's directory
+            # (in the parent), so workers with a stale cwd still see absolute paths.
+            "source_root": "in",
             "file_pattern": "in/**/*.fif",
             "derivatives_path": "out",
         }
     }
     (root / "ds.yml").write_text(yaml.safe_dump(ds))
     pipeline = {
+        "naming_version": 1,
         "datasets": "ds.yml",
         "new_definitions": "custom_nodes.py",
         "DerivativeDefinitions": {
@@ -74,7 +77,11 @@ def _worker_cwds(n_jobs: int = 2) -> set[str]:
 
 
 def _outputs(root: Path) -> list[str]:
-    return sorted(p.relative_to(root).as_posix() for p in (root / "out").rglob("*@Meta*"))
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in (root / "out").rglob("*@Meta*")
+        if p.suffix != ".done"  # each unit also has its .done manifest
+    )
 
 
 EXPECTED_OUTPUTS = ["out/sub-01/rec_raw.fif@Meta.json", "out/sub-02/rec_raw.fif@Meta.json"]
@@ -104,9 +111,13 @@ def test_reused_workers_resolve_relative_paths_after_chdir(monkeypatch, tmp_path
 
     df = build_derivative_dataframe(str(pipe2), raise_on_error=True, n_jobs=2)
     assert len(df) == 2
-    assert not any(c.endswith("__error") for c in df.columns)
-    # The reported file_path keeps the discovered (relative) spelling.
-    assert sorted(df["file_path"]) == ["in/sub-01/rec_raw.fif", "in/sub-02/rec_raw.fif"]
+    assert not any(c.endswith(".error") for c in df.columns)
+    # The pattern is resolved against the datasets YAML's directory, so the
+    # discovered (and reported) file_path is absolute under `second`.
+    assert sorted(df["file_path"]) == [
+        str(second / "in" / "sub-01" / "rec_raw.fif"),
+        str(second / "in" / "sub-02" / "rec_raw.fif"),
+    ]
 
 
 def test_parallel_layout_matches_serial(monkeypatch, tmp_path):
@@ -133,5 +144,5 @@ def test_parallel_dataframe_loads_custom_nodes_for_unsaved_derivative(monkeypatc
 
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 2
-    assert not any(c.endswith("__error") for c in df.columns)
+    assert not any(c.endswith(".error") for c in df.columns)
     assert not (tmp_path / "out").exists() or _outputs(tmp_path) == []

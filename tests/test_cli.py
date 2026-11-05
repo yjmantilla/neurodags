@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from neurodags.cli import main, resolve_cli_datasets_path
+from neurodags.iterators import InputEnumeration
 
 
 def test_importing_cli_keeps_stdout_clean():
@@ -44,6 +45,7 @@ def test_validate_prints_summary(tmp_path, capsys):
     pipe = tmp_path / "pipeline.yml"
     data = tmp_path / "datasets.yml"
     pipe.write_text(
+        "naming_version: 1\n"
         "datasets: datasets.yml\n"
         "mount_point: null\n"
         "DerivativeDefinitions:\n"
@@ -54,6 +56,7 @@ def test_validate_prints_summary(tmp_path, capsys):
     data.write_text(
         "demo:\n"
         "  name: Demo\n"
+        f"  source_root: {tmp_path}\n"
         f"  file_pattern: {tmp_path}/**/*.vhdr\n"
         f"  derivatives_path: {tmp_path}/derivatives\n"
     )
@@ -73,6 +76,7 @@ def test_validate_accepts_anchor_and_merge_keys(tmp_path, capsys):
     pipe = tmp_path / "pipeline.yml"
     data = tmp_path / "datasets.yml"
     pipe.write_text(
+        "naming_version: 1\n"
         "datasets: datasets.yml\n"
         "mount_point: null\n"
         "_defaults: &psd\n"
@@ -99,6 +103,7 @@ def test_validate_accepts_anchor_and_merge_keys(tmp_path, capsys):
     data.write_text(
         "demo:\n"
         "  name: Demo\n"
+        f"  source_root: {tmp_path}\n"
         f"  file_pattern: {tmp_path}/**/*.vhdr\n"
         f"  derivatives_path: {tmp_path}/derivatives\n"
     )
@@ -119,6 +124,7 @@ def test_validate_shows_effective_run_set_with_dependencies(tmp_path, capsys):
     pipe = tmp_path / "pipeline.yml"
     data = tmp_path / "datasets.yml"
     pipe.write_text(
+        "naming_version: 1\n"
         "datasets: datasets.yml\n"
         "mount_point: null\n"
         "DerivativeDefinitions:\n"
@@ -135,6 +141,7 @@ def test_validate_shows_effective_run_set_with_dependencies(tmp_path, capsys):
     data.write_text(
         "demo:\n"
         "  name: Demo\n"
+        f"  source_root: {tmp_path}\n"
         f"  file_pattern: {tmp_path}/**/*.vhdr\n"
         f"  derivatives_path: {tmp_path}/derivatives\n"
     )
@@ -154,7 +161,7 @@ def test_run_uses_derivative_list_when_not_explicit(dummy_pipeline):
     cfg = dummy_pipeline["config"]
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.orchestrators.load_configuration", return_value=cfg),
+        patch("neurodags.orchestrators.load_pipeline_configuration", return_value=cfg),
         patch("neurodags.orchestrators.iterate_derivative_pipeline") as iterate,
     ):
         assert main(["run", "pipeline.yml"]) == 0
@@ -166,7 +173,7 @@ def test_run_with_explicit_derivative(dummy_pipeline):
     cfg = dummy_pipeline["config"]
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.orchestrators.load_configuration", return_value=cfg),
+        patch("neurodags.orchestrators.load_pipeline_configuration", return_value=cfg),
         patch("neurodags.orchestrators.iterate_derivative_pipeline") as iterate,
     ):
         assert main(["run", "pipeline.yml", "--derivative", "BasicPrep"]) == 0
@@ -179,7 +186,7 @@ def test_dry_run_saves_combined_dataframe(dummy_pipeline):
     fake_df = pd.DataFrame({"file_path": ["a"], "plan": [[]]})
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.orchestrators.load_configuration", return_value=cfg),
+        patch("neurodags.orchestrators.load_pipeline_configuration", return_value=cfg),
         patch("neurodags.orchestrators.iterate_derivative_pipeline", return_value=fake_df),
         patch("neurodags.cli._save_dataframe") as save_df,
     ):
@@ -288,12 +295,16 @@ def test_view_launches_visualization_subprocess():
 # ---------------------------------------------------------------------------
 
 
-def test_count_prints_unique_file_count(dummy_pipeline, capsys):
+def test_count_prints_number_of_entries(dummy_pipeline, capsys):
+    from neurodags.iterators import InputEntry, InputEnumeration
+
     cfg = dummy_pipeline["config"]
-    fake_df = pd.DataFrame({"file_path": ["a", "a", "b"], "other": [1, 2, 3]})
+    fake = InputEnumeration(
+        entries=[InputEntry(0, "d", "a", "/r/a"), InputEntry(1, "d", "b", "/r/b")]
+    )
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.run_pipeline", return_value=fake_df),
+        patch("neurodags.cli._cli_enumeration", return_value=fake),
     ):
         assert main(["count-inputs", "pipeline.yml"]) == 0
     assert capsys.readouterr().out.strip() == "2"
@@ -321,10 +332,11 @@ def test_count_counts_dataset_entries_not_unique_paths(dummy_pipeline, tmp_path,
 
 
 def test_count_prints_zero_on_empty_result(dummy_pipeline, capsys):
+
     cfg = dummy_pipeline["config"]
     with (
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
-        patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
+        patch("neurodags.cli._cli_enumeration", return_value=InputEnumeration(entries=[])),
     ):
         assert main(["count-inputs", "pipeline.yml"]) == 0
     assert capsys.readouterr().out.strip() == "0"
@@ -755,24 +767,47 @@ def test_status_json_adds_index_lists_keeps_existing_keys(dummy_pipeline, capsys
     assert rc == 1
     assert set(data) == {
         "config",
+        "mount_point",
+        "mount_point_source",
         "n_files",
         "derivatives",
         "grand_total",
         "complete",
         "missing_indices",
+        "incomplete_indices",
         "errored_indices",
+        "unlisted_files",
+        "staging_dirs",
+        "inputs",
+        "missing_source_indices",
+        "not_in_list",
+        "planning_error_indices",
     }
     assert data["missing_indices"] == [1, 4]
     assert data["errored_indices"] == [4, 9]
     assert all(type(i) is int for i in data["missing_indices"] + data["errored_indices"])
     for counts in data["derivatives"].values():
-        assert set(counts) == {"total", "done", "skipped", "missing", "errored"}
+        assert set(counts) == {
+            "total",
+            "done",
+            "skipped",
+            "incomplete",
+            "missing",
+            "errored",
+            "missing-source",
+            "planning-error",
+            "migrated",
+        }
     assert data["derivatives"]["BasicPrep"] == {
         "total": 4,
         "done": 1,
         "skipped": 0,
+        "incomplete": 0,
         "missing": 2,
         "errored": 1,
+        "missing-source": 0,
+        "planning-error": 0,
+        "migrated": 0,
     }
     assert data["n_files"] == 4
     assert "files" not in data
@@ -791,7 +826,18 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         (4, "Spectrum"),
         (9, "BasicPrep"),
     ]
-    assert set(files[0]) == {"index", "dataset", "file_path", "derivative", "status", "error_path"}
+    assert set(files[0]) == {
+        "index",
+        "dataset",
+        "file_path",
+        "derivative",
+        "status",
+        "label",
+        "error_path",
+        "unlisted",
+        "staging_dirs",
+        "planning_error",
+    }
     rec = next(f for f in files if f["index"] == 4 and f["derivative"] == "Spectrum")
     assert rec == {
         "index": 4,
@@ -799,7 +845,11 @@ def test_status_json_include_files(dummy_pipeline, capsys):
         "file_path": "/d/e.vhdr",
         "derivative": "Spectrum",
         "status": "errored",
+        "label": "errored",
         "error_path": "/o/e.e",
+        "unlisted": [],
+        "staging_dirs": [],
+        "planning_error": None,
     }
     assert files[0]["error_path"] is None
 
@@ -856,8 +906,12 @@ def test_status_empty_result_json_is_valid(dummy_pipeline, capsys):
         "total": 0,
         "done": 0,
         "skipped": 0,
+        "incomplete": 0,
         "missing": 0,
         "errored": 0,
+        "missing-source": 0,
+        "planning-error": 0,
+        "migrated": 0,
     }
     assert data["complete"] is True
     assert data["missing_indices"] == []
@@ -967,6 +1021,7 @@ def test_log_level_flag_passed_to_configure_logging(dummy_pipeline, capsys):
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
         patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
         patch("neurodags.cli.configure_logging") as mock_log,
+        patch("neurodags.cli._cli_enumeration", return_value=InputEnumeration(entries=[])),
     ):
         assert main(["--log-level", "WARNING", "count-inputs", "pipeline.yml"]) == 0
         mock_log.assert_called_once()
@@ -981,6 +1036,7 @@ def test_log_file_flag_passed_to_configure_logging(dummy_pipeline, tmp_path):
         patch("neurodags.cli._load_pipeline_config", return_value=cfg),
         patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()),
         patch("neurodags.cli.configure_logging") as mock_log,
+        patch("neurodags.cli._cli_enumeration", return_value=InputEnumeration(entries=[])),
     ):
         assert main(["--log-file", log_path, "count-inputs", "pipeline.yml"]) == 0
         _, kwargs = mock_log.call_args
@@ -998,6 +1054,7 @@ def _write_nested_pipeline(root: Path) -> tuple[Path, Path]:
     pdir.mkdir(parents=True)
     pipe = pdir / "pipeline.yml"
     pipe.write_text(
+        "naming_version: 1\n"
         "datasets: alt.yml\n"
         "mount_point: null\n"
         "DerivativeDefinitions:\n"
@@ -1009,6 +1066,7 @@ def _write_nested_pipeline(root: Path) -> tuple[Path, Path]:
     alt.write_text(
         "alt:\n"
         "  name: Alt\n"
+        f"  source_root: {root}\n"
         f"  file_pattern: {root}/**/*.vhdr\n"
         f"  derivatives_path: {root}/derivatives\n"
     )
@@ -1033,31 +1091,31 @@ def test_datasets_path_expands_env_vars(tmp_path, monkeypatch, capsys):
     assert "datasets: alt" in capsys.readouterr().out
 
 
-def test_datasets_path_yaml_relative_fallback_warns(tmp_path, monkeypatch, capsys):
+def test_datasets_path_yaml_relative_fallback_removed(tmp_path, monkeypatch, capsys):
+    # 0.4.0: the YAML-relative -d lookup deprecated in 0.3.5 is gone; -d is cwd-relative.
     _write_nested_pipeline(tmp_path)
     monkeypatch.chdir(tmp_path)
     with warnings.catch_warnings():
-        warnings.simplefilter("error", FutureWarning)  # must not leak as a Python warning
+        warnings.simplefilter("error", FutureWarning)  # no deprecation path left
         rc = main(["validate", "p/x/pipeline.yml", "-d", "alt.yml"])
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "datasets: alt" in captured.out
-    suggestion = Path("p") / "x" / "alt.yml"
-    assert captured.err == (
-        "neurodags: warning: -d 'alt.yml' was found relative to the pipeline YAML; this "
-        "lookup is deprecated and will be removed in a future release. "
-        f"Pass '-d {suggestion}' instead.\n"
-    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "Traceback" not in err
+    assert str(tmp_path / "alt.yml") in err
+    assert str(tmp_path / "p" / "x" / "alt.yml") not in err
 
 
-def test_resolve_cli_datasets_path_emits_future_warning(tmp_path, monkeypatch):
+def test_resolve_cli_datasets_path_is_cwd_relative_only(tmp_path, monkeypatch):
+    from neurodags.cli import DatasetsPathError
+
     _, alt = _write_nested_pipeline(tmp_path)
     monkeypatch.chdir(tmp_path)
-    with pytest.warns(FutureWarning, match="deprecated"):
-        assert resolve_cli_datasets_path("alt.yml", "p/x/pipeline.yml") == str(alt)
+    assert resolve_cli_datasets_path("p/x/alt.yml") == str(alt)
+    with pytest.raises(DatasetsPathError, match="not found"):
+        resolve_cli_datasets_path("alt.yml")
 
 
-def test_datasets_path_fallback_subprocess_prints_one_clean_line(tmp_path):
+def test_datasets_path_fallback_removed_subprocess_is_one_clean_line(tmp_path):
     _write_nested_pipeline(tmp_path)
     result = subprocess.run(
         [sys.executable, "-m", "neurodags.cli", "validate", "p/x/pipeline.yml", "-d", "alt.yml"],
@@ -1065,10 +1123,10 @@ def test_datasets_path_fallback_subprocess_prints_one_clean_line(tmp_path):
         text=True,
         cwd=tmp_path,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 2
     lines = result.stderr.splitlines()
     assert len(lines) == 1
-    assert lines[0].startswith("neurodags: warning: -d 'alt.yml'")
+    assert lines[0].startswith("neurodags: error: datasets file 'alt.yml' not found")
 
 
 def test_datasets_path_cwd_wins_over_yaml_relative(tmp_path, monkeypatch):
@@ -1088,7 +1146,7 @@ def test_datasets_path_missing_is_clean_error(tmp_path, monkeypatch, capsys):
     assert rc == 2
     assert "Traceback" not in err
     assert str(tmp_path / "nope.yml") in err
-    assert str(tmp_path / "p" / "x" / "nope.yml") in err
+    assert str(tmp_path / "p" / "x" / "nope.yml") not in err  # no YAML-relative lookup
 
 
 def test_datasets_path_unset_env_var_is_clean_error(tmp_path, monkeypatch, capsys):
@@ -1126,11 +1184,22 @@ def test_datasets_path_missing_subprocess_has_no_traceback(tmp_path):
 def test_datasets_path_resolved_for_every_subcommand(tmp_path, monkeypatch, argv):
     _, alt = _write_nested_pipeline(tmp_path)
     monkeypatch.chdir(tmp_path)
+
+    seen: list = []
+
+    def fake_enumeration(args):
+        seen.append(args.datasets)
+        return InputEnumeration(entries=[])
+
     with (
         patch("neurodags.cli.run_pipeline", return_value=pd.DataFrame()) as rp,
         patch("neurodags.cli.build_derivative_dataframe", return_value=pd.DataFrame()) as bd,
+        patch("neurodags.cli._cli_enumeration", side_effect=fake_enumeration),
     ):
         main([argv[0], "p/x/pipeline.yml", "-d", "p/x/alt.yml", *argv[1:]])
+    if argv[0] == "count-inputs":  # counts the enumeration, no dry run
+        assert seen == [str(alt)]
+        return
     called = bd if argv[0] == "dataframe" else rp
     assert called.call_args.kwargs["datasets_configuration"] == str(alt)
 

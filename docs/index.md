@@ -37,7 +37,9 @@ COMPARISON
 - {doc}`user_guide/tui` — manage and run pipelines from the terminal
 - {doc}`auto_examples/plot_quickstart_synthetic` — minimal working pipeline in minutes
 - {doc}`user_guide/concepts` — understand DAGs, derivatives, nodes, and artifacts
+- {doc}`user_guide/migrating_to_0_4` — upgrading a 0.3.x project (`neurodags migrate`)
 - {doc}`user_guide/pipeline_yaml` — full `pipeline.yml` reference
+- {doc}`user_guide/naming` — output names, layout, `.done` manifests and column names
 - {doc}`user_guide/datasets_yaml` — full `datasets.yml` reference
 - {doc}`user_guide/custom_nodes` — write and register your own nodes
 - {doc}`user_guide/dataframe_assembly` — build ML-ready dataframes from derivatives

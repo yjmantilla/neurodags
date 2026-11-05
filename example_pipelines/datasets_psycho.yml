@@ -1,10 +1,13 @@
-
+# Relative paths are resolved against this file's directory (neurodags 0.4.0).
 psychostimulants:
   name: PsychoStimulants
-  file_pattern: 
-    local: "_data/psychostimulants/**/*.vhdr"
+  source_root:
+    local: "../_data/psychostimulants"
     fir: /home/yorguin/projects/def-kjerbi/data/EEG_psychostimulants_2025-02/BIDS
+  file_pattern:
+    local: "../_data/psychostimulants/**/*.vhdr"
+    fir: /home/yorguin/projects/def-kjerbi/data/EEG_psychostimulants_2025-02/BIDS/**/*.vhdr
 
-  derivatives_path: 
-    local: "_outputs/psychostimulants"
+  derivatives_path:
+    local: "../_outputs/psychostimulants"
     fir: "/home/yorguin/scratch/real_scratch/output_psychostimulants/"

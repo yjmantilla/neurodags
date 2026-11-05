@@ -32,6 +32,7 @@ import yaml
 # ``pipeline.yml`` file.
 
 PIPELINE_YAML = """\
+naming_version: 1
 DerivativeDefinitions:
 
   BasicPrep:

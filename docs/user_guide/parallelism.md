@@ -28,7 +28,11 @@ neurodags run pipeline.yml --derivative MyDerivative --n-jobs 4 --joblib-backend
 
 ## Subset Execution
 
-Process only a subset of files by index:
+Process only a subset of files by index. The index is the position in the sorted input list
+(datasets in YAML order, files sorted by their path below `source_root`; see
+{ref}`Discovery and file order <datasets-discovery-order>`); an unknown or negative index raises
+`neurodags.iterators.IndexSelectionError` before anything is written. Pass `inputs=` (a list
+written by `neurodags inputs`) to keep the indices fixed while files are added:
 
 ```python
 from neurodags.orchestrators import run_pipeline
@@ -39,13 +43,16 @@ run_pipeline(config, derivatives=["MyDerivative"], only_index=0)
 # Multiple files
 run_pipeline(config, derivatives=["MyDerivative"], only_index=[0, 2, 5])
 
-# Limit files per dataset
+# Limit files per dataset (the first 10 in sorted order)
 run_pipeline(config, derivatives=["MyDerivative"], max_files_per_dataset=10)
+
+# Indices of a frozen input list
+run_pipeline(config, inputs="inputs.tsv", only_index=[0, 2, 5])
 ```
 
 ## Error Handling
 
-By default (`raise_on_error=False`) errors are caught per-file, logged with full traceback, and a `.error` marker written — then execution continues with the next file. To stop immediately on first failure:
+By default (`raise_on_error=False`) errors are caught per-file, logged with full traceback, and a `.error` marker written — then execution continues with the next file. To fail the run on the first failure instead:
 
 ```python
 from neurodags.orchestrators import run_pipeline
@@ -53,7 +60,7 @@ from neurodags.orchestrators import run_pipeline
 run_pipeline(config, derivatives=["MyDerivative"], raise_on_error=True)
 ```
 
-`raise_on_error=True` raises `RuntimeError` with the file path, derivative name, and traceback. Useful for CI or single-file debugging where you want a hard stop rather than a partial run.
+`raise_on_error=True` still processes every input of the current derivative (sequentially or in parallel), then raises `RuntimeError` with the first failure's file path, derivative name, and traceback (first in input order); no further derivative runs. Useful for CI or single-file debugging where a failure must fail the call.
 
 ## HPC / SLURM
 

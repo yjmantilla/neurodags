@@ -16,19 +16,73 @@ import mne
 import numpy as np
 
 from neurodags.definitions import DatasetConfig, PathLike
-from neurodags.loaders import load_configuration
-from neurodags.utils import expand_path, get_num_digits
+from neurodags.loaders import load_configuration, load_pipeline_configuration
+from neurodags.utils import MOUNT_POINT_ENV, expand_path, get_num_digits
+
+#: How each :func:`resolve_mount_point` source is shown in human-readable output.
+MOUNT_SOURCE_LABELS = {
+    "argument": "-m/--mount-point",
+    "environment": f"${MOUNT_POINT_ENV}",
+    "pipeline": "pipeline",
+    "unset": "not set",
+}
+
+
+def resolve_mount_point(configured: Any, override: str | None = None) -> tuple[Any, str]:
+    """Return the active mount point and where it came from.
+
+    The first one that is set wins: *override* (``-m/--mount-point`` or the
+    ``mount_point=`` argument of the API), the ``NEURODAGS_MOUNT_POINT`` environment
+    variable, then the pipeline's ``mount_point`` key. An empty override or variable counts
+    as unset.
+
+    Parameters
+    ----------
+    configured : Any
+        The ``mount_point`` value of the pipeline configuration (``None`` when absent).
+    override : str, optional
+        An explicit mount point that takes precedence over everything else.
+
+    Returns
+    -------
+    mount_point : Any
+        The active mount point, or ``None`` when none is set anywhere.
+    source : str
+        ``"argument"``, ``"environment"``, ``"pipeline"`` or ``"unset"``.
+    """
+    if override:
+        return override, "argument"
+    from_env = os.environ.get(MOUNT_POINT_ENV)
+    if from_env:
+        return from_env, "environment"
+    if configured is not None:
+        return configured, "pipeline"
+    return None, "unset"
 
 
 def get_datasets_and_mount_point_from_pipeline_configuration(
     pipeline_input: dict[str, Any] | PathLike,
     datasets_input: dict[str, Any] | PathLike | None = None,
-) -> dict[str, Any]:
+    *,
+    base_dir: PathLike | None = None,
+    mount_point: str | None = None,
+) -> tuple[dict[str, DatasetConfig], Any]:
     """
     Load the pipeline configuration and return the datasets section and mount point.
 
     If datasets_input is provided, it overrides any datasets defined in the
-    pipeline configuration.
+    pipeline configuration. The pipeline configuration must declare
+    ``naming_version: 1`` (:func:`neurodags.loaders.load_pipeline_configuration`).
+
+    Each returned :class:`~neurodags.definitions.DatasetConfig` remembers the directory
+    its relative path fields (``source_root``, ``file_pattern``, ``exclude_pattern``,
+    ``derivatives_path``) resolve against (spec §1.3):
+
+    - datasets read from a datasets YAML: that YAML's directory;
+    - an inline ``datasets:`` mapping in a pipeline YAML: the pipeline YAML's directory;
+    - a mapping given in memory (``datasets_input`` dict, or inline datasets of a
+      ``pipeline_input`` dict): *base_dir*. Without *base_dir*, relative paths in such a
+      mapping are an error when they are resolved.
 
     Parameters
     ----------
@@ -39,28 +93,63 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         If provided, it overrides the 'datasets' section of the pipeline configuration.
         ``~`` and ``$VARS`` are expanded; a relative path is resolved relative to the
         pipeline YAML's directory when ``pipeline_input`` is a path (same rule as the
-        ``datasets:`` key). The CLI's ``-d/--datasets`` is resolved against the current
-        working directory before it reaches this function.
+        ``datasets:`` key), else relative to *base_dir* (or the current working
+        directory when *base_dir* is not given). The CLI's ``-d/--datasets`` is resolved
+        against the current working directory before it reaches this function.
+    base_dir : path-like, optional
+        Directory that relative paths of in-memory dataset mappings resolve against
+        (see above). Ignored for datasets read from a YAML file.
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key. Without it,
+        the ``NEURODAGS_MOUNT_POINT`` environment variable, then the key, are used
+        (see :func:`resolve_mount_point`).
 
     Returns
     -------
     datasets : dict
         The datasets section of the pipeline configuration.
     mount_point : str or None
-        The mount point if specified, otherwise None.
+        The active mount point, or None when none is set.
 
     Raises
     ------
+    ConfigVersionError
+        If the pipeline configuration lacks ``naming_version: 1``.
     ValueError
         If the datasets section is missing or invalid.
     """
-    pipeline_config = load_configuration(pipeline_input)
-    mount_point = pipeline_config.get("mount_point", None)
+    datasets, mount_point, _ = _load_datasets_mount_and_source(
+        pipeline_input, datasets_input, base_dir=base_dir, mount_point=mount_point
+    )
+    return datasets, mount_point
+
+
+def _load_datasets_mount_and_source(
+    pipeline_input: dict[str, Any] | PathLike,
+    datasets_input: dict[str, Any] | PathLike | None = None,
+    *,
+    base_dir: PathLike | None = None,
+    mount_point: str | None = None,
+) -> tuple[dict[str, DatasetConfig], Any, str]:
+    """:func:`get_datasets_and_mount_point_from_pipeline_configuration`, plus the source
+    of the mount point (a :func:`resolve_mount_point` token)."""
+    pipeline_config = load_pipeline_configuration(pipeline_input)
+    mount_point, mount_source = resolve_mount_point(pipeline_config.get("mount_point"), mount_point)
+    pipeline_is_file = isinstance(pipeline_input, str | os.PathLike)
+    memory_base = os.path.abspath(os.fspath(base_dir)) if base_dir is not None else None
 
     if datasets_input is not None:
         datasets = datasets_input
+        # A datasets mapping given to the API is relative to base_dir only.
+        origin_dir = memory_base
     else:
         datasets = pipeline_config.get("datasets", None)
+        # Inline datasets in a pipeline YAML are relative to that YAML.
+        origin_dir = (
+            os.path.dirname(os.path.abspath(os.fspath(pipeline_input)))
+            if pipeline_is_file
+            else memory_base
+        )
 
     if datasets is None:
         raise ValueError("No 'datasets' configuration provided or found in the pipeline.")
@@ -70,19 +159,28 @@ def get_datasets_and_mount_point_from_pipeline_configuration(
         # pipeline file; otherwise "$PROJ/ds.yml" would be joined onto the
         # pipeline directory first (#28).
         datasets = expand_path(os.fspath(datasets), field="datasets")
-        if isinstance(pipeline_input, str | os.PathLike):
-            datasets_path_obj = Path(datasets)
-            if not datasets_path_obj.is_absolute():
+        datasets_path_obj = Path(datasets)
+        if not datasets_path_obj.is_absolute():
+            if pipeline_is_file:
                 datasets = str(Path(pipeline_input).resolve().parent / datasets_path_obj)
-        datasets = load_configuration(datasets)
+            elif memory_base is not None:
+                datasets = os.path.join(memory_base, datasets)
+        datasets_file = os.path.abspath(datasets)
+        datasets = load_configuration(datasets_file)
+        # Paths inside a datasets YAML are relative to that YAML (0.4.0).
+        origin_dir = os.path.dirname(datasets_file)
     elif not isinstance(datasets, dict):
         raise ValueError("'datasets' must be a dict or a path to a YAML file.")
 
     # At this point, datasets should be a dict
     # Make them into DatasetConfig instances
-    datasets = {name: DatasetConfig(**cfg) for name, cfg in datasets.items()}
+    configs: dict[str, DatasetConfig] = {}
+    for name, cfg in datasets.items():
+        dataset_config = DatasetConfig(**cfg)
+        dataset_config._base_dir = origin_dir
+        configs[name] = dataset_config
 
-    return datasets, mount_point
+    return configs, mount_point, mount_source
 
 
 def replace_brainvision_filename(fpath: PathLike, newname: str) -> None:

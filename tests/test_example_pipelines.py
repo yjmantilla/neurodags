@@ -25,7 +25,7 @@ def test_quickstart_preprocessing_template(tmp_path, monkeypatch):
         raise_on_error=True,
     )
 
-    stem = out_dir / "derivatives" / "sub-01_task-rest_eeg.vhdr@Preprocessed"
+    stem = out_dir / "derivatives" / "sub-01" / "sub-01_task-rest_eeg.vhdr@Preprocessed"
     assert Path(f"{stem}.report.html").is_file()
     epochs = mne.read_epochs(f"{stem}.fif", verbose="error")
     assert epochs.info["sfreq"] == 256.0

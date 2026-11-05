@@ -5,7 +5,8 @@
 ## Top-Level Keys
 
 ```yaml
-datasets: datasets.yml          # path to datasets.yml
+naming_version: 1               # required since 0.4.0
+datasets: datasets.yml          # path to datasets.yml (or an inline mapping)
 mount_point: local              # active mount point (matches key in datasets.yml)
 new_definitions: custom_nodes.py  # optional: custom node module(s)
 
@@ -22,13 +23,36 @@ DerivativeList:
   - ...
 ```
 
+## `naming_version`
+
+**Required since 0.4.0.** Must be exactly `naming_version: 1`. It declares that the
+configuration follows the 0.4.0 naming, output-layout and completion rules. A configuration
+without it, or with another value, is refused before anything runs by every entry point
+(all CLI subcommands, the TUI, `run_pipeline`, `iterate_derivative_pipeline`,
+`build_derivative_dataframe`, ...):
+
+```text
+neurodags: error: pipeline configuration 'pipeline.yml' has no top-level 'naming_version'. neurodags 0.4.0 requires 'naming_version: 1'. To upgrade a neurodags 0.3.x configuration and its outputs, preview with `neurodags migrate pipeline.yml`, then run it again with --apply (see the 'Migrating to 0.4' guide).
+```
+
 ## `datasets`
 
-Path to `datasets.yml`. Relative paths are resolved from the pipeline YAML location.
+Path to `datasets.yml`, or an inline mapping of datasets (same fields as in
+{doc}`datasets_yaml`). A relative path is resolved from the pipeline YAML location.
+
+Relative paths *inside* the datasets definitions (`source_root`, `file_pattern`,
+`exclude_pattern`, `derivatives_path`) are resolved against the directory of the YAML file
+that contains them: the datasets YAML, or `pipeline.yml` for an inline mapping (changed in
+0.4.0; they used to be relative to the current working directory). For a configuration
+passed as a dict to the Python API, pass `base_dir=` to `run_pipeline` /
+`iterate_derivative_pipeline` / `build_derivative_dataframe`; relative dataset paths without
+it are an error. See {ref}`Relative paths <relative-paths>` for the full table.
 
 ## `mount_point`
 
-Selects which environment's paths to use from `datasets.yml`. Must match a key in each dataset's `file_pattern` / `derivatives_path` maps.
+Selects which environment's paths to use from `datasets.yml`. Must match a key in each dataset's `source_root` / `file_pattern` / `derivatives_path` maps.
+
+It is the default only: `-m/--mount-point` on the command line, `mount_point=` in the Python API, or the `NEURODAGS_MOUNT_POINT` environment variable select another mount without editing the YAML (see {ref}`Choosing the mount point <mount-point-override>`).
 
 ## `new_definitions`
 
@@ -49,7 +73,7 @@ Relative paths resolved from the pipeline YAML location. Each module is executed
 
 ## DerivativeDefinitions
 
-Each key is a derivative name (CamelCase by convention, see [Derivative names](#derivative-names)). The value is a derivative definition:
+Each key is a derivative name (see [Derivative names](#derivative-names)). The value is a derivative definition:
 
 ```yaml
 DerivativeDefinitions:
@@ -68,24 +92,23 @@ DerivativeDefinitions:
 
 ### Derivative names
 
-Outputs are written as `<source>@<OnDiskName><artifact suffix>`. A name without `_` is used as
-is (`BandPower` → `@BandPower`, `psd-welch` → `@psd-welch`); a name with `_` is converted to
-CamelCase (`fit_w_l06` → `@FitWL06`, `band_power` → `@BandPower`), keeping the derivative name a
-single token without `_` (a separator in many naming conventions, including BIDS). Everything else — `DerivativeList`, reuse steps
-(`derivative: fit_w_l06.nc`), dataframe columns — uses the YAML name. `neurodags validate` shows
-each on-disk name that differs from its YAML name, and names that collide on disk (e.g.
-`band_power` and `BandPower`) or contain `.`, `@`, `/`, `\`, `*`, `?`, `[`, `]` are rejected
-before anything runs.
+Outputs are written as `<source>@<name><artifact suffix>`, with the name exactly as written
+here (`fit_w_l06` → `@fit_w_l06`, `BandPower` → `@BandPower`). The same spelling is used
+everywhere: `DerivativeList`, reuse steps (`derivative: fit_w_l06.nc`), `--derivative`, dataframe
+columns and `status`. Names must match `^[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`, be YAML strings
+(quote keys such as `"Yes"`), be unique ignoring case, not be `SourceFile`, and not define both
+`X` and `X-<digits>`; every entry point rejects invalid names before anything runs.
 
-See **[File Naming Conventions](naming.md)** for all naming rules: output files, marker files,
-references, the output layout, `&` in chained pipelines and dataframe column names.
+See **[File Naming and Output Layout](naming.md)** for all naming rules: output files, `.done`
+manifests and markers, references, the output layout, chained names (the last `@` separates
+source and derivative) and dataframe column names.
 
 ### Derivative Flags
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `save` | bool | `True` | Persist output artifacts to disk. `False` = compute but don't write. |
-| `overwrite` | bool | `False` | Force recompute even if cached output exists. |
+| `overwrite` | bool | `False` | Force recompute even if the unit is done (valid `.done` manifest). |
 | `for_dataframe` | bool | `False` | Include this derivative when calling `build_derivative_dataframe`. |
 
 ### Node Steps
@@ -113,21 +136,22 @@ Each entry in `nodes` is a step with a unique `id`. Steps execute in topological
   derivative: CleanedEEG.fif
 ```
 
-- `derivative`: `<DerivativeName>.<ext>` — resolves the named derivative for the current file; use the YAML name, not the on-disk name (see {ref}`Derivative references <naming-references>`)
+- `derivative`: `<DerivativeName><suffix>` — resolves the named derivative for the current file and selects the artifact whose suffix is **exactly** `<suffix>` (`CleanedEEG.fif` selects `.fif`, never `.report.html`); the name is written as in `DerivativeDefinitions`, which is also its on-disk spelling (see {ref}`Derivative references <naming-references>`)
+- A bare `<DerivativeName>` is allowed only when the derivative has exactly one artifact
 - Use `SourceFile` to load the raw input file
 
-If the upstream derivative is already cached on disk, the matching file is loaded. If the upstream derivative has not yet been written (it is being computed in the same run), the in-memory `NodeResult` is used directly — both paths produce identical results.
+If the upstream derivative is already done on disk, the selected artifact's file is loaded. If it has not been written yet (it is computed in the same run, or has `save: false`), the selected artifact of the in-memory `NodeResult` is used. Selection is the same in both cases.
 
 ##### Selecting one artifact from a multi-artifact derivative
 
-When an upstream derivative is a **splitter** — a node that returns one artifact per condition, segment type, or split key — the same `<DerivativeName>.<ext>` syntax selects a specific artifact:
+When an upstream derivative is a **splitter** — a node that returns one artifact per condition, segment type, or split key — write the artifact's full suffix:
 
 ```yaml
 - id: 0
-  derivative: EpochSplitter.EO_baseline.fif   # selects only the EO_baseline artifact
+  derivative: EpochSplitter.EO_baseline.fif   # selects only the .EO_baseline.fif artifact
 ```
 
-This works whether `EpochSplitter` is cached on disk or in memory.  If the requested extension is absent from the upstream derivative's artifacts, a warning is logged and the full `NodeResult` is passed as a fallback.
+`EpochSplitter.fif` does **not** select `.EO_baseline.fif`: suffixes are compared for equality, not by their ending. A suffix the upstream derivative did not produce, or a bare `EpochSplitter`, fails the consuming unit with `neurodags.dag.ArtifactSelectionError` listing the available suffixes (`'.EC_baseline.fif', '.EO_baseline.fif'`). There is no fallback to another artifact or to the whole result.
 
 ```yaml
 # Splitter example
@@ -153,7 +177,7 @@ DerivativeDefinitions:
 
 #### id.N References
 
-`id.<N>` in args resolves to the output of step `N`. When a step produces multiple artifacts, the artifact matching the node's expected argument type is selected by the `_unwrap_for_arg` heuristic (first `.fif` for MNE objects, first artifact otherwise). To select a specific artifact from a multi-artifact upstream derivative, use the `derivative: Name.ext` reuse step (see above) rather than relying on `id.<N>` heuristics.
+`id.<N>` in args resolves to the output of step `N`. When a step produces multiple artifacts, the artifact matching the node's expected argument type is selected by the `_unwrap_for_arg` heuristic (first `.fif` for MNE objects, first artifact otherwise). To select a specific artifact from a multi-artifact upstream derivative, use the `derivative: Name.suffix` reuse step (see above) rather than relying on `id.<N>` heuristics.
 
 #### Field access: `id.N.field`
 
@@ -233,6 +257,7 @@ DerivativeList:
 ## Complete Example
 
 ```yaml
+naming_version: 1
 datasets: datasets.yml
 mount_point: local
 new_definitions: custom_nodes.py

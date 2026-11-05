@@ -1,11 +1,21 @@
 import glob
+import ntpath
 import os
 import re
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 
-from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
+from neurodags.datasets import _load_datasets_mount_and_source
 from neurodags.definitions import DatasetConfig
 from neurodags.loggers import get_logger
-from neurodags.utils import expand_path, find_unique_root, get_path
+from neurodags.utils import (
+    DatasetConfigError,
+    effective_derivatives_base,
+    lexical_path_key,
+    relative_to_source_root,
+    resolve_dataset_field,
+    resolve_dataset_paths,
+)
 
 log = get_logger(__name__)
 
@@ -68,6 +78,16 @@ def _neuromag_entry_for(path: str) -> str | None:
     FIF file — this also handles gzipped splits, which mne names
     ``name.fif-1.gz`` with entry ``name.fif.gz``.
     """
+    part = neuromag_split_part(path)
+    return part[0] if part is not None else None
+
+
+def neuromag_split_part(path: str) -> tuple[str, int] | None:
+    """``(entry, index)`` when ``path`` is a neuromag ``-N`` split continuation, else ``None``.
+
+    ``name-2.fif`` -> ``("name.fif", 2)``; ``name.fif-1.gz`` -> ``("name.fif.gz", 1)``.
+    Shared with :mod:`neurodags.migrate`, which groups split parts the same way.
+    """
     root, ext = os.path.splitext(path)
     m = _NEUROMAG_TAIL_RE.match(root)
     if m is None or int(m.group("idx")) < 1:
@@ -75,7 +95,17 @@ def _neuromag_entry_for(path: str) -> str | None:
     entry = m.group("base") + ext
     if not _is_fif(entry):
         return None
-    return entry
+    return entry, int(m.group("idx"))
+
+
+def neuromag_split_name(entry: str, index: int) -> str:
+    """Name MNE gives part *index* (``>= 1``) of the split recording *entry*.
+
+    ``name.fif`` -> ``name-<index>.fif``; ``name.fif.gz`` -> ``name.fif-<index>.gz``
+    (the inverse of :func:`neuromag_split_part`).
+    """
+    root, ext = os.path.splitext(entry)
+    return f"{root}-{index}{ext}"
 
 
 def find_split_continuations(files: list[str]) -> set[str]:
@@ -96,6 +126,9 @@ def find_split_continuations(files: list[str]) -> set[str]:
     set of str
         The paths in ``files`` that should be dropped as continuations.
     """
+    # The same pathname can be returned several times (e.g. by a pattern with several
+    # ``**`` components); repeated occurrences are one file, never extra split members.
+    files = list(dict.fromkeys(files))
     fileset = set(files)
     drop: set[str] = set()
 
@@ -130,6 +163,41 @@ def find_split_continuations(files: list[str]) -> set[str]:
     return drop
 
 
+#: Suffixes (matched case-insensitively) of *directories* that are one recording each,
+#: read by MNE from the directory itself: CTF (``.ds``, :func:`mne.io.read_raw_ctf`) and
+#: EGI MFF (``.mff``, :func:`mne.io.read_raw_egi`). Discovery returns such a directory
+#: as one input and never the files inside it; other directories are never inputs.
+RECORDING_CONTAINER_EXTENSIONS: tuple[str, ...] = (".ds", ".mff")
+
+
+def is_recording_container(path: str) -> bool:
+    """Whether *path* is a directory named like a recording container (see
+    :data:`RECORDING_CONTAINER_EXTENSIONS`). Symbolic links are followed for the check."""
+    name = os.path.basename(path.rstrip("/" + os.sep)).lower()
+    return name.endswith(RECORDING_CONTAINER_EXTENSIONS) and os.path.isdir(path)
+
+
+def container_ancestor(rel: str) -> str | None:
+    """The outermost recording container among the folders of *rel* (POSIX, relative to
+    ``source_root``), or ``None``.
+
+    The check is lexical and case-insensitive on the folder names
+    (:data:`RECORDING_CONTAINER_EXTENSIONS`): anything below a ``.ds``/``.mff`` folder is
+    part of that recording and never an input itself, whatever the pattern matched.
+    """
+    parts = rel.split("/")[:-1]
+    for i, part in enumerate(parts):
+        if part.lower().endswith(RECORDING_CONTAINER_EXTENSIONS):
+            return "/".join(parts[: i + 1])
+    return None
+
+
+def is_input_path(path: str) -> bool:
+    """Whether *path* can be an input: a file (or a symbolic link to one) or a recording
+    container directory (:func:`is_recording_container`)."""
+    return os.path.isfile(path) or is_recording_container(path)
+
+
 def get_files_from_pattern(
     pattern,
     recursive: bool = True,
@@ -157,17 +225,45 @@ def get_files_from_pattern(
     Returns
     -------
     list of str
-        A list of file paths matching the pattern.
+        The matching inputs, lexically normalized (:func:`lexical_path_key`, no symlink
+        resolution) and without duplicates, in glob order: files (symbolic links to files
+        under their own path) and recording containers
+        (:data:`RECORDING_CONTAINER_EXTENSIONS`, e.g. a CTF ``.ds`` directory). Other
+        directories are never returned, nor is anything inside a matched container (a
+        broad ``raw/**/*`` yields ``x.ds`` once, not its inner files).
     """
 
     log.debug("get_files_from_pattern: called", pattern=pattern, recursive=recursive)
-    files = glob.glob(pattern, recursive=recursive)
-    log.debug("get_files_from_pattern: found files", count=len(files))
+    # Normalize lexically and deduplicate before anything compares paths: a pattern
+    # such as ``raw/./**`` or ``raw/**/**/*`` returns other spellings of, or repeated,
+    # pathnames for the same file. ``realpath`` is never used: the lexical path is the
+    # input's identity (spec 4.1).
+    matches = list(
+        dict.fromkeys(lexical_path_key(f) for f in glob.glob(pattern, recursive=recursive))
+    )
+    # Inputs are files and recording containers: a broad pattern (``raw/**/*``) also
+    # matches organizational directories (never inputs) and the inside of containers
+    # (part of the container's single input).
+    containers = [f for f in matches if is_recording_container(f)]
+    prefixes = tuple(c.rstrip(os.sep) + os.sep for c in containers)
+    files = [
+        f
+        for f in matches
+        if (f in containers or os.path.isfile(f)) and not (prefixes and f.startswith(prefixes))
+    ]
+    log.debug(
+        "get_files_from_pattern: found inputs",
+        count=len(files),
+        containers=len(containers),
+        skipped=len(matches) - len(files),
+    )
 
-    # Apply exclude filter if provided
+    # Apply exclude filter if provided (both sides normalized the same way)
     if exclude_filter:
         log.debug("get_files_from_pattern: applying exclude filter", exclude_filter=exclude_filter)
-        excluded_files = set(glob.glob(exclude_filter, recursive=recursive))
+        excluded_files = {
+            lexical_path_key(f) for f in glob.glob(exclude_filter, recursive=recursive)
+        }
         files = [f for f in files if f not in excluded_files]
         log.debug("get_files_from_pattern: files after exclusion", count=len(files))
 
@@ -185,14 +281,714 @@ def get_files_from_pattern(
     return files
 
 
+# ---------------------------------------------------------------------------
+# Enumeration (spec §8): sorted discovery, one enumeration per invocation,
+# frozen input lists
+# ---------------------------------------------------------------------------
+
+#: First line of a frozen input list written by ``neurodags inputs``.
+INPUTS_HEADER = "# neurodags-inputs naming_version=1"
+
+
+class InputsError(ValueError):
+    """Base class for input-selection errors (frozen input lists, ``only_index``)."""
+
+
+class InputsFileError(InputsError):
+    """A frozen input list (``--inputs``) is malformed or does not match the configuration."""
+
+
+class IndexSelectionError(InputsError):
+    """``only_index`` names an index that is unknown, negative or a missing source."""
+
+
+@dataclass(frozen=True)
+class InputEntry:
+    """One indexed input of a pipeline invocation."""
+
+    #: 0-based position in the enumeration (what ``--only-index`` and SLURM array task
+    #: ids select).
+    index: int
+    #: Dataset key in the configuration.
+    dataset: str
+    #: Path of the source file relative to the dataset's ``source_root``, with POSIX
+    #: separators (``/``). Independent of the mount point.
+    rel: str
+    #: Absolute path of the source file on the active mount (``source_root / rel``).
+    path: str
+    #: ``True`` when the entry comes from a frozen input list and the file no longer
+    #: exists (reported as ``missing-source``). Always ``False`` for discovery.
+    missing: bool = False
+
+
+@dataclass
+class InputEnumeration:
+    """The indexed inputs of one invocation, shared by every derivative it runs."""
+
+    #: Inputs in index order (``entries[i].index == i``).
+    entries: list[InputEntry]
+    #: Per dataset with inputs: the resolved, normalized ``source_root`` on the active
+    #: mount. Output locations are computed from it and each entry's ``rel`` only
+    #: (:func:`neurodags.outputs.output_reference_base`), never from the discovered set.
+    source_roots: dict[str, str] = field(default_factory=dict)
+    #: The frozen input list the entries were read from, ``None`` for discovery.
+    inputs_file: str | None = None
+    #: With a frozen list: per dataset, the ``rel`` of files found on disk that the list
+    #: does not contain (ignored). Empty for discovery.
+    not_in_list: dict[str, list[str]] = field(default_factory=dict)
+    #: Set once the pre-0.4.0 output guard ran for this enumeration (internal).
+    legacy_checked: bool = field(default=False, repr=False, compare=False)
+
+    @property
+    def files_per_dataset(self) -> dict[str, list[str]]:
+        """Absolute paths per dataset, in index order (datasets without inputs omitted)."""
+        out: dict[str, list[str]] = {}
+        for entry in self.entries:
+            out.setdefault(entry.dataset, []).append(entry.path)
+        return out
+
+    @property
+    def all_files(self) -> list[tuple[int, str, str]]:
+        """``(index, dataset, path)`` tuples, the 0.3.x enumeration shape."""
+        return [(e.index, e.dataset, e.path) for e in self.entries]
+
+    @property
+    def missing_sources(self) -> list[InputEntry]:
+        """Listed entries whose file no longer exists (frozen lists only)."""
+        return [e for e in self.entries if e.missing]
+
+    @property
+    def n_not_in_list(self) -> int:
+        """Number of files on disk that a frozen list does not contain."""
+        return sum(len(v) for v in self.not_in_list.values())
+
+    def select(self, only_index: int | Iterable[int] | None = None) -> list[InputEntry]:
+        """Return the entries selected by *only_index* (all entries when ``None``).
+
+        Raises
+        ------
+        IndexSelectionError
+            If an index is negative or not in the enumeration, or names a
+            ``missing-source`` entry of a frozen input list.
+        """
+        if only_index is None:
+            return list(self.entries)
+        requested = [only_index] if isinstance(only_index, int) else list(only_index)
+        n = len(self.entries)
+        bad = [i for i in requested if isinstance(i, bool) or not isinstance(i, int)]
+        if bad:
+            raise IndexSelectionError(f"only_index values must be integers, got {bad!r}.")
+        negative = sorted({i for i in requested if i < 0})
+        unknown = sorted({i for i in requested if i >= n})
+        if negative or unknown:
+            parts = []
+            if negative:
+                parts.append(f"negative: {', '.join(map(str, negative))}")
+            if unknown:
+                parts.append(f"unknown: {', '.join(map(str, unknown))}")
+            valid = f"0-{n - 1}" if n else "none (no inputs)"
+            raise IndexSelectionError(
+                f"invalid --only-index value(s) ({'; '.join(parts)}); valid indices: {valid}."
+            )
+        wanted = set(requested)
+        selected = [e for e in self.entries if e.index in wanted]
+        missing = [e for e in selected if e.missing]
+        if missing:
+            shown = ", ".join(f"{e.index} ({e.dataset}: {e.rel})" for e in missing)
+            raise IndexSelectionError(
+                f"--only-index selects missing-source input(s): {shown}. The file(s) are "
+                f"listed in {self.inputs_file} but no longer exist on disk."
+            )
+        return selected
+
+
+def _posix_rel(rel: str) -> str:
+    return rel.replace(os.sep, "/") if os.sep != "/" else rel
+
+
+def _is_below(path: str, directory: str) -> bool:
+    """Whether normalized *path* lies strictly below normalized *directory* (lexical)."""
+    return path != directory and path.startswith(directory.rstrip(os.sep) + os.sep)
+
+
+def output_tree_exclusions(
+    datasets: dict[str, DatasetConfig], mount_point: str | None = None
+) -> dict[str, list[str]]:
+    """Directories whose files discovery never returns, per dataset (spec 4.5).
+
+    - ``code/`` and ``.neurodags/`` under every active dataset's ``derivatives_path``
+      (configuration snapshots and neurodags bookkeeping);
+    - the dataset's own output tree (``derivatives_path[/derivatives_subdir]``), so a
+      chained stage whose ``source_root`` contains its outputs never takes them as
+      inputs. Not applied when that tree is ``source_root`` itself or one of its parents
+      (the sources would all be dropped); outputs written next to the sources are not
+      excluded either.
+
+    Paths that cannot be resolved are ignored here (the configuration checks report
+    them). Returns ``{dataset: [normalized directories]}``.
+    """
+    reserved: list[str] = []
+    own: dict[str, str] = {}
+    for name, cfg in datasets.items():
+        if cfg.skip:
+            continue
+        try:
+            derivatives_path = resolve_dataset_field(cfg, "derivatives_path", mount_point)
+        except (ValueError, KeyError):
+            continue
+        if not derivatives_path:
+            continue
+        derivatives_path = lexical_path_key(derivatives_path)
+        reserved += [
+            os.path.join(derivatives_path, "code"),
+            os.path.join(derivatives_path, ".neurodags"),
+        ]
+        try:
+            base = effective_derivatives_base(derivatives_path, cfg.derivatives_subdir)
+        except ValueError:
+            base = derivatives_path
+        own[name] = lexical_path_key(base)
+    result: dict[str, list[str]] = {}
+    for name, cfg in datasets.items():
+        dirs = list(dict.fromkeys(reserved))
+        if name in own:
+            try:
+                root = resolve_dataset_field(cfg, "source_root", mount_point)
+            except (ValueError, KeyError):
+                root = None
+            root = lexical_path_key(root) if root else None
+            if root is None or not (own[name] == root or _is_below(root, own[name])):
+                dirs.append(own[name])
+        result[name] = dirs
+    return result
+
+
+def output_tree_warnings(
+    datasets: dict[str, DatasetConfig], mount_point: str | None = None
+) -> list[str]:
+    """``validate`` warnings for datasets whose ``source_root`` contains their outputs (spec 4.5).
+
+    Discovery excludes a dataset's own output tree automatically; the warning asks for an
+    explicit ``exclude_pattern`` so the configuration says so too.
+    """
+    warnings: list[str] = []
+    for name, cfg in datasets.items():
+        if cfg.skip:
+            continue
+        try:
+            root = resolve_dataset_field(cfg, "source_root", mount_point)
+            derivatives_path = resolve_dataset_field(cfg, "derivatives_path", mount_point)
+            exclude = resolve_dataset_field(cfg, "exclude_pattern", mount_point)
+            base = effective_derivatives_base(derivatives_path, cfg.derivatives_subdir)
+        except (ValueError, KeyError):
+            continue
+        if not root or not base:
+            continue
+        root, base = lexical_path_key(root), lexical_path_key(base)
+        if not _is_below(base, root):
+            continue
+        if exclude and lexical_path_key(exclude).startswith(base.rstrip(os.sep) + os.sep):
+            continue
+        warnings.append(
+            f"datasets.{name}: source_root {root!r} contains this dataset's own outputs "
+            f"({base!r}); discovery excludes them automatically, but add "
+            f"exclude_pattern: {os.path.join(base, '**', '*')!r} to make this explicit."
+        )
+    return warnings
+
+
+def _discover_dataset(
+    dataset_name: str,
+    dataset_config: DatasetConfig,
+    mount_point: str | None,
+    drop_split_continuations: bool,
+    problems: list[str],
+    excluded_dirs: Iterable[str] = (),
+) -> list[tuple[str, str]] | None:
+    """Discover one dataset: ``[(rel, path), ...]`` sorted by ``rel``.
+
+    Returns ``None`` when the dataset is skipped or has no pattern. Files outside
+    ``source_root`` are appended to *problems* (one message per dataset). Files below
+    *excluded_dirs* (:func:`output_tree_exclusions`) are dropped.
+    """
+    if dataset_config.skip:
+        log.info("Skipping dataset (skip=True)", dataset=dataset_name)
+        return None
+
+    if not dataset_config.file_pattern:
+        log.warning(
+            "get_all_files_across_datasets: no pattern defined for dataset",
+            dataset=dataset_name,
+        )
+        return None
+
+    # Relative patterns resolve against the directory of the YAML that defined the
+    # dataset (or base_dir= for in-memory mappings), after ~/$VAR expansion (§1.3).
+    resolved_pattern = resolve_dataset_field(dataset_config, "file_pattern", mount_point)
+    # exclude_pattern is a glob like file_pattern, so it gets the same resolution
+    # (and fails loudly on unset variables) outside the catch below.
+    exclude_pattern = resolve_dataset_field(dataset_config, "exclude_pattern", mount_point)
+    source_root = resolve_dataset_field(dataset_config, "source_root", mount_point)
+    if source_root is None:
+        raise DatasetConfigError(
+            [
+                f"datasets.{dataset_name}.source_root is required (since 0.4.0): set it to "
+                "the root folder of the dataset's source files"
+            ]
+        )
+    log.debug(
+        "get_all_files_across_datasets: resolved pattern",
+        dataset=dataset_name,
+        pattern=resolved_pattern,
+    )
+
+    # Per-dataset opt-out ANDed with the global switch: a dataset can turn
+    # split dropping off individually, and the caller can force it off for
+    # all datasets.
+    dataset_drop_splits = getattr(dataset_config, "drop_split_continuations", True)
+    try:
+        files = get_files_from_pattern(
+            resolved_pattern,
+            exclude_filter=exclude_pattern,
+            drop_split_continuations=drop_split_continuations and dataset_drop_splits,
+        )
+    except Exception as e:
+        log.error(
+            "get_all_files_across_datasets: error getting files from pattern",
+            dataset=dataset_name,
+            error=str(e),
+        )
+        return []
+
+    # Deduplicate identical paths, check each one lies below source_root, sort by rel.
+    by_rel: dict[str, str] = {}
+    outside: list[str] = []
+    excluded_dirs = list(excluded_dirs)
+    n_excluded = 0
+    n_in_containers = 0
+    for f in files:
+        path = lexical_path_key(f)
+        if any(path == d or _is_below(path, d) for d in excluded_dirs):
+            n_excluded += 1
+            continue
+        try:
+            rel = _posix_rel(relative_to_source_root(path, source_root))
+        except ValueError:
+            outside.append(path)
+            continue
+        if container_ancestor(rel) is not None:
+            # Inside a recording container (e.g. ``**/*.bin`` matching ``rec.mff/x.bin``,
+            # or a ``.ds`` nested in another): part of that recording, not an input.
+            n_in_containers += 1
+            continue
+        by_rel.setdefault(rel, path)
+    if outside:
+        outside.sort()
+        shown = ", ".join(repr(p) for p in outside[:3])
+        more = f" (and {len(outside) - 3} more)" if len(outside) > 3 else ""
+        problems.append(
+            f"datasets.{dataset_name}: {len(outside)} discovered file(s) are not inside "
+            f"source_root {lexical_path_key(source_root)!r}: {shown}{more}. Every discovered "
+            "file must lie below its dataset's source_root; fix file_pattern or source_root."
+        )
+    if n_in_containers:
+        log.info(
+            "Skipped files inside recording containers (part of the container's input)",
+            dataset=dataset_name,
+            skipped=n_in_containers,
+        )
+    if n_excluded:
+        log.info(
+            "Excluded files below output trees from discovery",
+            dataset=dataset_name,
+            excluded=n_excluded,
+        )
+    # Code-point order of the POSIX rel: no locale, no natural sort (spec §8).
+    return sorted(by_rel.items())
+
+
+def discover_inputs(
+    datasets: dict[str, DatasetConfig],
+    mount_point: str | None = None,
+    max_files_per_dataset: int | None = None,
+    drop_split_continuations: bool = True,
+) -> InputEnumeration:
+    """Enumerate the inputs of a configuration by discovery (spec §8).
+
+    Per dataset: glob ``file_pattern``, apply ``exclude_pattern``, drop split
+    continuations, deduplicate, check every file lies below ``source_root`` (a file
+    outside it is a configuration error naming the file), sort by ``rel`` (POSIX
+    separators, code-point order), then keep the first *max_files_per_dataset*. Files below
+    an output tree (:func:`output_tree_exclusions`) are never discovered. Datasets
+    are concatenated in configuration (YAML) order, skipping ``skip: true``; the index is
+    the 0-based position.
+
+    Parameters
+    ----------
+    datasets : dict of str to DatasetConfig
+        Dataset configurations in YAML order.
+    mount_point : str, optional
+        The active mount point.
+    max_files_per_dataset : int, optional
+        Keep only the first N files (after sorting) of every dataset, so a limited run is
+        a prefix of the full run per dataset.
+    drop_split_continuations : bool, optional
+        Global switch (default True) ANDed with each dataset's own
+        ``drop_split_continuations`` field. See :func:`find_split_continuations`.
+
+    Returns
+    -------
+    InputEnumeration
+
+    Raises
+    ------
+    DatasetConfigError
+        If a dataset has no ``source_root`` or discovers files outside it (all datasets
+        are checked and reported together).
+    ValueError
+        If *max_files_per_dataset* is negative.
+    """
+    if max_files_per_dataset is not None and max_files_per_dataset < 0:
+        raise ValueError(f"max_files_per_dataset must be >= 0, got {max_files_per_dataset}.")
+    problems: list[str] = []
+    per_dataset: dict[str, list[tuple[str, str]]] = {}
+    source_roots: dict[str, str] = {}
+    exclusions = output_tree_exclusions(datasets, mount_point)
+    for dataset_name, dataset_config in datasets.items():
+        log.debug("get_all_files_across_datasets: processing dataset", dataset=dataset_name)
+        found = _discover_dataset(
+            dataset_name,
+            dataset_config,
+            mount_point,
+            drop_split_continuations,
+            problems,
+            exclusions.get(dataset_name, ()),
+        )
+        if not found:
+            if found is not None:
+                log.warning(
+                    "get_all_files_across_datasets: no files found for dataset",
+                    dataset=dataset_name,
+                )
+            continue
+        source_roots[dataset_name] = lexical_path_key(
+            resolve_dataset_field(dataset_config, "source_root", mount_point)
+        )
+        if max_files_per_dataset is not None:
+            found = found[:max_files_per_dataset]
+            log.debug(
+                "get_all_files_across_datasets: limited files per dataset",
+                dataset=dataset_name,
+                max_files=max_files_per_dataset,
+            )
+        if not found:
+            continue
+        per_dataset[dataset_name] = found
+        log.info("Found files in dataset", dataset=dataset_name, file_count=len(found))
+    if problems:
+        raise DatasetConfigError(problems)
+
+    entries: list[InputEntry] = []
+    for dataset_name, found in per_dataset.items():
+        for rel, path in found:
+            entries.append(InputEntry(len(entries), dataset_name, rel, path))
+    log.info(
+        "File discovery complete",
+        total_datasets=len(per_dataset),
+        total_files=len(entries),
+    )
+    return InputEnumeration(entries=entries, source_roots=source_roots)
+
+
+def format_inputs(entries: Iterable[InputEntry]) -> str:
+    """Return the text of a frozen input list (header + ``index<TAB>dataset<TAB>rel``)."""
+    lines = [INPUTS_HEADER]
+    for entry in entries:
+        for value, what in ((entry.dataset, "dataset name"), (entry.rel, "file path")):
+            if any(ch in value for ch in "\t\r\n"):
+                raise InputsFileError(
+                    f"cannot write {what} {value!r} to an input list: it contains a tab or "
+                    "newline."
+                )
+        lines.append(f"{entry.index}\t{entry.dataset}\t{entry.rel}")
+    return "\n".join(lines) + "\n"
+
+
+def write_inputs_file(enumeration: InputEnumeration, path: str | os.PathLike) -> str:
+    """Write *enumeration* as a frozen input list to *path*; return the absolute path."""
+    text = format_inputs(enumeration.entries)
+    out = os.path.abspath(os.fspath(path))
+    parent = os.path.dirname(out)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    return out
+
+
+def _check_rel(rel: str) -> bool:
+    if not rel or rel.startswith("/") or "\\" in rel or ntpath.splitdrive(rel)[0]:
+        return False
+    return all(part not in ("", ".", "..") for part in rel.split("/"))
+
+
+def read_inputs_file(
+    path: str | os.PathLike, datasets: dict[str, DatasetConfig]
+) -> list[tuple[int, str, str]]:
+    """Read and validate a frozen input list; return ``(index, dataset, rel)`` by index.
+
+    Checks: the header (``# neurodags-inputs naming_version=1``), three tab-separated
+    fields per line, non-negative integer indices without duplicates and contiguous from
+    0, dataset names that exist (and are not ``skip: true``) in *datasets*, and canonical
+    relative POSIX paths. Blank lines and ``#`` comment lines after the header are
+    ignored.
+
+    Raises
+    ------
+    InputsFileError
+        With every problem found (up to 20 are listed).
+    """
+    path = os.fspath(path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        raise InputsFileError(f"cannot read input list {path!r}: {exc}") from exc
+    if not lines or lines[0].strip() != INPUTS_HEADER:
+        first = lines[0] if lines else ""
+        raise InputsFileError(
+            f"{path}: not a neurodags input list; the first line must be {INPUTS_HEADER!r} "
+            f"(got {first!r}). Write one with 'neurodags inputs'."
+        )
+
+    problems: list[str] = []
+    rows: dict[int, tuple[int, str, str]] = {}
+    seen: dict[tuple[str, str], int] = {}
+    for lineno, line in enumerate(lines[1:], start=2):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3:
+            problems.append(f"line {lineno}: expected index<TAB>dataset<TAB>rel, got {line!r}")
+            continue
+        raw_index, dataset, rel = fields
+        if not raw_index.isdigit():
+            problems.append(f"line {lineno}: index {raw_index!r} is not a non-negative integer")
+            continue
+        index = int(raw_index)
+        if dataset not in datasets:
+            problems.append(f"line {lineno}: dataset {dataset!r} is not in the configuration")
+        elif datasets[dataset].skip:
+            problems.append(
+                f"line {lineno}: dataset {dataset!r} is skip: true in the configuration"
+            )
+        if not _check_rel(rel):
+            problems.append(
+                f"line {lineno}: path {rel!r} must be a relative POSIX path below "
+                "source_root (no '..', '.', empty components or backslashes)"
+            )
+        if index in rows:
+            problems.append(f"line {lineno}: duplicate index {index}")
+            continue
+        if (dataset, rel) in seen:
+            problems.append(
+                f"line {lineno}: {dataset}/{rel} is already listed as index {seen[(dataset, rel)]}"
+            )
+        seen[(dataset, rel)] = index
+        rows[index] = (index, dataset, rel)
+    if rows and not problems:
+        expected = set(range(len(rows)))
+        if set(rows) != expected:
+            gaps = sorted(expected - set(rows))[:10]
+            problems.append(
+                f"indices must be contiguous from 0 to {len(rows) - 1}; missing: "
+                f"{', '.join(map(str, gaps))}"
+            )
+    if problems:
+        shown = "\n".join(f"  - {p}" for p in problems[:20])
+        more = f"\n  ... and {len(problems) - 20} more" if len(problems) > 20 else ""
+        raise InputsFileError(f"invalid input list {path}:\n{shown}{more}")
+    return [rows[i] for i in sorted(rows)]
+
+
+def load_inputs(
+    inputs: str | os.PathLike,
+    datasets: dict[str, DatasetConfig],
+    mount_point: str | None = None,
+    drop_split_continuations: bool = True,
+) -> InputEnumeration:
+    """Enumerate the inputs of a configuration from a frozen input list (spec §8.6).
+
+    The list replaces discovery for selection and indexing. Each entry's path is the
+    dataset's ``source_root`` on the active mount joined with its ``rel``, so one list
+    works on every mount. Listed files that no longer exist are kept at their index with
+    ``missing=True``. Discovery still runs once to report files on disk that the list
+    does not contain (:attr:`InputEnumeration.not_in_list`); they are not processed.
+
+    Parameters
+    ----------
+    inputs : path-like
+        The input list (relative paths resolve against the current working directory).
+    datasets, mount_point, drop_split_continuations
+        As for :func:`discover_inputs`.
+
+    Raises
+    ------
+    InputsFileError
+        If the list is malformed or does not match the configuration.
+    DatasetConfigError
+        As for :func:`discover_inputs`.
+    """
+    inputs_file = os.path.abspath(os.fspath(inputs))
+    rows = read_inputs_file(inputs_file, datasets)
+
+    roots: dict[str, str] = {}
+    entries: list[InputEntry] = []
+    not_inputs: list[str] = []
+    inside: list[str] = []
+    for index, dataset, rel in rows:
+        if dataset not in roots:
+            root = resolve_dataset_field(datasets[dataset], "source_root", mount_point)
+            if root is None:
+                raise DatasetConfigError(
+                    [f"datasets.{dataset}.source_root is required (since 0.4.0)"]
+                )
+            roots[dataset] = lexical_path_key(root)
+        path = os.path.join(roots[dataset], *rel.split("/"))
+        ancestor = container_ancestor(rel)
+        if ancestor is not None:
+            # Lexical, so refused whether or not the file still exists.
+            inside.append(f"{index} ({dataset}: {rel} is inside {ancestor})")
+        elif os.path.exists(path) and not is_input_path(path):
+            # Same rule as discovery; never silently dropped or renumbered.
+            not_inputs.append(f"{index} ({dataset}: {rel})")
+        entries.append(InputEntry(index, dataset, rel, path, missing=not os.path.exists(path)))
+    if inside:
+        raise InputsFileError(
+            f"{inputs_file}: listed entr{'y lies' if len(inside) == 1 else 'ies lie'} inside a "
+            f"recording container ({'/'.join(RECORDING_CONTAINER_EXTENSIONS)}), which is one "
+            f"input as a whole: {', '.join(inside)}. Fix or regenerate the list with "
+            "'neurodags inputs'."
+        )
+    if not_inputs:
+        raise InputsFileError(
+            f"{inputs_file}: listed entr{'y is' if len(not_inputs) == 1 else 'ies are'} not "
+            f"an input (a directory that is not a recording container "
+            f"{'/'.join(RECORDING_CONTAINER_EXTENSIONS)}): {', '.join(not_inputs)}. Fix or "
+            "regenerate the list with 'neurodags inputs'."
+        )
+
+    # One discovery pass, only to report files the list does not contain.
+    discovered = discover_inputs(
+        datasets, mount_point, drop_split_continuations=drop_split_continuations
+    )
+    listed = {(e.dataset, e.rel) for e in entries}
+    not_in_list: dict[str, list[str]] = {}
+    for entry in discovered.entries:
+        if (entry.dataset, entry.rel) not in listed:
+            not_in_list.setdefault(entry.dataset, []).append(entry.rel)
+
+    enumeration = InputEnumeration(
+        entries=entries,
+        source_roots=roots,
+        inputs_file=inputs_file,
+        not_in_list=not_in_list,
+    )
+    if enumeration.missing_sources:
+        log.warning(
+            "Listed input files no longer exist (missing-source); they are not processed",
+            inputs_file=inputs_file,
+            count=len(enumeration.missing_sources),
+            indices=[e.index for e in enumeration.missing_sources],
+        )
+    if not_in_list:
+        log.warning(
+            "Files on disk are not in the input list and are ignored",
+            inputs_file=inputs_file,
+            count=enumeration.n_not_in_list,
+            per_dataset={k: len(v) for k, v in not_in_list.items()},
+        )
+    log.info("Loaded input list", inputs_file=inputs_file, total_files=len(entries))
+    return enumeration
+
+
+def enumerate_inputs(
+    datasets: dict[str, DatasetConfig],
+    mount_point: str | None = None,
+    *,
+    max_files_per_dataset: int | None = None,
+    drop_split_continuations: bool = True,
+    inputs: str | os.PathLike | None = None,
+) -> InputEnumeration:
+    """Enumerate the inputs of one invocation: a frozen list if given, else discovery.
+
+    See :func:`discover_inputs` and :func:`load_inputs`.
+
+    Raises
+    ------
+    InputsFileError
+        If *inputs* is combined with *max_files_per_dataset*, or the list is invalid.
+    """
+    if inputs is not None:
+        if max_files_per_dataset is not None:
+            raise InputsFileError(
+                "max_files_per_dataset cannot be combined with an input list (--inputs): "
+                "the list already fixes the inputs."
+            )
+        return load_inputs(
+            inputs, datasets, mount_point, drop_split_continuations=drop_split_continuations
+        )
+    return discover_inputs(
+        datasets,
+        mount_point,
+        max_files_per_dataset=max_files_per_dataset,
+        drop_split_continuations=drop_split_continuations,
+    )
+
+
+def enumerate_pipeline_inputs(
+    pipeline_input,
+    datasets_input=None,
+    *,
+    max_files_per_dataset: int | None = None,
+    drop_split_continuations: bool = True,
+    inputs: str | os.PathLike | None = None,
+    base_dir=None,
+    mount_point: str | None = None,
+) -> InputEnumeration:
+    """Load the datasets of a pipeline configuration and enumerate its inputs.
+
+    Parameters are those of :func:`get_all_files_from_pipeline_configuration` and
+    :func:`enumerate_inputs`. The dataset paths are checked first, as in
+    :func:`neurodags.orchestrators.run_pipeline`
+    (:func:`neurodags.utils.resolve_dataset_paths`), so an unknown mount point raises
+    :class:`neurodags.utils.MountPointError`.
+    """
+    datasets, mount_point, mount_source = _load_datasets_mount_and_source(
+        pipeline_input, datasets_input=datasets_input, base_dir=base_dir, mount_point=mount_point
+    )
+    resolve_dataset_paths(datasets, mount_point, mount_source=mount_source)
+    return enumerate_inputs(
+        datasets,
+        mount_point,
+        max_files_per_dataset=max_files_per_dataset,
+        drop_split_continuations=drop_split_continuations,
+        inputs=inputs,
+    )
+
+
 def get_all_files_across_datasets(
     datasets: dict[str, DatasetConfig],
     mount_point: str | None = None,
     max_files_per_dataset: int | None = None,
     drop_split_continuations: bool = True,
-) -> dict[str, list[str]]:
+) -> tuple[dict[str, list[str]], list[tuple[int, str, str]], dict[str, str]]:
     """
     Iterate over all datasets and retrieve files based on their patterns.
+
+    Thin wrapper over :func:`discover_inputs` returning the 0.3.x shapes. Files are
+    sorted by their path relative to ``source_root`` and the limit is applied after
+    sorting (spec §8).
 
     Parameters
     ----------
@@ -201,7 +997,8 @@ def get_all_files_across_datasets(
     mount_point : str, optional
         The mount point to resolve paths if needed.
     max_files_per_dataset : int, optional
-        Maximum number of files to retrieve per dataset. If None, retrieves all files.
+        Maximum number of files to retrieve per dataset (the first N after sorting). If
+        None, retrieves all files.
     drop_split_continuations : bool, optional
         Global switch (default True) for dropping split-FIF continuation files.
         The effective per-dataset behaviour is this flag AND the dataset's own
@@ -215,111 +1012,27 @@ def get_all_files_across_datasets(
         A dictionary mapping dataset names to lists of file paths.
     list of tuple
         A list of tuples (index, dataset_name, file_path) for all files across datasets
+    dict of str to str
+        Per-dataset resolved ``source_root`` (the root output locations are computed
+        from; this was the discovered set's common root before 0.4.0).
     """
-
-    files_per_dataset = {}
-    common_roots = {}
-    for dataset_name, dataset_config in datasets.items():
-        log.debug("get_all_files_across_datasets: processing dataset", dataset=dataset_name)
-
-        if dataset_config.skip:
-            log.info(
-                "Skipping dataset (skip=True)",
-                dataset=dataset_name,
-            )
-            continue
-
-        pattern = dataset_config.file_pattern
-        if not pattern:
-            log.warning(
-                "get_all_files_across_datasets: no pattern defined for dataset",
-                dataset=dataset_name,
-            )
-            continue
-
-        resolved_pattern = get_path(
-            pattern, mount_point=mount_point, field=f"datasets.{dataset_name}.file_pattern"
-        )
-        # exclude_pattern is a glob like file_pattern, so it gets the same ~/$VAR
-        # expansion (and fails loudly on unset variables) outside the catch below.
-        exclude_pattern = (
-            expand_path(
-                dataset_config.exclude_pattern,
-                field=f"datasets.{dataset_name}.exclude_pattern",
-            )
-            if dataset_config.exclude_pattern
-            else None
-        )
-        log.debug(
-            "get_all_files_across_datasets: resolved pattern",
-            dataset=dataset_name,
-            pattern=resolved_pattern,
-        )
-
-        # Per-dataset opt-out ANDed with the global switch: a dataset can turn
-        # split dropping off individually, and the caller can force it off for
-        # all datasets.
-        dataset_drop_splits = getattr(dataset_config, "drop_split_continuations", True)
-        try:
-            files = get_files_from_pattern(
-                resolved_pattern,
-                exclude_filter=exclude_pattern,
-                drop_split_continuations=drop_split_continuations and dataset_drop_splits,
-            )
-        except Exception as e:
-            log.error(
-                "get_all_files_across_datasets: error getting files from pattern",
-                dataset=dataset_name,
-                error=str(e),
-            )
-            continue
-
-        if max_files_per_dataset is not None:
-            files = files[:max_files_per_dataset]
-            log.debug(
-                "get_all_files_across_datasets: limited files per dataset",
-                dataset=dataset_name,
-                max_files=max_files_per_dataset,
-            )
-
-        if not files:
-            log.warning(
-                "get_all_files_across_datasets: no files found for dataset", dataset=dataset_name
-            )
-            continue
-
-        files_per_dataset[dataset_name] = files
-        common_root = find_unique_root(files, mode="maximal")
-        common_roots[dataset_name] = common_root
-        log.debug(
-            "get_all_files_across_datasets: common root for dataset",
-            dataset=dataset_name,
-            common_root=common_root,
-        )
-        log.info(
-            "Found files in dataset",
-            dataset=dataset_name,
-            file_count=len(files),
-        )
-    all_files = []
-    for dataset, files in files_per_dataset.items():
-        log.debug(
-            "get_all_files_across_datasets: dataset summary", dataset=dataset, file_count=len(files)
-        )
-        these_files = [(dataset, f) for f in files]
-        all_files.extend(these_files)
-    # add index to each file tuple
-    all_files = [(i, dataset, f) for i, (dataset, f) in enumerate(all_files)]
-    log.info(
-        "File discovery complete",
-        total_datasets=len(files_per_dataset),
-        total_files=len(all_files),
+    enumeration = discover_inputs(
+        datasets,
+        mount_point=mount_point,
+        max_files_per_dataset=max_files_per_dataset,
+        drop_split_continuations=drop_split_continuations,
     )
-    return files_per_dataset, all_files, common_roots
+    return enumeration.files_per_dataset, enumeration.all_files, enumeration.source_roots
 
 
 def get_all_files_from_pipeline_configuration(
-    pipeline_input, datasets_input=None, max_files_per_dataset=None, drop_split_continuations=True
+    pipeline_input,
+    datasets_input=None,
+    max_files_per_dataset=None,
+    drop_split_continuations=True,
+    *,
+    base_dir=None,
+    mount_point=None,
 ):
     """
     Given a pipeline configuration and an optional datasets configuration,
@@ -337,6 +1050,12 @@ def get_all_files_from_pipeline_configuration(
     drop_split_continuations : bool, optional
         Global switch (default True) for dropping split-FIF continuation files,
         forwarded to :func:`get_all_files_across_datasets`.
+    base_dir : path-like, optional
+        Directory that relative dataset paths of in-memory mappings resolve against
+        (see :func:`get_datasets_and_mount_point_from_pipeline_configuration`).
+    mount_point : str, optional
+        Mount point to use instead of the pipeline's ``mount_point`` key (then
+        ``NEURODAGS_MOUNT_POINT``, then the key).
 
     Returns
     -------
@@ -345,23 +1064,16 @@ def get_all_files_from_pipeline_configuration(
     list of tuple
         A list of tuples (index, dataset_name, file_path) for all files across datasets
     dict of str to str
-        A dictionary mapping dataset names to their common roots.
+        A dictionary mapping dataset names to their resolved ``source_root`` (the
+        discovered set's common root before 0.4.0).
     """
     log.debug("get_all_files_from_pipeline_configuration: called", pipeline_input=pipeline_input)
-    datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-        pipeline_input, datasets_input=datasets_input
-    )
-
-    files_per_dataset, all_files, common_roots = get_all_files_across_datasets(
-        datasets,
-        mount_point=mount_point,
+    enumeration = enumerate_pipeline_inputs(
+        pipeline_input,
+        datasets_input,
         max_files_per_dataset=max_files_per_dataset,
         drop_split_continuations=drop_split_continuations,
+        base_dir=base_dir,
+        mount_point=mount_point,
     )
-    log.debug(
-        "get_all_files_from_pipeline_configuration: completed",
-        total_datasets=len(files_per_dataset),
-        total_files=len(all_files),
-    )
-
-    return files_per_dataset, all_files, common_roots
+    return enumeration.files_per_dataset, enumeration.all_files, enumeration.source_roots

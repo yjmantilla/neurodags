@@ -14,10 +14,11 @@ stderr).
 Inspect planned computations without executing any nodes. Returns a dataframe describing what would run and whether cached outputs already exist.
 
 ```python
-from neurodags.loaders import load_configuration
 from neurodags.orchestrators import iterate_derivative_pipeline, run_pipeline
 
-config = load_configuration("pipeline.yml")
+# Pass the path: relative paths then resolve against the YAML files. A dict loaded
+# in Python needs base_dir=... for relative dataset paths (0.4.0).
+config = "pipeline.yml"
 
 # Dry-run all derivatives in DerivativeList
 plan = run_pipeline(config, dry_run=True)
@@ -42,12 +43,13 @@ The dry-run plan shows each step, whether its output is cached, and where it wou
 
 ## Failure Behavior
 
-When a node fails during execution:
+When a node fails during execution (or anything else inside the unit: a derivative it depends
+on, preparing a node's arguments, selecting a referenced artifact, writing an artifact):
 
 1. The error is logged with full traceback, derivative name, step id, and file path.
-2. A `.error` marker file is written at the expected output location (e.g. `sub-01@MyDerivative.error`). Its content is a human-readable summary of the failure — useful for post-hoc inspection without digging through logs.
+2. A `.error` marker file is written at the expected output location (e.g. `sub-01_task-rest_eeg.vhdr@MyDerivative.error`).  Any `.done` of the unit is removed, so the unit is `errored`, never `done`. Its content is a human-readable summary of the failure — useful for post-hoc inspection without digging through logs.
 3. By default (`raise_on_error=False`) execution continues to the next file; all failures are collected in the log.
-4. The failed file **will be retried** on the next run — the `.error` file is excluded from the cached-artifact check, so NeuroDAGs treats the output as missing and re-runs it.
+4. The failed file **will be retried** on the next run — only a valid `.done` manifest makes a unit cached, and a failure removes it, so NeuroDAGs re-runs the unit.
 
 To inspect which files failed after a run, look for `*.error` files in the derivatives directory:
 
@@ -64,7 +66,7 @@ Derivative 'MyDerivative' step id=2 node='my_node' failed:
 
 ### Automatic Cleanup of Stale Error Markers
 
-When a file that previously failed is re-run and **succeeds**, NeuroDAGs automatically deletes the stale `.error` marker. This keeps the derivatives directory clean and ensures dry-run plans accurately reflect current state — a file that succeeded on re-run will not appear as `has_error_marker: true` on subsequent runs.
+When a file that previously failed is re-run and **succeeds**, NeuroDAGs automatically deletes the stale `.error` marker once the new `.done` manifest is published (a unit carries at most one of `.done`, `.error`, `.skip`). This keeps the derivatives directory clean and ensures dry-run plans accurately reflect current state — a file that succeeded on re-run will not appear as `has_error_marker: true` on subsequent runs.
 
 ### Skipping Previously Failed Files
 
@@ -89,7 +91,7 @@ rm derivatives/sub-01/ses-SE0/sub-01_ses-SE0_task-rest.vhdr@MyDerivative.error
 
 ## Pipeline Status
 
-`neurodags status` gives a quick at-a-glance summary of how many files are done, missing (not yet computed), or errored — without having to open a CSV.
+`neurodags status` gives a quick at-a-glance summary of how many units (source file × derivative) are done, skipped, incomplete, missing (not yet computed), or errored — without having to open a CSV. The states are the ones defined in {ref}`Unit states <naming-unit-states>`.
 
 ```bash
 neurodags status pipeline.yml
@@ -101,25 +103,45 @@ Example output:
 config: /abs/path/pipeline.yml
 files:  42
 
-Derivative               total   done  missing  errored
-───────────────────────────────────────────────────────
-Alpha                       42     30       10        2
-Beta                        42     25       15        2
-───────────────────────────────────────────────────────
-Total                       84     55       25        4
+Derivative                total    done  (migrated)   skipped  incomplete   missing   errored
+─────────────────────────────────────────────────────────────────────────────────────────────
+Alpha                        42      29          20         0           1        10         2
+Beta                         42      25          20         0           0        15         2
+─────────────────────────────────────────────────────────────────────────────────────────────
+Total                        84      54          40         0           1        25         4
 
-2 error(s) found.  Run with --list-errors for details.
-25 derivative(s) missing.  Run with --list-missing for details.
+40 of the done unit(s) are done (migrated): their .done was written by 'neurodags migrate' from 0.3.x outputs (column '(migrated)').
+
+4 error(s) found.  Run with --list-errors for details.
+1 unit(s) incomplete (no valid .done manifest).  Run with --list-missing for details.
+25 unit(s) missing.  Run with --list-missing for details.
 Use --format indices to get the file indices for --only-index resubmission.
 ```
+
+The `(migrated)` column appears only when some done units were certified by
+`neurodags migrate`; it is a subset of `done`, not a separate state. The table also prints a
+note explaining the columns (omitted above).
 
 **Status definitions:**
 
 | Status | Meaning |
 |--------|---------|
-| `done` | Output file(s) exist and no `.error` marker present |
-| `missing` | No output file and no `.error` marker — not yet computed |
+| `done` | The `.done` manifest is valid: it matches the derivative and naming version, and every file it lists exists |
+| `done (migrated)` | `done`, with a manifest written by `neurodags migrate` (counted in `done` and in the `(migrated)` column) |
+| `skipped` | A `.skip` marker exists (the derivative does not apply to this file) |
+| `incomplete` | Output files (or an invalid `.done`) exist without a valid manifest: an interrupted or partial write, a deleted split part, or 0.3.x outputs not yet migrated with `neurodags migrate`. Recomputed by the next run |
+| `missing` | Nothing on disk for this file — not yet computed |
 | `errored` | A `.error` marker file exists from a previous failed run |
+
+Files that match an output prefix but are not listed in its valid `.done` manifest are ignored;
+the table prints how many there are and `--include-files` lists them per unit (`unlisted`). See
+{ref}`Completion manifest <naming-done-manifest>`.
+
+Hidden staging folders (`.<output prefix>.tmp~<token>/`) belong to a job writing a unit right
+now, or were left by a killed one. They never change a unit's state or the exit code; the
+table prints how many exist with a cleanup hint, and JSON reports `staging_dirs` (and, with
+`--include-files`, the folders per unit). See
+{ref}`Atomic publication <naming-atomic-publication>`.
 
 **Flags:**
 
@@ -130,7 +152,7 @@ neurodags status pipeline.yml --derivative Alpha --derivative Beta
 # print the file index and path of each errored file
 neurodags status pipeline.yml --list-errors
 
-# print the file index and path of each missing file
+# print the file index and path of each incomplete and missing file
 neurodags status pipeline.yml --list-missing
 
 # combine both
@@ -158,12 +180,16 @@ Missing files:
     [idx 12] /data/sub-05/ses-01/sub-05_task-rest.vhdr
 ```
 
-The index is a position in the discovered input list (datasets in config order, files in
-discovery order). It identifies the same file only while the dataset configuration and the
-set of input files are unchanged — regenerate it right before resubmitting, don't store it.
-If an index cannot be determined it is shown as `[idx ?]`.
+The index is a position in the input list: datasets in config order, files sorted by their
+path below `source_root` (code-point order, so `sub-10` before `sub-2`). Without `--inputs`
+it identifies the same file only while the dataset configuration and the set of input files
+are unchanged — regenerate it right before resubmitting, don't store it. With a frozen list
+(`neurodags status pipeline.yml --inputs inputs.tsv`, see {doc}`hpc`) the indices are those
+of the list; the report then also says how many files on disk are not in the list, and
+lists listed files that no longer exist as `missing-source` (they are never part of
+`--format indices`). If an index cannot be determined it is shown as `[idx ?]`.
 
-**Exit codes:** `0` only when all derivatives are complete (no missing, no errored); `1` when any derivative is missing or has a `.error` marker. This makes `status` usable in shell scripts and CI dependency chains:
+**Exit codes:** `0` only when all derivatives are complete (no missing, no incomplete, no errored, no `missing-source` input); `1` when any derivative is missing or incomplete or has a `.error` marker, or a listed input is `missing-source`. `done`, `done (migrated)` and `skipped` units count as complete. This makes `status` usable in shell scripts and CI dependency chains:
 
 ```bash
 # fail fast if anything is incomplete or errored
@@ -181,19 +207,32 @@ neurodags status pipeline.yml --format json
   "config": "pipeline.yml",
   "n_files": 42,
   "derivatives": {
-    "Alpha": {"total": 42, "done": 30, "skipped": 0, "missing": 10, "errored": 2}
+    "Alpha": {"total": 42, "done": 29, "skipped": 0, "incomplete": 1, "missing": 10,
+              "errored": 2, "missing-source": 0, "migrated": 20}
   },
-  "grand_total": {"total": 42, "done": 30, "skipped": 0, "missing": 10, "errored": 2},
+  "grand_total": {"total": 42, "done": 29, "skipped": 0, "incomplete": 1, "missing": 10,
+                  "errored": 2, "missing-source": 0, "migrated": 20},
   "complete": false,
   "missing_indices": [3, 7, 12, 15, 18, 21, 25, 30, 33, 40],
-  "errored_indices": [0, 9]
+  "incomplete_indices": [5],
+  "errored_indices": [0, 9],
+  "unlisted_files": 0,
+  "staging_dirs": 0,
+  "inputs": null,
+  "missing_source_indices": [],
+  "not_in_list": 0
 }
 ```
 
-`missing_indices` / `errored_indices` are the sorted, de-duplicated file indices with at least
-one missing / errored derivative (across the selected derivatives; narrow with
-`--derivative`). A file can appear in both lists if it is missing for one derivative and
-errored for another.
+`migrated` counts the done units whose manifest was written by `neurodags migrate` (a subset of
+`done`). `inputs` is the
+absolute path of the `--inputs` list (`null` without one); `missing_source_indices` and
+`not_in_list` are only non-empty / non-zero with `--inputs`.
+
+`missing_indices` / `incomplete_indices` / `errored_indices` are the sorted, de-duplicated
+file indices with at least one missing / incomplete / errored derivative (across the selected derivatives; narrow with
+`--derivative`). A file can appear in several lists if it is missing for one derivative and
+errored for another (or in all three).
 
 Add `--include-files` (only valid with `--format json`) for a per-file breakdown: a flat
 `files` list with one record per *(source file, derivative)* pair, sorted by `(index,
@@ -206,21 +245,28 @@ neurodags status pipeline.yml --format json --include-files
 ```json
   "files": [
     {"index": 0, "dataset": "my_dataset", "file_path": "/data/sub-01/ses-01/sub-01_task-rest.vhdr",
-     "derivative": "Alpha", "status": "errored",
-     "error_path": "/derivatives/sub-01/ses-01/sub-01_task-rest.vhdr@Alpha.error"},
+     "derivative": "Alpha", "status": "errored", "label": "errored",
+     "error_path": "/derivatives/sub-01/ses-01/sub-01_task-rest.vhdr@Alpha.error",
+     "unlisted": [], "staging_dirs": []},
     {"index": 1, "dataset": "my_dataset", "file_path": "/data/sub-02/ses-01/sub-02_task-rest.vhdr",
-     "derivative": "Alpha", "status": "done", "error_path": null}
+     "derivative": "Alpha", "status": "done", "label": "done (migrated)", "error_path": null,
+     "unlisted": [], "staging_dirs": []}
   ]
 ```
 
-`status` is one of `done`, `skipped`, `missing`, `errored`, `no-save`, `unknown`. When no
+`label` is `status`, except `done (migrated)` for a done unit certified by `neurodags migrate`
+(`status` stays `done`, so consumers counting `done` keep working). `status` is one of `done`, `skipped`, `incomplete`, `missing`, `errored`, `no-save`, `unknown`, or
+`missing-source` (with `--inputs`: listed, but no longer on disk) or `planning-error` (the dry
+run could not plan the unit, e.g. a node argument names a node id that does not exist; the
+record's `planning_error` field holds the error, and `planning_error_indices` lists them). When no
 input files are found, `--format json` still emits a valid document (zero counts, empty
 index lists, `"complete": true`).
 
 **Index-only output:** `--format indices` prints nothing but the sorted, space-separated file
-indices that are missing or errored — ready to paste into `--only-index` or `sbatch --array`.
-Narrow it with `--list-missing` (missing only) or `--list-errors` (errored only); with neither
-or both flags it prints the union. A complete pipeline prints an empty line.
+indices that are missing, incomplete or errored — ready to paste into `--only-index` or
+`sbatch --array`. Narrow it with `--list-missing` (missing and incomplete: both are recomputed
+the same way) or `--list-errors` (errored only); with neither or both flags it prints the union.
+A complete pipeline prints an empty line.
 
 ```bash
 neurodags status pipeline.yml --format indices                  # e.g. "0 3 7 9 12"
@@ -228,8 +274,14 @@ neurodags status pipeline.yml --format indices --list-errors    # errored only: 
 neurodags status pipeline.yml --derivative Alpha --format indices
 ```
 
-The exit code keeps its meaning in every format: `1` whenever something is missing or
-errored, i.e. exactly when the list is non-empty. Under `set -e`, capturing it with `$(...)`
+The exit code keeps its meaning in every format: `1` whenever something is missing,
+incomplete or errored (or, with `--inputs`, a listed input is `missing-source`), and also
+when any unit could not be planned (`planning-error`: the report is then not `complete`, and
+the failing units are named on stderr; `--format indices` leaves out every index with a
+planning error in *any* selected derivative, even if another selected derivative is missing
+there, because rerunning that index fails the same way until the configuration is fixed;
+select the other derivative alone, `--derivative B`, to get its indices). `neurodags
+dry-run` likewise saves the plan but exits `1` when a unit could not be planned. Under `set -e`, capturing it with `$(...)`
 would abort the script precisely when there is something to resubmit, so add `--exit-zero`:
 
 ```bash
@@ -237,7 +289,8 @@ IDX=$(neurodags status pipeline.yml --format indices --exit-zero)
 [ -n "$IDX" ] && neurodags run pipeline.yml --only-index $IDX
 ```
 
-With `--exit-zero`, `status` exits `0` whenever the report was produced, but real failures
+With `--exit-zero`, `status` exits `0` whenever the report was produced (planning errors
+included: they are still reported on stderr and in the JSON report), but real failures
 (missing or invalid config, unset environment variable, unreadable `-d` file) still exit
 non-zero, so `set -e` still stops on a broken config. Avoid the older `|| true` guard: it
 also swallows those real failures, leaving `IDX` silently empty.

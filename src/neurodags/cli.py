@@ -4,16 +4,34 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
-import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
 
-from neurodags.datasets import get_datasets_and_mount_point_from_pipeline_configuration
-from neurodags.loaders import load_configuration
+from neurodags.datasets import (
+    MOUNT_POINT_ENV,
+    MOUNT_SOURCE_LABELS,
+    get_datasets_and_mount_point_from_pipeline_configuration,
+    resolve_mount_point,
+)
+from neurodags.iterators import (
+    InputEnumeration,
+    InputsError,
+    InputsFileError,
+    enumerate_pipeline_inputs,
+    format_inputs,
+    output_tree_warnings,
+    write_inputs_file,
+)
+from neurodags.loaders import (
+    ConfigVersionError,
+    check_pipeline_names,
+    load_pipeline_configuration,
+)
 from neurodags.loggers import configure_logging
 from neurodags.mermaid import (
     derivative_to_html,
@@ -21,19 +39,40 @@ from neurodags.mermaid import (
     pipeline_to_html,
     pipeline_to_mermaid,
 )
+from neurodags.migrate import MigrationError
+from neurodags.naming import NamingError, validate_derivative_name
 from neurodags.orchestrators import (
     _derivative_topo_order,
     build_derivative_dataframe,
     run_pipeline,
 )
-from neurodags.utils import check_derivative_names, expand_path, resolve_dataset_paths
+from neurodags.utils import (
+    DatasetConfigError,
+    MountPointError,
+    expand_path,
+    inspect_dataset_paths,
+    missing_mount_entries,
+)
 
 # Help text shared by every subcommand that takes -d/--datasets (see #43).
 DATASETS_HELP = (
     "Optional path to a datasets YAML that overrides the pipeline's 'datasets' key. "
     "Resolved relative to the current working directory (~ and $VARS are expanded). "
-    "Deprecated fallback: if it is not found there but exists next to the pipeline YAML, "
-    "that file is used with a warning."
+    "Relative paths inside that YAML are resolved against the YAML's own directory."
+)
+
+# Help text shared by every subcommand that takes -m/--mount-point (#66).
+MOUNT_POINT_HELP = (
+    "Mount point to use instead of the pipeline's 'mount_point' key (one pipeline YAML, "
+    f"one mount per host). Default: ${MOUNT_POINT_ENV} if set, else the YAML value."
+)
+
+# Help text shared by every subcommand that takes --inputs (spec §8.6).
+INPUTS_HELP = (
+    "Frozen input list written by 'neurodags inputs' (path relative to the current working "
+    "directory). It replaces discovery: indices come from the list, files added on disk "
+    "later are ignored, and listed files that no longer exist are reported as "
+    "missing-source. Cannot be combined with --max-files-per-dataset."
 )
 
 
@@ -57,28 +96,23 @@ def _save_dataframe(df: pd.DataFrame, output_path: str | None, default_name: str
 
 
 def _load_pipeline_config(config_path: str) -> dict:
-    return load_configuration(config_path)
+    # Refuses a configuration without naming_version: 1 (ConfigVersionError).
+    return load_pipeline_configuration(config_path)
 
 
-def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str | None:
+def resolve_cli_datasets_path(datasets: str | None) -> str | None:
     """Resolve a CLI ``-d/--datasets`` path to an absolute path.
 
-    CLI paths are relative to where the command is run; paths written inside the
-    pipeline YAML (its ``datasets:`` key) stay relative to the YAML and are not
-    handled here. ``~`` and ``$VARS`` are expanded as for the ``datasets:`` key.
-
-    For backward compatibility, a path that does not exist relative to the
-    current working directory but does exist relative to the pipeline YAML's
-    directory (the behaviour up to 0.3.4) is still used, with a ``FutureWarning``
-    (the CLI prints it as one ``neurodags: warning: ...`` line); that fallback will be
-    removed in a future release.
+    CLI paths are relative to where the command is run (the current working
+    directory); paths written inside the pipeline YAML (its ``datasets:`` key) stay
+    relative to the YAML and are not handled here. ``~`` and ``$VARS`` are expanded as
+    for the ``datasets:`` key. The YAML-relative fallback deprecated in 0.3.5 was
+    removed in 0.4.0.
 
     Parameters
     ----------
     datasets : str or None
         The value passed to ``-d/--datasets``. ``None`` is returned unchanged.
-    config : str or None
-        Path to the pipeline YAML, used only for the deprecated fallback.
 
     Returns
     -------
@@ -88,8 +122,8 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
     Raises
     ------
     DatasetsPathError
-        If a referenced environment variable is unset/empty, or the file exists
-        neither relative to the working directory nor relative to the pipeline YAML.
+        If a referenced environment variable is unset/empty, or the file does not
+        exist relative to the working directory.
     """
     if datasets is None:
         return None
@@ -102,50 +136,73 @@ def resolve_cli_datasets_path(datasets: str | None, config: str | None) -> str |
     if cwd_path.is_file():
         return str(cwd_path)
 
-    tried = [cwd_path]
-    if config is not None and not Path(expanded).is_absolute():
-        yaml_path = Path(config).resolve().parent / expanded
-        if yaml_path.is_file():
-            try:
-                suggestion = os.path.relpath(yaml_path)
-            except ValueError:  # different drive on Windows
-                suggestion = str(yaml_path)
-            warnings.warn(
-                f"-d '{datasets}' was found relative to the pipeline YAML; this lookup is "
-                f"deprecated and will be removed in a future release. "
-                f"Pass '-d {suggestion}' instead.",
-                FutureWarning,
-                stacklevel=2,
-            )
-            return str(yaml_path)
-        tried.append(yaml_path)
-
-    tried_str = " and ".join(str(p) for p in tried)
     raise DatasetsPathError(
-        f"datasets file '{datasets}' not found (tried {tried_str}). "
+        f"datasets file '{datasets}' not found (tried {cwd_path}). "
         "CLI paths are relative to the current working directory."
     )
 
 
-def _resolve_cli_datasets_or_exit(
-    datasets: str | None, config: str | None, prog: str
-) -> str | None:
-    """Run :func:`resolve_cli_datasets_path` for a CLI entry point.
+def resolve_cli_inputs_path(inputs: str | None) -> str | None:
+    """Resolve a CLI ``--inputs`` path to an absolute path (cwd-relative, ``~``/``$VARS``).
 
-    The deprecation ``FutureWarning`` is caught and printed as a single
-    ``<prog>: warning: ...`` line on stderr (no Python warning prefix). Raises
-    :class:`DatasetsPathError` like the wrapped function.
+    Raises
+    ------
+    InputsFileError
+        If a referenced environment variable is unset/empty or the file does not exist.
     """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", FutureWarning)
-        resolved = resolve_cli_datasets_path(datasets, config)
-    for w in caught:
-        print(f"{prog}: warning: {w.message}", file=sys.stderr)
-    return resolved
+    if inputs is None:
+        return None
+    try:
+        expanded = expand_path(inputs, field="--inputs")
+    except ValueError as exc:
+        raise InputsFileError(str(exc)) from exc
+    path = Path(os.path.abspath(expanded))
+    if not path.is_file():
+        raise InputsFileError(
+            f"input list '{inputs}' not found (tried {path}). "
+            "CLI paths are relative to the current working directory."
+        )
+    return str(path)
+
+
+def mount_point_name(value: str) -> str:
+    """argparse type for ``-m/--mount-point``: a non-empty name."""
+    if not value:
+        raise argparse.ArgumentTypeError("the mount point name cannot be empty")
+    return value
+
+
+def add_mount_point_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``-m/--mount-point`` (shared by every subcommand and ``neurodags-tui``)."""
+    parser.add_argument(
+        "-m",
+        "--mount-point",
+        type=mount_point_name,
+        default=None,
+        metavar="NAME",
+        help=MOUNT_POINT_HELP,
+    )
+
+
+def _describe_mount(config: dict, args: argparse.Namespace) -> tuple[object, str]:
+    """Return the active mount point and where it came from (a resolve_mount_point token)."""
+    return resolve_mount_point(config.get("mount_point"), args.mount_point)
+
+
+def _cli_enumeration(args: argparse.Namespace) -> InputEnumeration:
+    """Enumerate the inputs once for a CLI invocation (discovery or ``--inputs``)."""
+    return enumerate_pipeline_inputs(
+        args.config,
+        datasets_input=args.datasets,
+        inputs=getattr(args, "inputs", None),
+        mount_point=args.mount_point,
+    )
 
 
 def _resolve_derivatives(config: dict, derivatives: list[str] | None) -> list[str]:
     if derivatives:
+        for name in derivatives:  # --derivative values follow the name grammar (spec 2.2)
+            validate_derivative_name(name)
         return derivatives
     derivative_list = config.get("DerivativeList", [])
     if not derivative_list:
@@ -161,6 +218,7 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(parser)
     parser.add_argument(
         "--derivative",
         action="append",
@@ -179,8 +237,10 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         nargs="*",
         default=None,
-        help="Restrict processing to these file indices.",
+        help="Restrict processing to these file indices (unknown or negative indices are an "
+        "error).",
     )
+    parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
     parser.add_argument(
         "--raise-on-error",
         action="store_true",
@@ -209,15 +269,79 @@ def _add_common_execution_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _slurm_per_file(config_path: str, derivatives: list[str]) -> str:
+def _slurm_paths(
+    config_path: str, datasets: str | None, mount_point: str | None = None
+) -> tuple[str, str, str, str]:
+    """Shell pieces shared by the SLURM templates.
+
+    Paths never reach the generated Python source: the shell sets ``PIPELINE`` (and
+    ``DATASETS``) from :func:`shlex.quote`-d literals and passes them to ``python -`` as
+    arguments, and every Python body is a quoted heredoc (``<<'EOF'``) that the shell
+    leaves untouched. A mount point is exported as ``NEURODAGS_MOUNT_POINT``, which
+    ``run_pipeline`` reads when no ``mount_point=`` is given. Returns ``(quoted pipeline,
+    the " -d <datasets>" / " -m <mount>" CLI flags or "", the variable assignments, the
+    ``"$PIPELINE" ["$DATASETS"]`` arguments)``.
+    """
+    q_config = shlex.quote(config_path)
+    flags = f" -d {shlex.quote(datasets)}" if datasets else ""
+    assign = f"PIPELINE={q_config}\n"
+    args = '"$PIPELINE"'
+    if datasets:
+        assign += f"DATASETS={shlex.quote(datasets)}  # -d given to slurm-script\n"
+        args += ' "$DATASETS"'
+    if mount_point is not None:
+        flags += f" -m {shlex.quote(mount_point)}"
+        assign += (
+            f"export {MOUNT_POINT_ENV}={shlex.quote(mount_point)}  # -m given to slurm-script\n"
+        )
+    return q_config, flags, assign, args
+
+
+def _slurm_run_call(datasets: str | None, first_arg: int, extra: str) -> str:
+    """The Python body of a worker: ``sys.argv[first_arg]`` is the pipeline path."""
+    d_kwarg = (
+        f"\n    datasets_configuration=sys.argv[{first_arg + 1}],  # -d given to slurm-script"
+        if datasets
+        else ""
+    )
+    return f"""\
+import os
+import sys
+from neurodags.loaders import load_pipeline_configuration
+from neurodags.orchestrators import run_pipeline
+
+config_path = os.path.abspath(sys.argv[{first_arg}])
+config = load_pipeline_configuration(config_path)
+run_pipeline(
+    config,
+    base_dir=os.path.dirname(config_path),{d_kwarg}
+    inputs=os.path.abspath("inputs.tsv"),  # frozen list (neurodags inputs ... -o inputs.tsv)
+{extra}    raise_on_error=True,
+"""
+
+
+def _slurm_per_file(
+    config_path: str,
+    derivatives: list[str],
+    datasets: str | None = None,
+    mount_point: str | None = None,
+) -> str:
     deriv_names = ", ".join(derivatives)
+    q_config, flags, assign, args = _slurm_paths(config_path, datasets, mount_point)
+    body = _slurm_run_call(
+        datasets,
+        1,
+        f"    derivatives={list(derivatives)!r},\n"
+        '    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),\n',
+    )
     return f"""\
 #!/bin/bash
 # per-file: one array task per file — all derivatives run in dependency order per task.
 # Derivatives: {deriv_names}
 #
-# Submit:
-#   N=$(neurodags count-inputs {config_path})
+# Submit (freeze the input list once; every task reads the same list, see the HPC guide):
+#   neurodags inputs {q_config}{flags} -o inputs.tsv
+#   N=$(neurodags count-inputs {q_config}{flags} --inputs inputs.tsv)
 #   sbatch --array=0-$((N - 1)) run_array.sh
 #
 #SBATCH --job-name=neurodags
@@ -229,32 +353,37 @@ def _slurm_per_file(config_path: str, derivatives: list[str]) -> str:
 
 source activate myenv  # TODO: activate your environment
 
-python - <<'EOF'
-import os
-from neurodags.loaders import load_configuration
-from neurodags.orchestrators import run_pipeline
-
-config = load_configuration("{config_path}")
-run_pipeline(
-    config,
-    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
-    raise_on_error=True,
-    skip_errors=True,
+{assign}
+python - {args} <<'EOF'
+{body}    skip_errors=True,
 )
 EOF
 """
 
 
-def _slurm_flat(config_path: str, derivatives: list[str]) -> str:
+def _slurm_flat(
+    config_path: str,
+    derivatives: list[str],
+    datasets: str | None = None,
+    mount_point: str | None = None,
+) -> str:
     n = len(derivatives)
+    q_config, flags, assign, args = _slurm_paths(config_path, datasets, mount_point)
     deriv_arr = "(" + " ".join(f'"{d}"' for d in derivatives) + ")"
+    # argv: 1 = derivative, 2 = file index, 3 = pipeline, 4 = datasets (with -d).
+    body = _slurm_run_call(
+        datasets,
+        3,
+        "    derivatives=[sys.argv[1]],\n    only_index=int(sys.argv[2]),\n",
+    )
     return f"""\
 #!/bin/bash
 # flat: one array task per file x derivative (maximum parallelism).
 # WARNING: use only when derivatives are independent (no inter-derivative dependencies).
 #
-# Submit:
-#   N=$(neurodags count-inputs {config_path})
+# Submit (freeze the input list once; every task reads the same list, see the HPC guide):
+#   neurodags inputs {q_config}{flags} -o inputs.tsv
+#   N=$(neurodags count-inputs {q_config}{flags} --inputs inputs.tsv)
 #   TOTAL=$(( N * {n} ))
 #   sbatch --array=0-$((TOTAL - 1)) run_array_per_deriv.sh
 #
@@ -264,6 +393,9 @@ def _slurm_flat(config_path: str, derivatives: list[str]) -> str:
 #SBATCH --output=logs/neurodags_%A_%a.out
 #SBATCH --error=logs/neurodags_%A_%a.err
 
+source activate myenv  # TODO: activate your environment
+
+# Set after activation, so an activation script cannot change them.
 DERIVATIVES={deriv_arr}
 N_DERIVATIVES={n}
 
@@ -271,26 +403,21 @@ FILE_INDEX=$(( SLURM_ARRAY_TASK_ID / N_DERIVATIVES ))
 DERIV_INDEX=$(( SLURM_ARRAY_TASK_ID % N_DERIVATIVES ))
 DERIVATIVE=${{DERIVATIVES[$DERIV_INDEX]}}
 
-source activate myenv  # TODO: activate your environment
-
-python - <<EOF
-import os
-from neurodags.loaders import load_configuration
-from neurodags.orchestrators import run_pipeline
-
-config = load_configuration("{config_path}")
-run_pipeline(
-    config,
-    derivatives=["$DERIVATIVE"],
-    only_index=$FILE_INDEX,
-    raise_on_error=True,
-)
+{assign}
+python - "$DERIVATIVE" "$FILE_INDEX" {args} <<'EOF'
+{body})
 EOF
 """
 
 
-def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
+def _slurm_chained(
+    config_path: str,
+    derivatives: list[str],
+    datasets: str | None = None,
+    mount_point: str | None = None,
+) -> tuple[str, str]:
     """Return (submit_script, worker_script) for chained per-derivative arrays."""
+    q_config, flags, assign, args = _slurm_paths(config_path, datasets, mount_point)
     submit_lines = [
         "#!/bin/bash",
         "# chained: per-derivative sequential arrays chained via --dependency=afterok.",
@@ -298,7 +425,9 @@ def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
         "#",
         "# Usage: bash submit_pipeline.sh",
         "",
-        f"N=$(neurodags count-inputs {config_path})",
+        "# Freeze the input list once; every task reads the same list (see the HPC guide).",
+        f"neurodags inputs {q_config}{flags} -o inputs.tsv",
+        f"N=$(neurodags count-inputs {q_config}{flags} --inputs inputs.tsv)",
         'ARRAY="0-$((N - 1))"',
         "",
     ]
@@ -310,21 +439,30 @@ def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
         is_last = i == len(derivatives) - 1
         if is_last:
             submit_lines.append(
-                f"sbatch --array=$ARRAY {dep}" f"--export=DERIVATIVE={deriv} run_one_derivative.sh"
+                f"sbatch --array=$ARRAY {dep}"
+                f"--export=ALL run_one_derivative.sh {shlex.quote(deriv)}"
             )
         else:
             submit_lines.append(
                 f"{var}=$(sbatch --parsable --array=$ARRAY {dep}"
-                f"--export=DERIVATIVE={deriv} run_one_derivative.sh)"
+                f"--export=ALL run_one_derivative.sh {shlex.quote(deriv)})"
             )
         prev_var = var
 
     submit = "\n".join(submit_lines) + "\n"
 
+    # argv: 1 = derivative, 2 = pipeline, 3 = datasets (with -d).
+    body = _slurm_run_call(
+        datasets,
+        2,
+        "    derivatives=[sys.argv[1]],\n"
+        '    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),\n',
+    )
     worker = f"""\
 #!/bin/bash
 # Worker script used by submit_pipeline.sh (chained pattern).
-# DERIVATIVE is injected via --export from the submit script.
+# The derivative is its first argument (sbatch ... run_one_derivative.sh <derivative>), not
+# an environment variable: with --export=ALL an inherited value would take precedence.
 #
 #SBATCH --job-name=neurodags
 #SBATCH --time=01:00:00    # TODO: adjust per derivative
@@ -332,50 +470,80 @@ def _slurm_chained(config_path: str, derivatives: list[str]) -> tuple[str, str]:
 #SBATCH --output=logs/neurodags_%x_%A_%a.out
 #SBATCH --error=logs/neurodags_%x_%A_%a.err
 
+SELECTED_DERIVATIVE="$1"  # before activation, which may change positional arguments
+
 source activate myenv  # TODO: activate your environment
 
-python - <<EOF
-import os
-from neurodags.loaders import load_configuration
-from neurodags.orchestrators import run_pipeline
-
-config = load_configuration("{config_path}")
-run_pipeline(
-    config,
-    derivatives=["$DERIVATIVE"],
-    only_index=int(os.environ["SLURM_ARRAY_TASK_ID"]),
-    raise_on_error=True,
-    skip_errors=True,
+{assign}
+python - "$SELECTED_DERIVATIVE" {args} <<'EOF'
+{body}    skip_errors=True,
 )
 EOF
 """
     return submit, worker
 
 
-def _status_classify(plan: list) -> str:
-    """Return 'done', 'skipped', 'missing', 'errored', 'no-save', or 'unknown' from a dry-run plan list.
+_STATE_TO_STATUS = {
+    "done": "done",
+    "skipped": "skipped",
+    "error": "errored",
+    "incomplete": "incomplete",
+    "missing": "missing",
+}
 
-    'done' means at least one artifact file matching the derivative prefix exists on disk.
-    It does NOT verify that all artifact files are present — a derivative that produces
-    multiple artifacts (multiple keys in NodeResult.artifacts) will show as 'done' even
-    if only one of those files was written (e.g. after a partial failure).
-    'skipped' means a .skip marker exists — the derivative was intentionally not computed
-    for this source file (e.g. a condition not present in a subject's recording).
-    """
+
+def _status_final(plan: list) -> dict | None:
     if not isinstance(plan, list):
-        return "unknown"
-    final = next((s for s in plan if s.get("kind") == "derivative_output"), None)
+        return None
+    return next((s for s in plan if s.get("kind") == "derivative_output"), None)
+
+
+def _status_classify(plan: list) -> str:
+    """Return the status of one unit from its dry-run plan.
+
+    One of 'done', 'skipped', 'errored', 'incomplete', 'missing', 'no-save' or 'unknown':
+
+    - 'done': the ``.done`` manifest is valid (it parses, matches the derivative and
+      naming version, and every file it lists exists);
+    - 'skipped': a ``.skip`` marker exists (intentionally not computed for this source);
+    - 'errored': a ``.error`` marker exists;
+    - 'incomplete': output files exist without a valid ``.done`` (a partial or
+      interrupted write, or 0.3.x outputs not yet migrated); recomputed by the next run;
+    - 'missing': nothing exists for the unit.
+    """
+    final = _status_final(plan)
     if final is None:
         return "unknown"
-    if final.get("has_skip_marker"):
-        return "skipped"
-    if final.get("has_error_marker"):
-        return "errored"
     if not final.get("will_save", True):
         return "no-save"
+    state = final.get("state")
+    if state in _STATE_TO_STATUS:
+        return _STATE_TO_STATUS[state]
+    # Plans without a state (older payloads): marker-based fallback.
+    if final.get("has_skip_marker"):
+        return "skipped"
     if final.get("cached"):
         return "done"
+    if final.get("has_error_marker"):
+        return "errored"
     return "missing"
+
+
+def _status_origin(plan: list) -> str | None:
+    """``origin`` of a done unit's manifest (``"migrate"`` for ``done (migrated)``)."""
+    final = _status_final(plan)
+    return final.get("origin") if final else None
+
+
+def _status_unlisted(plan: list) -> list[str]:
+    final = _status_final(plan)
+    return list(final.get("unlisted") or []) if final else []
+
+
+def _status_temps(plan: list) -> list[str]:
+    """Staging folders of the unit (a running job's, or left by a killed one)."""
+    final = _status_final(plan)
+    return list(final.get("temps") or []) if final else []
 
 
 def _status_error_path(plan: list) -> str | None:
@@ -410,17 +578,52 @@ def _status_rows(result: pd.DataFrame) -> list[dict]:
         plan = row.get("plan", [])
         idx = _status_scalar(row.get("index"))
         dataset = _status_scalar(row.get("dataset"))
+        # Listed in a frozen input list (--inputs) but gone from disk (spec §8.6).
+        missing_source = _status_scalar(row.get("source_status")) == "missing-source"
+        # The dry run could not plan this unit (its error is kept on the row).
+        planning_error = _status_scalar(row.get("planning_error"))
+        if missing_source:
+            status = "missing-source"
+        elif planning_error is not None:
+            status = "planning-error"
+        else:
+            status = _status_classify(plan)
+        migrated = status == "done" and _status_origin(plan) == "migrate"
         rows.append(
             {
                 "index": None if idx is None else int(idx),
                 "dataset": None if dataset is None else str(dataset),
                 "derivative": row.get("derivative", "unknown"),
                 "file_path": row.get("file_path", ""),
-                "status": _status_classify(plan),
+                "status": status,
+                # "done (migrated)": the .done was written by `neurodags migrate` (spec 6.2).
+                "label": "done (migrated)" if migrated else status,
+                "migrated": migrated,
                 "error_path": _status_error_path(plan),
+                "unlisted": [] if missing_source else _status_unlisted(plan),
+                "staging_dirs": [] if missing_source else _status_temps(plan),
+                "planning_error": None if planning_error is None else str(planning_error),
             }
         )
     return rows
+
+
+def _planning_error_message(rows: list[dict]) -> str | None:
+    """One message naming the units a dry run could not plan (``None`` when there are none)."""
+    failed = sorted(
+        (r for r in rows if r["status"] == "planning-error"),
+        key=lambda r: (*_status_index_key(r), r["derivative"]),
+    )
+    if not failed:
+        return None
+    lines = [
+        f"{len(failed)} unit(s) could not be planned, so their status is unknown and the "
+        "inspection is not complete (fix the configuration; see the log for tracebacks):"
+    ]
+    for r in failed:
+        idx = r["index"] if r["index"] is not None else "?"
+        lines.append(f"  [{r['derivative']}] [idx {idx}] {r['file_path']}: {r['planning_error']}")
+    return "\n".join(lines)
 
 
 def _status_index_key(row: dict) -> tuple[bool, int]:
@@ -438,20 +641,35 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
+    mount_point, mount_source = _describe_mount(config, args)
 
+    # With --inputs, enumerate here (once, shared with the dry run) to also report the
+    # files on disk that are not in the list; otherwise run_pipeline enumerates once.
+    enumeration = _cli_enumeration(args) if getattr(args, "inputs", None) else None
     result = run_pipeline(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
+        mount_point=args.mount_point,
         derivatives=derivatives,
         dry_run=True,
         n_jobs=args.n_jobs,
+        enumeration=enumeration,
     )
 
     fmt = getattr(args, "format", "table")
     include_files = getattr(args, "include_files", False)
     rows = [] if result is None or result.empty else _status_rows(result)
 
-    grand = {"total": 0, "done": 0, "skipped": 0, "missing": 0, "errored": 0}
+    grand = {
+        "total": 0,
+        "done": 0,
+        "skipped": 0,
+        "incomplete": 0,
+        "missing": 0,
+        "errored": 0,
+        "missing-source": 0,
+        "planning-error": 0,
+    }
     per_deriv: dict[str, dict[str, int]] = {}
     all_derivs = sorted({r["derivative"] for r in rows})
     total_files = len({r["file_path"] for r in rows})
@@ -462,29 +680,61 @@ def _cmd_status(args: argparse.Namespace) -> int:
         per_deriv[deriv] = {"total": len(sub), **counts}
         for k, v in per_deriv[deriv].items():
             grand[k] += v
+        # Subset of "done": units whose .done was written by `neurodags migrate`.
+        per_deriv[deriv]["migrated"] = sum(1 for r in sub if r["migrated"])
+    n_migrated = sum(1 for r in rows if r["migrated"])
 
-    complete = grand["missing"] == 0 and grand["errored"] == 0
+    complete = (
+        grand["missing"] == 0
+        and grand["incomplete"] == 0
+        and grand["errored"] == 0
+        and grand["missing-source"] == 0
+        and grand["planning-error"] == 0
+    )
+    planning_error_message = _planning_error_message(rows)
+    n_unlisted = sum(len(r["unlisted"]) for r in rows)
+    n_staging = sum(len(r["staging_dirs"]) for r in rows)
+    n_staging_done = sum(len(r["staging_dirs"]) for r in rows if r["status"] in ("done", "skipped"))
     exit_code = 0 if complete or getattr(args, "exit_zero", False) else 1
+    missing_source_indices = _status_indices(rows, ("missing-source",))
+    n_not_in_list = enumeration.n_not_in_list if enumeration is not None else 0
+    inputs_file = enumeration.inputs_file if enumeration is not None else None
 
     if fmt == "indices":
+        # Incomplete units are recomputed like missing ones, so they count as missing here.
         if args.list_missing and not args.list_errors:
-            wanted: tuple[str, ...] = ("missing",)
+            wanted: tuple[str, ...] = ("missing", "incomplete")
         elif args.list_errors and not args.list_missing:
             wanted = ("errored",)
         else:
-            wanted = ("missing", "errored")
-        print(" ".join(str(i) for i in _status_indices(rows, wanted)))
+            wanted = ("missing", "incomplete", "errored")
+        # An index with a planning error in any selected derivative is left out, even when
+        # another derivative is missing there: rerunning it would fail the same way until
+        # the configuration is fixed (select that other derivative alone to get it).
+        unplannable = set(_status_indices(rows, ("planning-error",)))
+        print(" ".join(str(i) for i in _status_indices(rows, wanted) if i not in unplannable))
+        if planning_error_message:
+            print(f"neurodags: error: {planning_error_message}", file=sys.stderr)
         return exit_code
 
     if fmt == "json":
         payload: dict = {
             "config": args.config,
+            "mount_point": mount_point,
+            "mount_point_source": mount_source,
             "n_files": total_files,
             "derivatives": per_deriv,
-            "grand_total": grand,
+            "grand_total": {**grand, "migrated": n_migrated},
             "complete": complete,
             "missing_indices": _status_indices(rows, ("missing",)),
+            "incomplete_indices": _status_indices(rows, ("incomplete",)),
             "errored_indices": _status_indices(rows, ("errored",)),
+            "unlisted_files": n_unlisted,
+            "staging_dirs": n_staging,
+            "inputs": inputs_file,
+            "missing_source_indices": missing_source_indices,
+            "not_in_list": n_not_in_list,
+            "planning_error_indices": _status_indices(rows, ("planning-error",)),
         }
         if include_files:
             payload["files"] = [
@@ -494,26 +744,57 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     "file_path": r["file_path"],
                     "derivative": r["derivative"],
                     "status": r["status"],
+                    "label": r["label"],
                     "error_path": r["error_path"],
+                    "unlisted": r["unlisted"],
+                    "staging_dirs": r["staging_dirs"],
+                    "planning_error": r["planning_error"],
                 }
                 for r in sorted(rows, key=lambda r: (*_status_index_key(r), r["derivative"]))
             ]
         print(json.dumps(payload, indent=2))
+        if planning_error_message:
+            print(f"neurodags: error: {planning_error_message}", file=sys.stderr)
         return exit_code
 
+    def _print_input_list_report() -> None:
+        if n_not_in_list:
+            print(
+                f"\n{n_not_in_list} file(s) on disk are not in the input list "
+                f"{inputs_file} and were ignored."
+            )
+        if missing_source_indices:
+            print(
+                f"\n{len(missing_source_indices)} listed input(s) no longer exist on disk "
+                f"(missing-source), not processed: indices "
+                f"{' '.join(map(str, missing_source_indices))}"
+            )
+
+    print(f"config: {args.config}")
+    print(f"mount:  {mount_point} (from {MOUNT_SOURCE_LABELS[mount_source]})")
+    if inputs_file:
+        print(f"inputs: {inputs_file}")
     if not rows:
+        # The mount line matters most here: a wrong mount finds no files.
         print("No files found.")
+        _print_input_list_report()
         return 0
 
     # --- table output ---
     col_w = max(24, max(len(d) for d in all_derivs) + 2)
+    # "(migrated)": how many of the done units are "done (migrated)" (shown only then).
+    mig_w = 12 if n_migrated else 0
+
+    def _mig(count: int) -> str:
+        return f"  {count:>{mig_w - 2}}" if mig_w else ""
+
     header = (
-        f"{'Derivative':<{col_w}} {'total':>6}  {'done':>6}  {'skipped':>8}"
-        f"  {'missing':>8}  {'errored':>8}"
+        f"{'Derivative':<{col_w}} {'total':>6}  {'done':>6}"
+        + (f"  {'(migrated)':>{mig_w - 2}}" if mig_w else "")
+        + f"  {'skipped':>8}  {'incomplete':>10}  {'missing':>8}  {'errored':>8}"
     )
     sep = "─" * len(header)
 
-    print(f"config: {args.config}")
     print(f"files:  {total_files}")
     print()
     print(header)
@@ -522,22 +803,59 @@ def _cmd_status(args: argparse.Namespace) -> int:
     for deriv in all_derivs:
         c = per_deriv[deriv]
         print(
-            f"{deriv:<{col_w}} {c['total']:>6}  {c['done']:>6}  {c['skipped']:>8}"
-            f"  {c['missing']:>8}  {c['errored']:>8}"
+            f"{deriv:<{col_w}} {c['total']:>6}  {c['done']:>6}{_mig(c['migrated'])}"
+            f"  {c['skipped']:>8}  {c['incomplete']:>10}  {c['missing']:>8}  {c['errored']:>8}"
         )
 
     print(sep)
     print(
-        f"{'Total':<{col_w}} {grand['total']:>6}  {grand['done']:>6}  {grand['skipped']:>8}"
-        f"  {grand['missing']:>8}  {grand['errored']:>8}"
+        f"{'Total':<{col_w}} {grand['total']:>6}  {grand['done']:>6}{_mig(n_migrated)}"
+        f"  {grand['skipped']:>8}  {grand['incomplete']:>10}  {grand['missing']:>8}"
+        f"  {grand['errored']:>8}"
     )
     print(
         "\nNote: 'total' counts (derivative x source-file) pairs, not output files. "
-        "'done' means ≥1 artifact file exists — a derivative that writes multiple files "
-        "per source file may show 'done' even after a partial write. "
+        "'done' means the unit's .done manifest is valid and every file it lists exists. "
+        "'incomplete' means output files exist without a valid .done (an interrupted "
+        "write, or 0.3.x outputs not yet migrated with 'neurodags migrate'); the next run "
+        "recomputes them. "
         "'skipped' means a .skip marker exists — the derivative was intentionally not "
         "computed for that source file (e.g. condition absent from the recording)."
     )
+    if n_migrated:
+        print(
+            f"\n{n_migrated} of the done unit(s) are done (migrated): their .done was written "
+            "by 'neurodags migrate' from 0.3.x outputs (column '(migrated)')."
+        )
+    if n_unlisted:
+        print(
+            f"\n{n_unlisted} file(s) match an output prefix but are not listed in its .done "
+            "manifest; they are ignored (see --format json --include-files)."
+        )
+    if n_staging:
+        print(
+            f"\n{n_staging} staging folder(s) ('.<output prefix>.tmp~<token>') exist: a job is "
+            "writing those units right now, or one was stopped while writing them; they are "
+            "never reused or cleaned up automatically (see --format json --include-files)."
+        )
+        if n_staging - n_staging_done:
+            print(
+                f"{n_staging - n_staging_done} of them belong to unit(s) without a valid .done: "
+                "once no job is running, those units may be half-published (some files new, "
+                "some old). Recompute them (neurodags run) before deleting their staging "
+                "folders: the folder is the only trace, and 'migrate --legacy-tree' relies "
+                "on it."
+            )
+        if n_staging_done:
+            print(
+                f"{n_staging_done} of them belong to done or skipped unit(s) (left by an earlier, "
+                "stopped run) and can be deleted once no job is running."
+            )
+    _print_input_list_report()
+
+    if planning_error_message:
+        print(f"\n{planning_error_message}")
+        print(f"neurodags: error: {planning_error_message}", file=sys.stderr)
 
     if grand["errored"]:
         print(f"\n{grand['errored']} error(s) found.", end="")
@@ -546,12 +864,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print()
 
     if grand["skipped"]:
-        print(
-            f"\n{grand['skipped']} derivative(s) skipped (not applicable for those source files)."
-        )
+        print(f"\n{grand['skipped']} unit(s) skipped (not applicable for those source files).")
+
+    if grand["incomplete"]:
+        print(f"{grand['incomplete']} unit(s) incomplete (no valid .done manifest).", end="")
+        if not args.list_missing:
+            print("  Run with --list-missing for details.", end="")
+        print()
 
     if grand["missing"] and not complete:
-        print(f"{grand['missing']} derivative(s) missing.", end="")
+        print(f"{grand['missing']} unit(s) missing.", end="")
         if not args.list_missing:
             print("  Run with --list-missing for details.", end="")
         print()
@@ -571,6 +893,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  [{deriv}]")
             for r in sub:
                 tag = f"[idx {r['index'] if r['index'] is not None else '?'}]"
+                if r["migrated"]:
+                    tag += " (migrated)"
                 print(f"    {tag} {r['file_path']}")
                 if show_error_path and r["error_path"]:
                     print(f"      error file: {r['error_path']}")
@@ -579,6 +903,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_list("Errored files:", "errored", show_error_path=True)
 
     if args.list_missing:
+        _print_list("Incomplete files:", "incomplete", show_error_path=False)
         _print_list("Missing files:", "missing", show_error_path=False)
 
     return exit_code
@@ -611,6 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(tui_parser)
 
     validate_parser = subparsers.add_parser("validate", help="Load a config and print a summary.")
     validate_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
@@ -620,6 +946,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(validate_parser)
     validate_parser.add_argument(
         "--derivative",
         action="append",
@@ -650,6 +977,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(dataframe_parser)
     dataframe_parser.add_argument(
         "--include-derivative",
         action="append",
@@ -668,8 +996,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         nargs="*",
         default=None,
-        help="Restrict processing to these file indices.",
+        help="Restrict processing to these file indices (unknown or negative indices are an "
+        "error).",
     )
+    dataframe_parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
     dataframe_parser.add_argument(
         "--format",
         choices=("wide", "long"),
@@ -735,9 +1065,29 @@ def build_parser() -> argparse.ArgumentParser:
     view_parser = subparsers.add_parser("view", help="Launch the Dash NC/FIF explorer.")
     view_parser.add_argument("path", help="Path to a .nc or .fif file.")
 
+    inputs_parser = subparsers.add_parser(
+        "inputs",
+        help="Write the frozen input list (index, dataset, path below source_root).",
+    )
+    inputs_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
+    inputs_parser.add_argument(
+        "-d",
+        "--datasets",
+        default=None,
+        help=DATASETS_HELP,
+    )
+    add_mount_point_arg(inputs_parser)
+    inputs_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="FILE",
+        help="Output path (relative to the current working directory). Omit to print to stdout.",
+    )
+
     count_parser = subparsers.add_parser(
         "count-inputs",
-        help="Print the number of unique source (input) files the pipeline will process.",
+        help="Print the number of input entries (the size of the --only-index range).",
     )
     count_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
     count_parser.add_argument(
@@ -746,17 +1096,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(count_parser)
     count_parser.add_argument(
         "--derivative",
         action="append",
         dest="derivatives",
         default=None,
-        help="Derivative to use for counting. Repeat to add more. Defaults to first in DerivativeList.",
+        help="Accepted for compatibility; the count does not depend on the derivative.",
     )
+    count_parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show how many files are done, missing, or errored per derivative.",
+        help="Show how many units are done, skipped, incomplete, missing or errored per derivative.",
     )
     status_parser.add_argument("config", help="Path to the pipeline YAML configuration.")
     status_parser.add_argument(
@@ -765,6 +1117,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(status_parser)
     status_parser.add_argument(
         "--derivative",
         action="append",
@@ -772,6 +1125,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Derivative to check. Repeat to add more. Defaults to all in DerivativeList.",
     )
+    status_parser.add_argument("--inputs", default=None, metavar="FILE", help=INPUTS_HELP)
     status_parser.add_argument(
         "--list-errors",
         action="store_true",
@@ -784,8 +1138,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-missing",
         action="store_true",
         help=(
-            "Print the file index and path of missing (not yet computed) files below the "
-            "summary table. With --format indices, restrict the output to missing indices."
+            "Print the file index and path of incomplete and missing (not yet computed) "
+            "files below the summary table. With --format indices, restrict the output to "
+            "incomplete and missing indices."
         ),
     )
     status_parser.add_argument(
@@ -800,17 +1155,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="table",
         help=(
             "Output format: 'table' (default), 'json', or 'indices' (only the sorted, "
-            "space-separated file indices that are missing or errored — narrow with "
-            "--list-missing / --list-errors — ready for --only-index or sbatch --array). "
-            "The exit code is 1 whenever anything is missing or errored, in every format "
-            "(unless --exit-zero)."
+            "space-separated file indices that are missing, incomplete or errored — narrow "
+            "with --list-missing / --list-errors — ready for --only-index or sbatch --array). "
+            "The exit code is 1 whenever anything is missing, incomplete or errored, or "
+            "could not be planned, in every format (unless --exit-zero)."
         ),
     )
     status_parser.add_argument(
         "--exit-zero",
         action="store_true",
         help=(
-            "Exit 0 whenever the report was produced, even if files are missing or errored "
+            "Exit 0 whenever the report was produced, even if files are missing, incomplete "
+            "or errored "
             "(for report jobs chained with --dependency=afterok). Real failures such as a "
             "missing or invalid config or an unset environment variable still exit non-zero."
         ),
@@ -836,6 +1192,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=DATASETS_HELP,
     )
+    add_mount_point_arg(slurm_parser)
     slurm_parser.add_argument(
         "--derivative",
         action="append",
@@ -864,11 +1221,104 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Upgrade a 0.3.x configuration and its outputs to naming_version 1 "
+        "(preview by default).",
+        description=(
+            "Convert a neurodags 0.3.x pipeline: add naming_version and source_root, rewrite "
+            "relative dataset paths, rename and move the existing outputs to the 0.4.0 "
+            "layout and write .done manifests. Prints the plan and changes nothing unless "
+            "--apply is given. Run once per output tree (per mount)."
+        ),
+    )
+    migrate_parser.add_argument("config", help="Path to the 0.3.x pipeline YAML configuration.")
+    migrate_parser.add_argument(
+        "-d",
+        "--datasets",
+        default=None,
+        help=(
+            "Optional path to the 0.3.x datasets YAML that overrides the pipeline's 'datasets' "
+            "key. Resolved relative to the current working directory (~ and $VARS are "
+            "expanded). Relative paths inside it are read with the 0.3.x rule (relative to "
+            "--legacy-cwd) and rewritten relative to the YAML's own directory."
+        ),
+    )
+    migrate_parser.add_argument(
+        "-m",
+        "--mount-point",
+        "--mount",
+        dest="mount_point",
+        type=mount_point_name,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Mount point whose output tree to migrate. Default: "
+            f"${MOUNT_POINT_ENV} if set, else the pipeline's mount_point. "
+            "--mount is the 0.4.0 pre-release spelling."
+        ),
+    )
+    migrate_parser.add_argument(
+        "--apply", action="store_true", help="Execute the plan (default: preview only)."
+    )
+    migrate_parser.add_argument(
+        "--report", default=None, metavar="PLAN.json", help="Write the full plan as JSON."
+    )
+    migrate_parser.add_argument(
+        "--map",
+        action="append",
+        default=None,
+        metavar="OLD=NEW",
+        help="Rename a derivative while migrating (repeatable). Default: keep the YAML name.",
+    )
+    migrate_parser.add_argument(
+        "--legacy-cwd",
+        default=None,
+        metavar="DIR",
+        help="Directory the 0.3.x commands were run from (relative dataset paths were "
+        "resolved against it). Default: the current working directory.",
+    )
+    migrate_parser.add_argument(
+        "--no-synthesize",
+        action="store_true",
+        help="Do not write .done manifests for migrated outputs (they are recomputed).",
+    )
+    migrate_parser.add_argument(
+        "--legacy-tree",
+        action="store_true",
+        help="For another mount's tree after the configuration was migrated: the tree was "
+        "written by neurodags 0.3.x only (never by a 0.4.0 run), so outputs whose names do "
+        "not change are certified too. Refused when the tree shows a 0.4.0 run.",
+    )
+    migrate_parser.add_argument(
+        "--source-root",
+        action="append",
+        default=None,
+        metavar="DATASET[:MOUNT]=PATH",
+        help="source_root to write for a dataset (repeatable), instead of the suggestion. "
+        "Required when the suggestion would be a filesystem root.",
+    )
+    migrate_parser.add_argument(
+        "--upstream-map",
+        action="append",
+        default=None,
+        metavar="OLDTOKEN=NEWNAME",
+        help="Chained pipelines: an upstream derivative renamed on disk by its own migration "
+        "(e.g. CleanPrep=clean_prep), so outputs named after the old upstream file match.",
+    )
+
     return parser
 
 
 def _cmd_tui(args: argparse.Namespace) -> int:
     from neurodags.tui import NeuroDagsApp
+
+    if getattr(args, "config", None):
+        _load_pipeline_config(args.config)  # refuse an unmigrated config before the UI starts
+    if args.mount_point is not None:
+        # The app and its workers resolve the mount point themselves; the environment
+        # variable reaches all of them.
+        os.environ[MOUNT_POINT_ENV] = args.mount_point
 
     NeuroDagsApp(config_path=args.config, datasets_path=args.datasets).run()
     return 0
@@ -900,19 +1350,49 @@ def _dependency_closure(defs: dict, selection: list[str]) -> list[str]:
     return sorted(result)
 
 
+def _print_dataset_report(
+    datasets: dict, resolved_paths: dict, mount_point: object, problems: list[str]
+) -> None:
+    """Print the resolved path fields per active dataset (stdout) and every problem (stderr)."""
+    for ds_name, cfg in datasets.items():
+        if getattr(cfg, "skip", False):
+            print(f"  {ds_name}: skipped")
+            continue
+        fields = resolved_paths.get(ds_name, {})
+        print(f"  {ds_name}:")
+        print(f"    mount: {mount_point}")
+        print(f"    source_root: {fields.get('source_root')}")
+        print(f"    file_pattern: {fields.get('file_pattern')}")
+        if fields.get("exclude_pattern"):
+            print(f"    exclude_pattern: {fields['exclude_pattern']}")
+        print(f"    derivatives_path: {fields.get('derivatives_path')}")
+        if fields.get("derivatives_subdir"):
+            print(f"    derivatives_subdir: {fields['derivatives_subdir']}")
+            print(f"    outputs under: {fields.get('derivatives_base')}")
+    for problem in problems:
+        # Errors (with source_root suggestions) go to stderr, one per line.
+        print(f"error: {problem}", file=sys.stderr)
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
     try:
         datasets, mount_point = get_datasets_and_mount_point_from_pipeline_configuration(
-            args.config, datasets_input=args.datasets
+            args.config, datasets_input=args.datasets, mount_point=args.mount_point
         )
-        resolved_paths = resolve_dataset_paths(datasets, mount_point)
-        file_names = check_derivative_names(config.get("DerivativeDefinitions") or {})
+        mount_source = _describe_mount(config, args)[1]
+        resolved_paths, problems = inspect_dataset_paths(
+            datasets, mount_point, mount_source=mount_source
+        )
+        # Errors were raised when the configuration was loaded; this returns the warnings.
+        name_warnings = check_pipeline_names(config)
+        for name in getattr(args, "derivatives", None) or []:
+            validate_derivative_name(name)
+        layout_warnings = output_tree_warnings(datasets, mount_point)
     except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     defs = config.get("DerivativeDefinitions") or {}
-    renamed = {name: fname for name, fname in file_names.items() if name != fname}
     defined = list(defs.keys())
     derivative_list = list(config.get("DerivativeList") or [])
 
@@ -928,17 +1408,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     print(f"config: {args.config}")
     print(f"datasets: {', '.join(datasets.keys()) or 'none'}")
-    print(f"mount_point: {mount_point}")
-    for ds_name, fields in resolved_paths.items():
-        print(f"  {ds_name}.file_pattern: {fields['file_pattern']}")
-        print(f"  {ds_name}.derivatives_path: {fields['derivatives_path']}")
-        if fields["exclude_pattern"]:
-            print(f"  {ds_name}.exclude_pattern: {fields['exclude_pattern']}")
+    print(f"mount_point: {mount_point} (from {MOUNT_SOURCE_LABELS[mount_source]})")
+    _print_dataset_report(datasets, resolved_paths, mount_point, problems)
+    for warning in [*name_warnings, *layout_warnings]:
+        print(f"warning: {warning}", file=sys.stderr)
     print(f"derivatives_defined ({len(defined)}): {', '.join(defined) or 'none'}")
-    if renamed:
-        print(f"on-disk names differing from YAML names ({len(renamed)}):")
-        for name, fname in renamed.items():
-            print(f"  {name} -> files named @{fname}")
     print(f"run_set [{selection_source}] ({len(selected)}): {', '.join(selected) or 'none'}")
     print(f"computed_with_dependencies ({len(computed)}): {', '.join(computed) or 'none'}")
     if deps_only:
@@ -947,16 +1421,18 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"  for_dataframe outputs: {', '.join(for_dataframe)}")
     if not_computed:
         print(f"not computed by this run ({len(not_computed)}): {', '.join(not_computed)}")
-    return 0
+    return 1 if problems else 0
 
 
 def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
 
+    failures: list[dict] = []
     result = run_pipeline(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
+        mount_point=args.mount_point,
         derivatives=derivatives,
         max_files_per_dataset=args.max_files_per_dataset,
         dry_run=dry_run,
@@ -966,11 +1442,29 @@ def _cmd_run(args: argparse.Namespace, *, dry_run: bool) -> int:
         n_jobs=args.n_jobs,
         joblib_backend=args.joblib_backend,
         joblib_prefer=args.joblib_prefer,
+        inputs=args.inputs,
+        failures=failures,
     )
 
     if dry_run and result is not None:
         output_path = _save_dataframe(result, args.output, "dry_run_results.csv")
         print(f"saved dry run results to {output_path}")
+        if not result.empty:
+            message = _planning_error_message(_status_rows(result))
+            if message:
+                # The saved plan lacks these units: a failed inspection, not a plan.
+                print(f"neurodags: error: {message}", file=sys.stderr)
+                return 1
+    if failures and not dry_run:
+        # Every requested input was processed; the failed units have .error markers.
+        shown = ", ".join(f"{f['derivative']} #{f['index']}" for f in failures[:5])
+        more = f" and {len(failures) - 5} more" if len(failures) > 5 else ""
+        print(
+            f"neurodags: error: {len(failures)} unit(s) failed ({shown}{more}); see the log, "
+            "and 'neurodags status' for the .error markers",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -978,6 +1472,7 @@ def _cmd_dataframe(args: argparse.Namespace) -> int:
     df = build_derivative_dataframe(
         pipeline_configuration=args.config,
         datasets_configuration=args.datasets,
+        mount_point=args.mount_point,
         include_derivatives=args.include_derivatives,
         max_files_per_dataset=args.max_files_per_dataset,
         only_index=args.only_index,
@@ -985,6 +1480,7 @@ def _cmd_dataframe(args: argparse.Namespace) -> int:
         preserve_complex_values=args.preserve_complex_values,
         raise_on_error=args.raise_on_error,
         n_jobs=args.n_jobs,
+        inputs=args.inputs,
     )
     if args.output:
         output_path = _save_dataframe(df, args.output, "derivative_dataframe.csv")
@@ -1028,25 +1524,24 @@ def _cmd_dag(args: argparse.Namespace) -> int:
 
 
 def _cmd_count(args: argparse.Namespace) -> int:
-    config = _load_pipeline_config(args.config)
-    derivatives = args.derivatives or (list(config.get("DerivativeList") or [])[:1])
-    if not derivatives:
-        raise ValueError("No derivatives found. Pass --derivative or define DerivativeList.")
-    result = run_pipeline(
-        pipeline_configuration=args.config,
-        datasets_configuration=args.datasets,
-        derivatives=derivatives,
-        dry_run=True,
+    _load_pipeline_config(args.config)
+    # Number of index entries, the unit --only-index selects (the same file listed under
+    # two dataset entries has two indices). With --inputs: the number of listed entries,
+    # missing-source ones included, so the array covers every index of the list.
+    print(len(_cli_enumeration(args).entries))
+    return 0
+
+
+def _cmd_inputs(args: argparse.Namespace) -> int:
+    _load_pipeline_config(args.config)
+    enumeration = enumerate_pipeline_inputs(
+        args.config, datasets_input=args.datasets, mount_point=args.mount_point
     )
-    if result is None or result.empty:
-        count = 0
-    elif "index" in result.columns:
-        # Count (dataset, file) entries, the unit --only-index selects: the same file listed
-        # under two dataset entries has two indices and needs two array tasks.
-        count = int(result["index"].nunique())
+    if args.output:
+        path = write_inputs_file(enumeration, args.output)
+        print(f"wrote {len(enumeration.entries)} input(s) to {path}")
     else:
-        count = int(result["file_path"].nunique())
-    print(count)
+        sys.stdout.write(format_inputs(enumeration.entries))
     return 0
 
 
@@ -1054,23 +1549,32 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
     config = _load_pipeline_config(args.config)
     derivatives = _resolve_derivatives(config, args.derivatives)
     ordered = _derivative_topo_order(config, derivatives)
+    if args.mount_point:
+        # Every job would fail on a mount the datasets do not define. The paths are not
+        # checked: they may exist only on the cluster.
+        datasets, _ = get_datasets_and_mount_point_from_pipeline_configuration(
+            args.config, datasets_input=args.datasets, mount_point=args.mount_point
+        )
+        problems = missing_mount_entries(datasets, args.mount_point)
+        if problems:
+            raise MountPointError(problems)
 
     if args.pattern == "per-file":
-        script = _slurm_per_file(args.config, ordered)
+        script = _slurm_per_file(args.config, ordered, args.datasets, args.mount_point)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     elif args.pattern == "flat":
-        script = _slurm_flat(args.config, ordered)
+        script = _slurm_flat(args.config, ordered, args.datasets, args.mount_point)
         if args.output:
             Path(args.output).write_text(script)
             print(f"wrote {args.output}")
         else:
             print(script)
     else:
-        submit, worker = _slurm_chained(args.config, ordered)
+        submit, worker = _slurm_chained(args.config, ordered, args.datasets, args.mount_point)
         if args.output:
             submit_path = Path(args.output)
             worker_path = submit_path.parent / "run_one_derivative.sh"
@@ -1081,6 +1585,40 @@ def _cmd_slurm_script(args: argparse.Namespace) -> int:
         else:
             print(f"# === FILE: submit_pipeline.sh ===\n{submit}")
             print(f"# === FILE: run_one_derivative.sh ===\n{worker}")
+    return 0
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    from neurodags import migrate
+
+    plan = migrate.plan_migration(
+        args.config,
+        args.datasets,
+        mount=args.mount_point,
+        renames=args.map,
+        legacy_cwd=args.legacy_cwd,
+        synthesize=not args.no_synthesize,
+        source_roots=args.source_root,
+        upstream_renames=args.upstream_map,
+        legacy_tree=args.legacy_tree,
+    )
+    print(migrate.format_preview(plan, apply=args.apply))
+    if args.report:
+        print(f"\nplan written to {migrate.write_report(plan, args.report)}")
+    if plan.refusals:
+        print(
+            f"neurodags: error: migration refused ({len(plan.refusals)} problem(s) above); "
+            "nothing was changed.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.apply or not plan.has_work:
+        return 0
+    result = migrate.apply_migration(plan)
+    print()
+    print(migrate.format_apply_summary(result))
+    if args.report:
+        migrate.write_report(plan, args.report, extra=result.to_dict())
     return 0
 
 
@@ -1107,13 +1645,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if getattr(args, "datasets", None) is not None:
         try:
-            args.datasets = _resolve_cli_datasets_or_exit(
-                args.datasets, getattr(args, "config", None), "neurodags"
-            )
+            args.datasets = resolve_cli_datasets_path(args.datasets)
         except DatasetsPathError as exc:
             print(f"neurodags: error: {exc}", file=sys.stderr)
             return 2
 
+    try:
+        if getattr(args, "inputs", None) is not None:
+            args.inputs = resolve_cli_inputs_path(args.inputs)
+        return _dispatch(parser, args)
+    except (
+        ConfigVersionError,
+        DatasetConfigError,
+        InputsError,
+        NamingError,
+        MigrationError,
+    ) as exc:
+        # Configuration errors are user errors: one clean message, no traceback. NamingError
+        # includes dataframe column collisions (naming.ColumnCollisionError).
+        print(f"neurodags: error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.command == "tui":
         return _cmd_tui(args)
     if args.command == "validate":
@@ -1130,10 +1684,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_view(args)
     if args.command == "count-inputs":
         return _cmd_count(args)
+    if args.command == "inputs":
+        return _cmd_inputs(args)
     if args.command == "status":
         return _cmd_status(args)
     if args.command == "slurm-script":
         return _cmd_slurm_script(args)
+    if args.command == "migrate":
+        return _cmd_migrate(args)
 
     parser.error(f"Unknown command '{args.command}'")
     return 2

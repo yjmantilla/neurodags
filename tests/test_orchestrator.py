@@ -1,3 +1,5 @@
+import os
+
 from neurodags.datasets import generate_dummy_dataset
 from neurodags.nodes import get_node, list_nodes
 from neurodags.orchestrators import (
@@ -35,24 +37,30 @@ generate_dummy_dataset(data_params=dataset_2)
 datasets = {
     "dataset_1": {
         "name": "Dataset 1",
+        "source_root": "_data/dataset1",
         "file_pattern": "_data/dataset1/**/*.vhdr",
         "derivatives_path": "_outputs/dataset1",
         "extra_field": "extra_value",  # Example of an extra field
     },
     "dataset_2": {
         "name": "Dataset 2",
+        "source_root": "_data/dataset2",
         "file_pattern": "_data/dataset2/**/*.vhdr",
         "derivatives_path": "_outputs/dataset2",
         "extra_field": "extra_value",  # Example of an extra field
     },
 }
 
+# Relative dataset paths in an in-memory mapping resolve against base_dir (0.4.0).
+BASE_DIR = os.getcwd()
+
 pipeline_input = {
+    "naming_version": 1,
     "datasets": datasets,
     "mount_point": None,
 }
 files_per_dataset, all_files, common_roots = get_all_files_from_pipeline_configuration(
-    pipeline_input, max_files_per_dataset=None
+    pipeline_input, max_files_per_dataset=None, base_dir=BASE_DIR
 )
 
 print("Files per dataset:", files_per_dataset)
@@ -68,6 +76,7 @@ if False:
             pipeline_configuration=pipeline_input,
             derivative=get_node(derivative),
             max_files_per_dataset=2,
+            base_dir=BASE_DIR,
         )
 
 # 1) Load and register derivatives
@@ -83,4 +92,5 @@ for derivative_name in ["SpectrumArrayWelch", "SpectrumArrayMultitaper"]:
         dry_run=False,
         only_index=[3, 5],
         raise_on_error=True,
+        base_dir=BASE_DIR,
     )

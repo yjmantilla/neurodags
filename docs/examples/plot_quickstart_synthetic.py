@@ -96,6 +96,7 @@ for f in source_files:
 DATASETS_YAML = f"""\
 quickstart:
   name: Quickstart
+  source_root: "{DATA_DIR}"
   file_pattern: "{DATA_DIR / '**' / '*.vhdr'}"
   derivatives_path: "{OUT_DIR}"
 """
@@ -118,6 +119,7 @@ print("Datasets:", list(datasets))
 #   ``for_dataframe: true`` — included in the aggregated dataframe).
 
 PIPELINE_YAML = """\
+naming_version: 1
 mount_point: null
 
 DerivativeDefinitions:
@@ -279,8 +281,10 @@ else:
 # %%
 # What's Next
 # ------------
-# - Swap ``generate_dummy_dataset`` for real BIDS data by pointing ``file_pattern``
-#   at your raw EEG files.
+# - Swap ``generate_dummy_dataset`` for real BIDS data by pointing ``source_root``
+#   at your raw data folder and ``file_pattern`` at your raw EEG files below it.
+# - Outputs land in ``derivatives/`` mirroring the folders below ``source_root``,
+#   as ``<file>@BasicPrep.fif`` plus a ``<file>@BasicPrep.done`` manifest.
 # - Save ``PIPELINE_YAML`` / ``DATASETS_YAML`` to ``pipeline.yml`` and
 #   ``datasets.yml`` for version-controlled, reproducible workflows.
 # - Run the same workflow from the CLI with commands such as

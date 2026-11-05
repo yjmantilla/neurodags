@@ -133,7 +133,7 @@ class TestAppStartup:
 
     def test_starts_with_config_path_preloads(self, tmp_path):
         yaml = tmp_path / "pipe.yaml"
-        yaml.write_text("Datasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
 
         async def _():
             async with NeuroDagsApp(config_path=str(yaml)).run_test() as pilot:
@@ -165,7 +165,7 @@ class TestAppStartup:
     def test_starts_with_datasets_path_preloads(self, tmp_path):
         yaml = tmp_path / "pipe.yaml"
         data_yaml = tmp_path / "datasets.yaml"
-        yaml.write_text("Datasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\nDerivativeDefinitions: {StepA: {}}\n")
         data_yaml.write_text("Datasets: {}\n")
 
         async def _():
@@ -186,9 +186,10 @@ class TestAppStartup:
 class TestConfigTab:
     def test_load_config_with_datasets_override(self, tmp_path):
         pipe_yaml = tmp_path / "p.yaml"
-        pipe_yaml.write_text("DerivativeDefinitions:\n  StepA: {}\n")
+        pipe_yaml.write_text("naming_version: 1\nDerivativeDefinitions:\n  StepA: {}\n")
         data_yaml = tmp_path / "d.yaml"
-        data_yaml.write_text("Datasets:\n  ds1:\n    file_pattern: '*.vhdr'\n")
+        # A real datasets YAML (the summary uses the loader execution uses).
+        data_yaml.write_text("ds1:\n  name: ds1\n  source_root: .\n  file_pattern: '*.vhdr'\n")
 
         async def _():
             async with NeuroDagsApp().run_test() as pilot:
@@ -780,8 +781,40 @@ class TestStatusSync:
         with patch("neurodags.orchestrators.run_pipeline", return_value=pd.DataFrame()):
             rows, grand, errored = _status_sync("p.yml", None, None)
         assert rows == []
-        assert grand == {"total": 0, "done": 0, "missing": 0, "errored": 0}
+        assert grand == {
+            "total": 0,
+            "done": 0,
+            "skipped": 0,
+            "incomplete": 0,
+            "missing": 0,
+            "errored": 0,
+            "no-save": 0,
+            "unknown": 0,
+        }
         assert errored == []
+
+    def test_skipped_and_no_save_units_are_counted(self):
+        fake_df = pd.DataFrame(
+            [
+                {
+                    "derivative": "StepA",
+                    "file_path": "a.vhdr",
+                    "plan": [{"kind": "derivative_output", "state": "skipped"}],
+                },
+                {
+                    "derivative": "StepA",
+                    "file_path": "b.vhdr",
+                    "plan": [{"kind": "derivative_output", "will_save": False}],
+                },
+            ]
+        )
+        with patch("neurodags.orchestrators.run_pipeline", return_value=fake_df):
+            rows, grand, _ = _status_sync("p.yml", None, None)
+        assert grand["total"] == 2
+        assert grand["skipped"] == 1
+        assert grand["no-save"] == 1
+        assert sum(v for k, v in grand.items() if k != "total") == grand["total"]
+        assert rows[0]["skipped"] == 1
 
     def test_classifies_done_missing_errored(self):
         fake_df = pd.DataFrame(
@@ -805,7 +838,16 @@ class TestStatusSync:
         )
         with patch("neurodags.orchestrators.run_pipeline", return_value=fake_df):
             _rows, grand, errored = _status_sync("p.yml", None, None)
-        assert grand == {"total": 3, "done": 1, "missing": 1, "errored": 1}
+        assert grand == {
+            "total": 3,
+            "done": 1,
+            "skipped": 0,
+            "incomplete": 0,
+            "missing": 1,
+            "errored": 1,
+            "no-save": 0,
+            "unknown": 0,
+        }
         assert len(errored) == 1
         assert errored[0] == ("StepA", "c.vhdr", "c.error")
 
@@ -832,7 +874,7 @@ class TestMain:
 
     def test_main_with_config_arg(self, tmp_path):
         yaml = tmp_path / "p.yaml"
-        yaml.write_text("Datasets: {}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\n")
 
         with (
             patch.object(sys, "argv", ["neurodags-tui", str(yaml)]),
@@ -846,7 +888,7 @@ class TestMain:
     def test_main_with_datasets_arg(self, tmp_path):
         yaml = tmp_path / "p.yaml"
         datasets = tmp_path / "d.yaml"
-        yaml.write_text("Datasets: {}\n")
+        yaml.write_text("naming_version: 1\nDatasets: {}\n")
         datasets.write_text("Datasets: {}\n")
 
         with (
@@ -857,3 +899,133 @@ class TestMain:
             main()
             mi.assert_called_once_with(config_path=str(yaml), datasets_path=str(datasets))
             m.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# End to end: what the Config tab shows is what runs; derivative filter syntax
+# ---------------------------------------------------------------------------
+
+
+def _two_dataset_files(p, names=("shown", "actual")):
+    import yaml as _yaml
+
+    (p / "cfg").mkdir()
+    for name in names:
+        (p / name).mkdir()
+        (p / name / "x.txt").write_text(name)
+
+    def ds(name):
+        return {
+            name: {
+                "name": name,
+                "source_root": str(p / name),
+                "file_pattern": str(p / name / "*.txt"),
+                "derivatives_path": str(p / (name + "-out")),
+            }
+        }
+
+    defs = {
+        n: {
+            "for_dataframe": True,
+            "nodes": [
+                {"id": 0, "derivative": "SourceFile"},
+                {"id": 1, "node": "dummy", "args": {"param1": "id.0"}},
+            ],
+        }
+        for n in ("A", "B", "C")
+    }
+    # Same relative name in two places: cwd/datasets.yml and cfg/datasets.yml.
+    (p / "datasets.yml").write_text(_yaml.safe_dump(ds(names[0])))
+    (p / "cfg" / "datasets.yml").write_text(_yaml.safe_dump(ds(names[1])))
+    (p / "cfg" / "pipeline.yml").write_text(
+        _yaml.safe_dump(
+            {
+                "naming_version": 1,
+                "DerivativeDefinitions": defs,
+                "DerivativeList": ["A", "B", "C"],
+            }
+        )
+    )
+
+
+def _artifacts(p):
+    return sorted(str(f.relative_to(p)) for f in p.rglob("*.message.txt"))
+
+
+class TestConfigTabExecutesWhatItShows:
+    def test_relative_datasets_override_is_cwd_relative_for_display_and_run(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        _two_dataset_files(tmp_path)
+
+        async def _():
+            async with NeuroDagsApp().run_test() as pilot:
+                app = pilot.app
+                app.query_one("#config-path-input", Input).value = "cfg/pipeline.yml"
+                app.query_one("#datasets-path-input", Input).value = "datasets.yml"
+                app._handle_load_config()
+                summary = str(app.query_one("#config-summary", Static).render())
+                assert "Datasets: shown" in summary
+                assert app._datasets_path == str(tmp_path / "datasets.yml")
+                await app._run_pipeline()
+                assert _artifacts(tmp_path) == [
+                    "shown-out/x.txt@A.message.txt",
+                    "shown-out/x.txt@B.message.txt",
+                    "shown-out/x.txt@C.message.txt",
+                ]
+
+        _run(_())
+
+    def test_missing_relative_datasets_override_is_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _two_dataset_files(tmp_path)
+        (tmp_path / "datasets.yml").unlink()  # only cfg/datasets.yml exists now
+
+        async def _():
+            async with NeuroDagsApp().run_test() as pilot:
+                app = pilot.app
+                app.query_one("#config-path-input", Input).value = "cfg/pipeline.yml"
+                app.query_one("#datasets-path-input", Input).value = "datasets.yml"
+                app._handle_load_config()
+                status = str(app.query_one("#config-status", Static).render())
+                assert "Error" in status
+                assert "not found" in status
+                assert app._config is None
+                assert app._datasets_path is None
+
+        _run(_())
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("A B", {"A", "B"}),
+            ("A,B", {"A", "B"}),
+            (" A ,  B ", {"A", "B"}),
+            ("A\tB", {"A", "B"}),
+            ("B", {"B"}),
+            ("", {"A", "B", "C"}),  # blank: every for_dataframe derivative
+            ("  ", {"A", "B", "C"}),
+        ],
+    )
+    def test_dataframe_filter_selects_exactly_the_named_derivatives(
+        self, tmp_path, monkeypatch, value, expected
+    ):
+        # C is computed and eligible too: ignoring the filter would include it.
+        monkeypatch.chdir(tmp_path)
+        _two_dataset_files(tmp_path)
+
+        async def _():
+            async with NeuroDagsApp().run_test() as pilot:
+                app = pilot.app
+                app.query_one("#config-path-input", Input).value = "cfg/pipeline.yml"
+                app.query_one("#datasets-path-input", Input).value = "datasets.yml"
+                app._handle_load_config()
+                await app._run_pipeline()
+                app.query_one("#df-derivatives", Input).value = value
+                await app._assemble_dataframe()
+                assert app._df is not None
+                columns = {c for c in app._df.columns if c.endswith(".message.txt")}
+                assert columns == {f"{d}.message.txt" for d in expected}
+
+        _run(_())

@@ -1,12 +1,11 @@
 # dag_exec.py
-import glob
 import inspect
 import json
 import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 try:
     import numpy as np
@@ -30,8 +29,34 @@ from neurodags.derivatives import (
 )
 from neurodags.loaders import load_configuration
 from neurodags.loggers import get_logger
+from neurodags.naming import (
+    ColumnCollisionError,
+    find_column_collisions,
+    format_column,
+    parse_reference,
+    validate_artifact_suffixes,
+)
 from neurodags.nodes import get_node
-from neurodags.utils import snake_to_camel
+from neurodags.outputs import (
+    build_manifest,
+    canonical_reports,
+    check_artifact_ownership,
+    check_reports_unchanged,
+    check_unreported_split_parts,
+    file_fingerprint,
+    file_identity,
+    make_staging_dir,
+    manifest_artifacts,
+    move_staged,
+    output_prefix,
+    plan_publication,
+    publish_marker,
+    remove_markers,
+    remove_staging_dir,
+    unit_state,
+    write_manifest,
+    writer_paths,
+)
 
 log = get_logger(__name__)
 # A node reference is ``id.N`` (whole result of node N) or, for a node that
@@ -230,50 +255,6 @@ def _topo_order(nodes: list[dict[str, Any]]) -> list[int]:
     return order
 
 
-# Optional: simple cache probe (customize for your FS layout)
-def _is_step_cached(
-    derivative_name: str, step_derivative_name: str, reference_base: Path, accept_ambiguous=False
-) -> bool:
-    """
-    Decide if a 'derivative' step can be considered already computed.
-    By default: look for any file whose prefix matches:
-    <reference_base>@<CamelCase(step_derivative_name)>.*
-    """
-    # prefix = f"{reference_base}@{snake_to_camel(step_derivative_name)}"
-    postfix = f"@{step_derivative_name}"
-    # return any(reference_base.parent.glob(Path(prefix).name + ".*"))
-    # Escape the literal path so glob metacharacters ([, ], *, ?) in file or
-    # directory names are matched verbatim.
-    candidates = glob.glob(
-        glob.escape(
-            reference_base.as_posix() + postfix
-            if isinstance(reference_base, Path)
-            else reference_base + postfix
-        )
-    )  # or use
-    if len(candidates) > 1:
-        if not accept_ambiguous:
-            log.error(
-                "Multiple cached artifacts found",
-                derivative=derivative_name,
-                step_reference=step_derivative_name,
-                reference_base=reference_base,
-                candidates=candidates,
-            )
-            raise RuntimeError(
-                f"Multiple cached artifacts found for {reference_base}{postfix}: {candidates}"
-            )
-        else:
-            log.warning(
-                "Multiple cached artifacts found, using the first one",
-                derivative=derivative_name,
-                step_reference=step_derivative_name,
-                reference_base=reference_base,
-                candidates=candidates,
-            )
-    return len(candidates) >= 1, candidates[0] if candidates else None
-
-
 # --- registration from YAML ---
 def register_derivatives_from_yaml(yaml_path: str) -> list[str]:
     cfg = load_configuration(yaml_path)
@@ -316,29 +297,125 @@ def _ensure_parent_dir(reference_base: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
-def _artifact_candidates_for(prefix: str) -> list[str]:
-    # Returns all non-error, non-skip files matching prefix.*. Used by the dry-run plan to set
-    # cached=True when any artifact exists. Does NOT guarantee all expected artifact files
-    # are present — a derivative that writes N files shows as cached after only 1 is written.
-    # TODO: How to add option to skip derivatives that previously failed? (.error files)
-    # The prefix is a literal path built from source/derivative names, so escape it: glob
-    # metacharacters ([, ], *, ?) in any file or directory name must match verbatim.
-    return [
-        x
-        for x in sorted(glob.glob(glob.escape(prefix) + ".*"))
-        if not x.endswith(".error") and not x.endswith(".skip") and os.path.isfile(x)
-    ]
+def _cached_unit(prefix: str, name: str) -> dict[str, list[str]] | None:
+    """Files per suffix of a done unit (valid ``.done`` manifest), else ``None`` (spec 6.2)."""
+    return manifest_artifacts(prefix, name)
+
+
+def _main_files(artifacts: Mapping[str, Sequence[str]]) -> list[str]:
+    """The main file of every artifact (first listed path), sorted like the 0.3.x glob.
+
+    MNE split parts follow their main file in the manifest and are loaded through it, so
+    they are never handed to nodes on their own.
+    """
+    return sorted(paths[0] for paths in artifacts.values() if paths)
 
 
 class _MissingPrecomputedArtifacts(RuntimeError):
     """Raised when dataframe-only collection requires cached artifacts but none are available."""
 
 
-def _split_derivative_ref(derivative_ref: str) -> tuple[str, str | None]:
-    if "." in derivative_ref:
-        base, ext = derivative_ref.split(".", 1)
-        return base, ext
-    return derivative_ref, None
+_T = TypeVar("_T")
+
+
+class ArtifactSelectionError(LookupError):
+    """A ``derivative:`` reference does not select exactly one artifact (spec section 5).
+
+    Raised when ``Name.suffix`` names a suffix the derivative did not produce, or when a
+    bare ``Name`` refers to a derivative with zero or several artifacts. The message is the
+    same whether the referenced derivative was read from its ``.done`` manifest, computed
+    in the same run, or kept in memory (``save: false``), and it lists the available
+    suffixes. There is no fallback to another artifact or to the whole result.
+    """
+
+
+def artifact_selection_message(
+    consumer: str, ref: str, name: str, suffix: str | None, available: Sequence[str]
+) -> str:
+    """Return the :class:`ArtifactSelectionError` message (identical on every path)."""
+    listed = ", ".join(repr(s) for s in sorted(available)) or "none"
+    hint = f" Write the full suffix, e.g. '{name}{sorted(available)[0]}'." if available else ""
+    if suffix is None:
+        return (
+            f"Derivative {consumer!r}: reference {ref!r} has no artifact suffix, but "
+            f"derivative {name!r} produced {len(available)} artifacts (available suffixes: "
+            f"{listed}). A bare name is allowed only for a derivative with exactly one "
+            f"artifact.{hint}"
+        )
+    return (
+        f"Derivative {consumer!r}: reference {ref!r} selects artifact {suffix!r}, which "
+        f"derivative {name!r} did not produce (available suffixes: {listed}). References "
+        f"select the artifact whose suffix is exactly the text after the name.{hint}"
+    )
+
+
+def select_artifact(
+    artifacts: Mapping[str, _T],
+    name: str,
+    suffix: str | None,
+    *,
+    consumer: str,
+    ref: str,
+) -> tuple[str, _T]:
+    """Select the artifact a reference names (spec section 5).
+
+    Parameters
+    ----------
+    artifacts : Mapping[str, T]
+        The referenced derivative's artifacts keyed by suffix: the ``.done`` manifest's
+        ``{suffix: [paths]}`` or ``NodeResult.artifacts``.
+    name, suffix : str, str or None
+        The parsed reference (:func:`neurodags.naming.parse_reference`).
+    consumer, ref : str
+        The referencing derivative and the reference as written, for the error message.
+
+    Returns
+    -------
+    tuple[str, T]
+        The selected suffix and value. ``Name.suffix`` selects the key equal to ``suffix``
+        (string equality); a bare ``Name`` selects the only artifact.
+
+    Raises
+    ------
+    ArtifactSelectionError
+        When the suffix is absent, or a bare name refers to zero or several artifacts.
+    """
+    if suffix is None:
+        if len(artifacts) == 1:
+            return next(iter(artifacts.items()))
+    elif suffix in artifacts:
+        return suffix, artifacts[suffix]
+    raise ArtifactSelectionError(
+        artifact_selection_message(consumer, ref, name, suffix, list(artifacts))
+    )
+
+
+def _select_or_fail(
+    artifacts: Mapping[str, _T],
+    *,
+    name: str,
+    suffix: str | None,
+    consumer: str,
+    ref: str,
+    sid: Any,
+) -> tuple[str, _T]:
+    """:func:`select_artifact` inside ``run_derivative``: a failure fails the consumer unit.
+
+    :class:`ArtifactSelectionError` is logged and re-raised; ``run_derivative`` then writes
+    the consumer's ``.error`` marker (when it saves).
+    """
+    try:
+        return select_artifact(artifacts, name, suffix, consumer=consumer, ref=ref)
+    except ArtifactSelectionError as exc:
+        log.error(
+            "Artifact selection failed",
+            derivative=consumer,
+            id=sid,
+            child_derivative=ref,
+            available=sorted(artifacts),
+            error=str(exc),
+        )
+        raise
 
 
 # ---------- executor ----------
@@ -353,23 +430,46 @@ def run_derivative(
     mount_point: Path | None = None,
     dry_run: bool = False,
     skip_errors: bool = False,
+    *,
+    source_dataset: str | None = None,
+    source_rel: str | None = None,
 ) -> NodeResult | dict[str, Any]:
     """
     Evaluate (or dry-run) a derivative on a single file.
 
+    Outputs of the unit are ``<reference_base>@<derivative_name><suffix>``, with the
+    derivative name used verbatim (see :mod:`neurodags.outputs`). A unit is cached when its
+    ``.done`` manifest is valid (spec 6.2); files without one are recomputed.
+
     When dry_run=True:
       - Do NOT execute any steps.
-      - Report, per step, whether the expected artifacts are already present.
+      - Report, per step, whether the expected artifacts are already present (``state``
+        of the final output: done, error, skipped, incomplete or missing).
       - Return a dict with a 'plan' list (so callers don't confuse it with NodeResult).
 
     Normal mode:
+      - When a saving unit is (re)computed, its old ``.done`` and ``.skip`` are deleted
+        before anything is computed. Any failure inside the unit (a node, a dependency,
+        argument preparation, artifact selection or writing) writes the unit's ``.error``.
       - 'derivative' steps: if cached and overwrite=False, skip compute; else compute or recurse.
-      - 'node' steps: execute; if it's the last step, save artifacts under '@<DerivativeName>*'.
+        A ``save: false`` child is never read from disk. The referenced artifact is selected
+        exactly (:func:`select_artifact`) on every path; a failed selection raises
+        :class:`ArtifactSelectionError`.
+      - 'node' steps: execute; if it's the last step, validate the artifact suffixes, write
+        every artifact into a staging folder, move the files into place atomically, then
+        publish the ``.done`` manifest atomically (:func:`_save_final_artifacts`).
+
+    Parameters
+    ----------
+    source_dataset, source_rel : str, optional
+        Dataset key and source path relative to ``source_root``, recorded in the
+        manifest's ``source``. ``source_rel`` defaults to the source file's basename.
     """
     overwrite = bool(derivative_def.get("overwrite", False))
     save = bool(derivative_def.get("save", True))
     nodes = derivative_def.get("nodes", [])
     order = _topo_order(nodes)
+    manifest_rel = source_rel if source_rel is not None else os.path.basename(file_path)
 
     store: dict[int, Any] = {}
     last_result: NodeResult | None = None
@@ -380,10 +480,8 @@ def run_derivative(
             plan.append(kwargs)
 
     # In dry-run, also check the final output of the derivative upfront
-    base_reference = (
-        reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-    )
-    final_prefix = base_reference + "@" + snake_to_camel(derivative_name) if save else None
+    base_reference = os.fspath(reference_base)
+    final_prefix = output_prefix(base_reference, derivative_name) if save else None
     error_path = (final_prefix + ".error") if final_prefix else None
     skip_marker_path = (final_prefix + ".skip") if final_prefix else None
     has_error_marker = bool(error_path and Path(error_path).exists())
@@ -391,14 +489,20 @@ def run_derivative(
 
     if dry_run:
         if save:
-            final_candidates = _artifact_candidates_for(final_prefix)
+            state = unit_state(final_prefix, derivative_name)
             _record(
                 id="final",
                 kind="derivative_output",
                 name=derivative_name,
                 prefix=final_prefix,
-                cached=len(final_candidates) > 0,
-                paths=final_candidates,
+                state=state.state,
+                cached=state.state == "done",
+                paths=_main_files(state.artifacts),
+                artifacts=state.artifacts,
+                origin=state.origin,
+                manifest_problem=state.problem,
+                unlisted=list(state.unlisted),
+                temps=list(state.temps),
                 has_error_marker=has_error_marker,
                 error_path=error_path if has_error_marker else None,
                 has_skip_marker=has_skip_marker,
@@ -427,18 +531,19 @@ def run_derivative(
                 file_path=file_path,
             )
             return {"skipped": skip_marker_path}
-        # Early skip if final already cached and not overwriting
+        # Early skip if the unit is done (valid .done manifest) and not overwriting
         if save and not overwrite:
-            final_candidates = _artifact_candidates_for(final_prefix)
-            if len(final_candidates) > 0:
+            cached = _cached_unit(final_prefix, derivative_name)
+            if cached is not None:
+                final_candidates = _main_files(cached)
                 log.info(
                     "Last step of the derivative is cached",
                     derivative=derivative_name,
                     final_prefix=final_prefix,
                     reference_base=reference_base,
-                    candidate=final_candidates[0],
+                    candidate=final_candidates[0] if final_candidates else None,
                 )
-                return {"cached": final_candidates}
+                return {"cached": final_candidates, "artifacts": cached}
         # Early skip if prior error marker exists and skip_errors=True
         if skip_errors and has_error_marker:
             log.info(
@@ -454,309 +559,421 @@ def run_derivative(
         # dataframe reads never touch the filesystem (#33).
         _ensure_parent_dir(base_reference)
 
-    for sid in order:
-        step = next(s for s in nodes if s["id"] == sid)
+    def _write_skip(text: str) -> str:
+        assert final_prefix is not None
+        path = publish_marker(final_prefix, "skip", text)
+        log.debug("Wrote skip marker", path=path)
+        return path
 
-        # 1) 'derivative' step
-        if "derivative" in step:
-            derivative_ref = step["derivative"]
+    # A saving unit is (re)computed from here on (spec 6.2).
+    computing = save and not dry_run
+    # What the unit was doing when it failed, for its .error marker.
+    step_desc = ""
+    try:
+        if computing:
+            # The previous outcome no longer holds, whatever happens next: a crash from here
+            # on leaves no .done (or stale .skip) over a recompute that did not finish.
+            remove_markers(final_prefix, "done", "skip")
 
-            if derivative_ref == "SourceFile":
-                store[sid] = file_path
-                _record(id=sid, kind="source", name="SourceFile", path=file_path)
-                continue
+        for sid in order:
+            step = next(s for s in nodes if s["id"] == sid)
 
-            base_name, ext = _split_derivative_ref(derivative_ref)
-            prefix = (
-                reference_base.as_posix() + "@" + snake_to_camel(base_name)
-                if isinstance(reference_base, Path)
-                else reference_base + "@" + snake_to_camel(base_name)
-            )
-            candidates = _artifact_candidates_for(prefix)
-            if ext:
-                candidates = [p for p in candidates if p.endswith("." + ext)]
+            # 1) 'derivative' step
+            if "derivative" in step:
+                derivative_ref = step["derivative"]
 
-            if dry_run:
-                entry: dict[str, Any] = {
-                    "id": sid,
-                    "kind": "derivative",
-                    "name": derivative_ref,
-                    "prefix": prefix,
-                    "cached": len(candidates) > 0,
-                    "paths": candidates,
+                if derivative_ref == "SourceFile":
+                    store[sid] = file_path
+                    _record(id=sid, kind="source", name="SourceFile", path=file_path)
+                    continue
+
+                step_desc = f"step id={sid} derivative='{derivative_ref}'"
+                base_name, ref_suffix = parse_reference(derivative_ref)
+                prefix = output_prefix(base_reference, base_name)
+                child_def = (
+                    get_derivative_definition(base_name).definition
+                    if base_name in list_derivative_definitions()
+                    else None
+                )
+                # save: false is never a cache hit (spec 6.2), however the child is reached:
+                # an old manifest from when it saved must not be read.
+                child_saves = child_def is None or bool(child_def.get("save", True))
+                child_cached = _cached_unit(prefix, base_name) if child_saves else None
+
+                selection = {
+                    "name": base_name,
+                    "suffix": ref_suffix,
+                    "consumer": derivative_name,
+                    "ref": derivative_ref,
+                    "sid": sid,
                 }
-                if base_name in list_derivative_definitions():
-                    sub_def = get_derivative_definition(base_name).definition
-                    entry["subderivative_plan"] = run_derivative(
-                        sub_def,
-                        base_name,
-                        file_path,
-                        reference_base,
-                        dataset_config=dataset_config,
-                        mount_point=mount_point,
-                        dry_run=True,
-                    )
-                _record(**entry)
-                continue
 
-            # normal execution path
-            # Use the child derivative's own overwrite flag, not the parent's.
-            # A parent with overwrite=True should recompute its own node, but
-            # should still respect a child's overwrite=False (i.e. use its cache).
-            child_overwrite = overwrite  # fallback: honour parent flag for unknown children
-            if base_name in list_derivative_definitions():
-                child_overwrite = bool(
-                    get_derivative_definition(base_name).definition.get("overwrite", False)
-                )
-            cached_here = (len(candidates) > 0) and not child_overwrite
-            if cached_here:
-                log.debug(
-                    "Using cached derivative",
-                    derivative=derivative_name,
-                    id=sid,
-                    child_derivative=derivative_ref,
-                    paths=candidates,
-                )
-                store[sid] = candidates[0]  # marker
-                if len(candidates) > 1:
-                    log.warning(
-                        "Multiple cached artifacts found, using the first one",
+                if dry_run:
+                    selected: str | None = None
+                    selection_problem: str | None = None
+                    if child_cached is not None:
+                        try:
+                            selected = select_artifact(
+                                child_cached,
+                                base_name,
+                                ref_suffix,
+                                consumer=derivative_name,
+                                ref=derivative_ref,
+                            )[1][0]
+                        except ArtifactSelectionError as exc:
+                            selection_problem = str(exc)
+                    entry: dict[str, Any] = {
+                        "id": sid,
+                        "kind": "derivative",
+                        "name": derivative_ref,
+                        "prefix": prefix,
+                        "cached": selected is not None,
+                        "paths": [selected] if selected is not None else [],
+                    }
+                    if selection_problem is not None:
+                        entry["selection_problem"] = selection_problem
+                    if child_def is not None:
+                        entry["subderivative_plan"] = run_derivative(
+                            child_def,
+                            base_name,
+                            file_path,
+                            reference_base,
+                            dataset_config=dataset_config,
+                            mount_point=mount_point,
+                            dry_run=True,
+                            source_dataset=source_dataset,
+                            source_rel=source_rel,
+                        )
+                    _record(**entry)
+                    continue
+
+                # normal execution path
+                # Use the child derivative's own overwrite flag, not the parent's.
+                # A parent with overwrite=True should recompute its own node, but
+                # should still respect a child's overwrite=False (i.e. use its cache).
+                child_overwrite = overwrite  # fallback: honour parent flag for unknown children
+                if child_def is not None:
+                    child_overwrite = bool(child_def.get("overwrite", False))
+                if child_cached is not None and not child_overwrite:
+                    # Done unit: select by suffix key from its manifest and pass the main file
+                    # (MNE split parts are loaded through it).
+                    _, paths = _select_or_fail(child_cached, **selection)
+                    log.debug(
+                        "Using cached derivative",
                         derivative=derivative_name,
+                        id=sid,
                         child_derivative=derivative_ref,
-                        reference_base=reference_base,
-                        candidates=candidates,
-                        selected=candidates[0],
+                        path=paths[0],
                     )
-                last_result = {"cached": candidates}
-                continue
+                    store[sid] = paths[0]
+                    last_result = {"cached": [paths[0]]}
+                    continue
 
-            if base_name in list_derivative_definitions():
-                log.debug(
-                    "Recurse into sub-derivative",
-                    parent_derivative=derivative_name,
-                    child_derivative=base_name,
-                )
-                try:
-                    sub_result = run_derivative(
-                        get_derivative_definition(base_name).definition,
-                        base_name,
-                        file_path,
-                        reference_base=reference_base,
-                        dataset_config=dataset_config,
-                        mount_point=mount_point,
-                        dry_run=False,
-                    )
-                except SkipDerivative as skip_exc:
-                    # save:False sub-derivative raised SkipDerivative — propagate skip upward
-                    log.info(
-                        "Sub-derivative (save=False) signaled skip; propagating to parent",
+                if child_def is not None:
+                    log.debug(
+                        "Recurse into sub-derivative",
                         parent_derivative=derivative_name,
                         child_derivative=base_name,
+                    )
+                    try:
+                        sub_result = run_derivative(
+                            child_def,
+                            base_name,
+                            file_path,
+                            reference_base=reference_base,
+                            dataset_config=dataset_config,
+                            mount_point=mount_point,
+                            dry_run=False,
+                            source_dataset=source_dataset,
+                            source_rel=source_rel,
+                        )
+                    except SkipDerivative as skip_exc:
+                        # save:False sub-derivative raised SkipDerivative — propagate skip upward
+                        log.info(
+                            "Sub-derivative (save=False) signaled skip; propagating to parent",
+                            parent_derivative=derivative_name,
+                            child_derivative=base_name,
+                            reason=str(skip_exc),
+                        )
+                        if save:
+                            return {
+                                "skipped": _write_skip(
+                                    f"Sub-derivative '{base_name}' was skipped: {skip_exc!s}\n"
+                                )
+                            }
+                        raise  # save:False parent also propagates
+
+                    # If sub-derivative returned {"skipped": ...} (save:True sub wrote its own
+                    # .skip marker), propagate skip to this parent derivative too.
+                    if isinstance(sub_result, dict) and "skipped" in sub_result:
+                        log.info(
+                            "Sub-derivative was skipped; propagating skip to parent",
+                            parent_derivative=derivative_name,
+                            child_derivative=base_name,
+                        )
+                        if save:
+                            return {
+                                "skipped": _write_skip(
+                                    f"Sub-derivative '{base_name}' was skipped.\n"
+                                )
+                            }
+                        raise SkipDerivative(f"Sub-derivative '{base_name}' was skipped")
+
+                    # The sub-derivative was done and early-returned its manifest
+                    # ({"cached": [...], "artifacts": {suffix: [paths]}}): select by suffix key
+                    # and pass the main file, exactly as for a cached child above.
+                    if isinstance(sub_result, dict) and "artifacts" in sub_result:
+                        _, paths = _select_or_fail(sub_result["artifacts"], **selection)
+                        store[sid] = paths[0]
+                        continue
+
+                    # Freshly computed (save: true) or in-memory (save: false) NodeResult:
+                    # select by suffix key; Name.suffix passes a NodeResult holding only that
+                    # artifact, a bare Name (single artifact) the NodeResult itself.
+                    if isinstance(sub_result, NodeResult):
+                        key, artifact = _select_or_fail(sub_result.artifacts, **selection)
+                        if ref_suffix is not None:
+                            sub_result = NodeResult(artifacts={key: artifact})
+                    store[sid] = sub_result
+                    last_result = sub_result if isinstance(sub_result, NodeResult) else last_result
+                else:
+                    log.error(
+                        "Unknown derivative reference",
+                        derivative=derivative_name,
+                        id=sid,
+                        child_derivative=derivative_ref,
+                    )
+                    raise ValueError(
+                        f"Unknown derivative '{derivative_ref}' in derivative '{derivative_name}'"
+                    )
+
+            # 2) 'node' step
+            elif "node" in step:
+                node_name = step["node"]
+                step_desc = f"step id={sid} node='{node_name}'"
+
+                if dry_run:
+                    if not sid == order[-1]:
+                        _record(
+                            id=sid,
+                            kind="node",
+                            name=node_name,
+                            will_compute=True,
+                            is_final=(sid == order[-1]),
+                        )
+                    continue
+                    # not sure what to do if not
+
+                fn = get_node(node_name)
+
+                extra_args = {}
+                if "reference_base" in inspect.signature(fn).parameters:
+                    extra_args["reference_base"] = Path(reference_base)
+                if "dataset_config" in inspect.signature(fn).parameters:
+                    extra_args["dataset_config"] = dataset_config
+                if "mount_point" in inspect.signature(fn).parameters:
+                    extra_args["mount_point"] = mount_point
+
+                _vars = dataset_config.vars if dataset_config is not None else None
+                kwargs = _prep_kwargs(step.get("args", {}), store, vars_dict=_vars)
+                log.debug(
+                    "Execute node",
+                    derivative=derivative_name,
+                    id=sid,
+                    node=node_name,
+                    kwargs=kwargs,
+                )
+                try:
+                    res = fn(**kwargs, **extra_args)
+                    if not isinstance(res, NodeResult):
+                        raise TypeError(f"Node {node_name} must return NodeResult")
+                    store[sid] = res
+                    last_result = res
+
+                    if sid == order[-1] and save:
+                        assert final_prefix is not None
+                        _save_final_artifacts(
+                            res,
+                            final_prefix,
+                            derivative_name,
+                            source_dataset=source_dataset,
+                            source_rel=manifest_rel,
+                        )
+                except SkipDerivative as skip_exc:
+                    log.info(
+                        "Node signaled skip; derivative not applicable for this source file",
+                        derivative=derivative_name,
+                        id=sid,
+                        node=node_name,
                         reason=str(skip_exc),
                     )
                     if save:
-                        assert skip_marker_path is not None
-                        with open(skip_marker_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"Sub-derivative '{base_name}' was skipped: {skip_exc!s}\n")
-                        log.debug("Wrote skip marker", path=skip_marker_path)
-                        return {"skipped": skip_marker_path}
-                    raise  # save:False parent also propagates
-
-                # If sub-derivative returned {"skipped": ...} (save:True sub wrote its own
-                # .skip marker), propagate skip to this parent derivative too.
-                if isinstance(sub_result, dict) and "skipped" in sub_result:
-                    log.info(
-                        "Sub-derivative was skipped; propagating skip to parent",
-                        parent_derivative=derivative_name,
-                        child_derivative=base_name,
-                    )
-                    if save:
-                        assert skip_marker_path is not None
-                        with open(skip_marker_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"Sub-derivative '{base_name}' was skipped.\n")
-                        log.debug("Wrote skip marker", path=skip_marker_path)
-                        return {"skipped": skip_marker_path}
-                    raise SkipDerivative(f"Sub-derivative '{base_name}' was skipped")
-
-                # If the sub-derivative early-returned its cached-file dict
-                # ({"cached": [path, ...]}) instead of a NodeResult, resolve it
-                # to the matching path so downstream nodes receive a plain path
-                # string rather than the internal bookkeeping dict.
-                if isinstance(sub_result, dict) and "cached" in sub_result:
-                    cached_paths = sub_result["cached"]
-                    if ext:
-                        filtered = [p for p in cached_paths if p.endswith("." + ext)]
-                        store[sid] = (
-                            filtered[0]
-                            if filtered
-                            else (cached_paths[0] if cached_paths else sub_result)
-                        )
-                    else:
-                        store[sid] = cached_paths[0] if cached_paths else sub_result
-                    last_result = last_result  # cached sub-derivative; last_result unchanged
-                    continue
-
-                # If a specific artifact suffix was requested (e.g. "derivative:
-                # Splitter.condA.fif"), narrow the in-memory NodeResult to just
-                # that artifact so downstream nodes receive the right object.
-                # This mirrors the on-disk filter already applied via
-                # `candidates = [p for p in candidates if p.endswith("." + ext)]`.
-                if isinstance(sub_result, NodeResult) and ext:
-                    target = "." + ext
-                    if target in sub_result.artifacts:
-                        sub_result = NodeResult(artifacts={target: sub_result.artifacts[target]})
-                    else:
-                        log.warning(
-                            "Artifact suffix not found in sub-derivative; "
-                            "passing full NodeResult",
-                            requested_suffix=target,
-                            available=list(sub_result.artifacts.keys()),
-                            parent_derivative=derivative_name,
-                            child_derivative=derivative_ref,
-                        )
-                store[sid] = sub_result
-                last_result = sub_result if isinstance(sub_result, NodeResult) else last_result
-            else:
-                log.error(
-                    "Unknown derivative reference",
-                    derivative=derivative_name,
-                    id=sid,
-                    child_derivative=derivative_ref,
-                )
-                raise ValueError(
-                    f"Unknown derivative '{derivative_ref}' in derivative '{derivative_name}'"
-                )
-
-        # 2) 'node' step
-        elif "node" in step:
-            node_name = step["node"]
-
-            if dry_run:
-                if not sid == order[-1]:
-                    _record(
-                        id=sid,
-                        kind="node",
-                        name=node_name,
-                        will_compute=True,
-                        is_final=(sid == order[-1]),
-                    )
-                continue
-                # not sure what to do if not
-
-            fn = get_node(node_name)
-
-            extra_args = {}
-            if "reference_base" in inspect.signature(fn).parameters:
-                extra_args["reference_base"] = Path(reference_base)
-            if "dataset_config" in inspect.signature(fn).parameters:
-                extra_args["dataset_config"] = dataset_config
-            if "mount_point" in inspect.signature(fn).parameters:
-                extra_args["mount_point"] = mount_point
-
-            _vars = dataset_config.vars if dataset_config is not None else None
-            kwargs = _prep_kwargs(step.get("args", {}), store, vars_dict=_vars)
-            log.debug(
-                "Execute node", derivative=derivative_name, id=sid, node=node_name, kwargs=kwargs
-            )
-            try:
-                res = fn(**kwargs, **extra_args)
-                if not isinstance(res, NodeResult):
-                    raise TypeError(f"Node {node_name} must return NodeResult")
-                store[sid] = res
-                last_result = res
-
-                if sid == order[-1] and save:
-                    # save final artifacts under '@<DerivativeName>'
-                    assert final_prefix is not None
-                    for artifact_name, artifact in res.artifacts.items():
                         try:
-                            log.debug("Processed artifact", name=artifact_name, file=artifact)
-                            artifact_path = final_prefix + artifact_name
-                            artifact.writer(artifact_path)
-                            log.debug("Saved artifact", file=artifact_path)
-                        except Exception as e:
-                            log.error(
-                                "Error saving artifact",
-                                artifact_name=artifact_name,
-                                path=final_prefix + artifact_name,
-                                error=str(e),
-                                exc_info=True,
-                            )
-                            raise
-                    # clean up any prior .error marker now that save succeeded
-                    stale_error = Path(final_prefix + ".error")
-                    if stale_error.exists():
-                        stale_error.unlink()
-                        log.debug("Removed stale error marker", path=str(stale_error))
-            except SkipDerivative as skip_exc:
-                log.info(
-                    "Node signaled skip; derivative not applicable for this source file",
-                    derivative=derivative_name,
-                    id=sid,
-                    node=node_name,
-                    reason=str(skip_exc),
-                )
-                if save:
-                    assert skip_marker_path is not None
-                    try:
-                        with open(skip_marker_path, "w", encoding="utf-8") as sf:
-                            sf.write(
+                            path = _write_skip(
                                 f"Derivative '{derivative_name}' step id={sid} node='{node_name}' skipped:\n{skip_exc!s}\n"
                             )
-                        log.debug("Wrote skip marker", path=skip_marker_path)
-                    except Exception as ee:
-                        log.error(
-                            "Error writing skip marker file",
-                            path=skip_marker_path,
-                            error=str(ee),
-                            exc_info=True,
-                        )
-                    return {"skipped": skip_marker_path}
-                raise  # save:False — propagate to parent
+                        except Exception as ee:
+                            log.error(
+                                "Error writing skip marker file",
+                                path=skip_marker_path,
+                                error=str(ee),
+                                exc_info=True,
+                            )
+                            path = skip_marker_path
+                        return {"skipped": path}
+                    raise  # save:False — propagate to parent
+                except Exception as e:
+                    log.error(
+                        "Error executing node",
+                        derivative=derivative_name,
+                        id=sid,
+                        node=node_name,
+                        error=str(e),
+                        exc_info=True,
+                    )
+                    raise  # the unit's .error marker is written below
+            else:
+                raise ValueError(f"Step id={sid} must specify 'derivative' or 'node'")
+
+        if dry_run:
+            return {
+                "derivative": derivative_name,
+                "file": file_path,
+                "reference_base": base_reference,
+                "overwrite": overwrite,
+                "plan": plan,
+            }
+
+        if last_result is None:
+            raise RuntimeError(f"Derivative '{derivative_name}' produced no result")
+        return last_result
+    except SkipDerivative:
+        # A saving unit wrote its .skip and returned; this propagates save: false skips.
+        raise
+    except Exception as exc:
+        if computing:
+            # Any failure inside the unit (a node, a dependency, argument preparation,
+            # artifact selection or writing) fails the unit.
+            where = f" {step_desc}" if step_desc else ""
+            try:
+                marker = publish_marker(
+                    final_prefix,
+                    "error",
+                    f"Derivative '{derivative_name}'{where} failed:\n{exc!s}\n",
+                )
+                log.debug("Wrote error marker file", path=marker)
+            except Exception as ee:
+                log.error(
+                    "Error writing error marker file",
+                    path=final_prefix + ".error",
+                    error=str(ee),
+                    exc_info=True,
+                )
+        raise
+
+
+def _save_final_artifacts(
+    res: NodeResult,
+    final_prefix: str,
+    derivative_name: str,
+    *,
+    source_dataset: str | None,
+    source_rel: str,
+) -> str:
+    """Write a unit's artifacts and publish its ``.done`` manifest (spec 3, 6.2).
+
+    1. Validate every artifact suffix before the first writer runs (an invalid key fails
+       the unit and nothing is written).
+    2. Delete the old ``.done``, so a crash from here on leaves the unit unfinished.
+    3. Run every writer on its final basename inside a fresh hidden staging folder next to
+       the outputs (:func:`neurodags.outputs.make_staging_dir`) and record the files it
+       reports (:func:`neurodags.outputs.writer_paths`), spelled as the entries they are in
+       the staging folder (:func:`neurodags.outputs.canonical_reports`). A writer whose target another
+       artifact already reported is not run, and two artifacts reporting the same file fail
+       the unit (:func:`neurodags.outputs.check_artifact_ownership`); the final files are
+       untouched in both cases. An MNE split recording of which a writer reported only
+       some files fails the unit (:func:`neurodags.outputs.check_unreported_split_parts`).
+       After the last writer, a file that is gone, now a link, or has another size or
+       modification time than when its own writer returned fails the unit
+       (:func:`neurodags.outputs.check_reports_unchanged`).
+    4. Move every staged file into place with ``os.replace``, continuation parts first and
+       main files last (:func:`neurodags.outputs.plan_publication` checks every file first). Readers see a complete
+       old file or a complete new one, never a partial one.
+    5. Write ``.done`` atomically, then remove stale ``.error``/``.skip`` markers.
+
+    The staging folder is removed on a failure before any file was moved in step 4 (files a
+    writer wrote without reporting them are discarded with it) and after step 5. Once a file
+    has been moved, any stop before the ``.done`` exists (an exception, Ctrl-C, ``SystemExit``, a kill) leaves it
+    in place: some files may be new and some old, and the folder is the durable trace of
+    that half-published unit (``status`` reports it, ``migrate --legacy-tree`` refuses the
+    tree). It is not reused; a later run of the unit uses a fresh one.
+
+    Returns the manifest path. Errors propagate (the caller writes the ``.error`` marker).
+    """
+    validate_artifact_suffixes(res.artifacts)
+    remove_markers(final_prefix, "done")
+    staging = make_staging_dir(final_prefix)
+    try:
+        staged: dict[str, list[str]] = {}
+        identities: dict[str, list[tuple[int, int]]] = {}
+        base = os.path.basename(final_prefix)
+        for artifact_name, artifact in res.artifacts.items():
+            artifact_path = os.path.join(staging, base + artifact_name)
+            try:
+                log.debug("Processed artifact", name=artifact_name, file=artifact)
+                # Do not overwrite a file an earlier artifact wrote (e.g. its MNE split part).
+                check_artifact_ownership({**staged, artifact_name: [artifact_path]})
+                staged[artifact_name] = canonical_reports(
+                    staging, writer_paths(artifact_path, artifact.writer(artifact_path))
+                )
+                identities[artifact_name] = [file_identity(p) for p in staged[artifact_name]]
+                check_artifact_ownership(staged)
+                log.debug("Saved artifact", file=artifact_path, files=staged[artifact_name])
             except Exception as e:
                 log.error(
-                    "Error executing node",
-                    derivative=derivative_name,
-                    id=sid,
-                    node=node_name,
+                    "Error saving artifact",
+                    artifact_name=artifact_name,
+                    path=final_prefix + artifact_name,
                     error=str(e),
                     exc_info=True,
                 )
-                # try to save a dummy file .error to mark failure
-                if save:
-                    try:
-                        assert final_prefix is not None
-                        error_path = final_prefix + ".error"
-                        with open(error_path, "w", encoding="utf-8") as ef:
-                            ef.write(
-                                f"Derivative '{derivative_name}' step id={sid} node='{node_name}' failed:\n{e!s}\n"
-                            )
-                        log.debug("Wrote error marker file", path=error_path)
-                    except Exception as ee:
-                        log.error(
-                            "Error writing error marker file",
-                            path=final_prefix + ".error" if final_prefix else None,
-                            error=str(ee),
-                            exc_info=True,
-                        )
                 raise
-        else:
-            raise ValueError(f"Step id={sid} must specify 'derivative' or 'node'")
-
-    if dry_run:
-        return {
-            "derivative": derivative_name,
-            "file": file_path,
-            "reference_base": (
-                reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-            ),
-            "overwrite": overwrite,
-            "plan": plan,
-        }
-
-    if last_result is None:
-        raise RuntimeError(f"Derivative '{derivative_name}' produced no result")
-    return last_result
+        # A later writer may have removed or changed an earlier artifact's file.
+        check_reports_unchanged(staging, staged, identities)
+        check_unreported_split_parts(staging, staged)
+        # Fingerprints of what this run wrote, taken before the move (os.replace keeps size
+        # and mtime): a file another process replaces before our .done no longer matches.
+        staged_prints = [file_fingerprint(p) for paths in staged.values() for p in paths]
+        written, ordered = plan_publication(staging, final_prefix, staged)
+    except BaseException:
+        remove_staging_dir(
+            staging
+        )  # nothing published yet (on Exception, the caller writes .error)
+        raise
+    # From here until the .done exists, the staging folder stays on any stop: the trace of
+    # a unit whose files may be part new, part old (status reports it, migrate
+    # --legacy-tree refuses the tree).
+    moved: list[str] = []
+    try:
+        move_staged(ordered, moved)
+    except BaseException:
+        if not moved:
+            remove_staging_dir(staging)  # nothing was published
+        raise
+    finals = [p for paths in written.values() for p in paths]
+    manifest = build_manifest(
+        final_prefix,
+        derivative_name,
+        dataset=source_dataset,
+        rel=source_rel,
+        artifacts=written,
+        fingerprints=dict(zip(finals, staged_prints, strict=True)),
+    )
+    manifest_path = write_manifest(final_prefix, manifest)
+    remove_staging_dir(staging)
+    remove_markers(final_prefix, "error", "skip")
+    log.debug("Published completion manifest", path=manifest_path)
+    return manifest_path
 
 
 def collect_derivative_for_dataframe(
@@ -768,33 +985,45 @@ def collect_derivative_for_dataframe(
     mount_point: Path | None = None,
     *,
     flatten_xarray_artifacts: bool = True,
-    sort_flattened_dims: bool = True,
     preserve_complex_values: bool = False,
+    source_dataset: str | None = None,
+    source_rel: str | None = None,
 ) -> dict[str, Any]:
     """
     Collect artifacts for a derivative and convert them into dataframe-ready values.
 
-    This helper prefers cached artifacts if they exist on disk. If none are available,
-    it will execute ``run_derivative`` to obtain the necessary results (without forcing a recompute
-    when cached outputs are already present).
+    This helper prefers cached artifacts: a unit with a valid ``.done`` manifest is read
+    from the files the manifest lists. Otherwise it executes ``run_derivative`` to obtain
+    the results (without forcing a recompute when cached outputs are already present).
 
     Parameters
     ----------
     flatten_xarray_artifacts:
         When True, ``xr.DataArray`` artifacts (or paths to ``.nc`` files containing them)
         are flattened into multiple columns using their coordinate metadata.
-    sort_flattened_dims:
-        When flattening a ``DataArray``, sort dimension names alphanumerically when constructing
-        the column suffix.
 
     preserve_complex_values:
         When True, skip flattening and value simplification so artifacts retain their original
         Python objects (after potential on-disk loading).
 
-    Returns a dictionary suitable for composing a DataFrame row, with columns named
-    ``{derivative_name}{artifact_suffix}`` (with optional BIDS-like suffixes per flattened element).
-    Derivatives flagged with ``save=True`` and ``for_dataframe=True`` are skipped when no cached
-    artifacts are found instead of triggering a recomputation.
+    source_dataset, source_rel:
+        Recorded in the ``.done`` manifest when the derivative has to be computed (see
+        :func:`run_derivative`).
+
+    Returns
+    -------
+    dict[str, Any]
+        A dictionary suitable for composing a DataFrame row, with columns named by
+        :func:`neurodags.naming.format_column`: ``{derivative_name}{artifact_suffix}``, plus
+        ``@dim-value_dim-value`` (percent-encoded, dims sorted by encoded name) per flattened
+        element. Derivatives flagged with ``save=True`` and ``for_dataframe=True`` are skipped
+        (empty dictionary) when the unit has no valid ``.done`` manifest instead of
+        triggering a recomputation.
+
+    Raises
+    ------
+    neurodags.naming.ColumnCollisionError
+        When two coordinates or artifacts produce the same column.
     """
 
     enforce_precomputed = bool(derivative_def.get("save", True)) and bool(
@@ -810,44 +1039,38 @@ def collect_derivative_for_dataframe(
             dataset_config=dataset_config,
             mount_point=mount_point,
             precomputed_only=enforce_precomputed,
+            source_dataset=source_dataset,
+            source_rel=source_rel,
         )
     except _MissingPrecomputedArtifacts:
         log.debug(
             "Skipping derivative during dataframe collection because cached artifacts are missing",
             derivative=derivative_name,
             file=file_path,
-            reference_base=(
-                reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-            ),
+            reference_base=os.fspath(reference_base),
         )
         return {}
 
     row_values: dict[str, Any] = {}
+    # (origin, column) for every generated column, so collisions name both origins (spec 7.1).
+    origins: list[tuple[str, str]] = []
     for suffix, payload in artifact_payloads.items():
-        column_name = f"{derivative_name}{suffix}"
         simplified = _simplify_artifact_payload(
             payload,
             suffix=suffix,
             flatten_xarray=flatten_xarray_artifacts and not preserve_complex_values,
-            sort_dims_alphabetically=sort_flattened_dims,
             preserve_complex_values=preserve_complex_values,
             derivative_name=derivative_name,
         )
         if isinstance(simplified, _FlattenedArtifactColumns):
-            for flatten_suffix, value in simplified.items():
-                target_column = (
-                    column_name if flatten_suffix == "" else f"{column_name}@{flatten_suffix}"
-                )
-                if target_column in row_values:
-                    log.warning(
-                        "Overwriting dataframe column while flattening artifact",
-                        column=target_column,
-                        derivative=derivative_name,
-                        suffix=suffix,
-                    )
+            for target_column, value in simplified.items():
+                origins.append((simplified.origins[target_column], target_column))
                 row_values[target_column] = value
         else:
+            column_name = format_column(derivative_name, suffix)
+            origins.append((f"artifact {derivative_name}{suffix}", column_name))
             row_values[column_name] = simplified
+    _raise_on_column_collisions(origins)
     return row_values
 
 
@@ -860,24 +1083,24 @@ def _resolve_derivative_artifacts(
     mount_point: Path | None = None,
     *,
     precomputed_only: bool = False,
+    source_dataset: str | None = None,
+    source_rel: str | None = None,
 ) -> dict[str, Any]:
     save = bool(derivative_def.get("save", True))
-    base_reference = (
-        reference_base.as_posix() if isinstance(reference_base, Path) else reference_base
-    )
-    prefix = base_reference + "@" + snake_to_camel(derivative_name)
+    prefix = output_prefix(os.fspath(reference_base), derivative_name) if save else None
 
-    payloads: dict[str, Any] = {}
+    def _from_manifest(artifacts: Mapping[str, Sequence[str]]) -> dict[str, Any]:
+        # The main file of each artifact (MNE split parts are read through it).
+        return {suffix: Path(paths[0]) for suffix, paths in artifacts.items() if paths}
+
     if save:
-        cached_paths = _artifact_candidates_for(prefix)
-        if cached_paths:
-            for path in cached_paths:
-                suffix = path[len(prefix) :]
-                payloads[suffix] = Path(path)
-            return payloads
+        cached = _cached_unit(prefix, derivative_name)
+        if cached is not None:
+            return _from_manifest(cached)
         if precomputed_only:
             raise _MissingPrecomputedArtifacts(
-                f"Cached artifacts not found for derivative '{derivative_name}' with prefix '{prefix}'"
+                f"No valid .done manifest for derivative '{derivative_name}' "
+                f"at prefix '{prefix}'"
             )
 
     result = run_derivative(
@@ -888,24 +1111,22 @@ def _resolve_derivative_artifacts(
         dataset_config=dataset_config,
         mount_point=mount_point,
         dry_run=False,
+        source_dataset=source_dataset,
+        source_rel=source_rel,
     )
 
     if isinstance(result, NodeResult):
+        written = _cached_unit(prefix, derivative_name) if save else None
+        payloads: dict[str, Any] = {}
         for suffix, artifact in result.artifacts.items():
             payload: Any = artifact.item
-            if save:
-                artifact_path = prefix + suffix
-                if Path(artifact_path).exists():
-                    payload = Path(artifact_path)
+            if written and written.get(suffix):
+                payload = Path(written[suffix][0])
             payloads[suffix] = payload
         return payloads
 
-    if isinstance(result, dict) and "cached" in result:
-        paths = result["cached"]
-        for path in paths:
-            suffix = path[len(prefix) :]
-            payloads[suffix] = Path(path)
-        return payloads
+    if isinstance(result, dict) and "artifacts" in result:
+        return _from_manifest(result["artifacts"])
 
     raise RuntimeError(
         f"Unexpected result type when collecting derivative '{derivative_name}': {type(result)!r}"
@@ -917,9 +1138,8 @@ def _simplify_artifact_payload(
     *,
     suffix: str,
     flatten_xarray: bool = False,
-    sort_dims_alphabetically: bool = True,
     preserve_complex_values: bool = False,
-    derivative_name: str | None = None,
+    derivative_name: str,
 ) -> Any:
     value = _load_from_path(payload, suffix=suffix) if isinstance(payload, Path) else payload
 
@@ -927,12 +1147,7 @@ def _simplify_artifact_payload(
         return value
 
     if flatten_xarray and xr is not None and isinstance(value, xr.DataArray):
-        return _flatten_dataarray_payload(
-            value,
-            sort_dims_alphabetically=sort_dims_alphabetically,
-            derivative_name=derivative_name,
-            suffix=suffix,
-        )
+        return _flatten_dataarray_payload(value, derivative_name=derivative_name, suffix=suffix)
 
     return _simplify_value(value)
 
@@ -966,30 +1181,72 @@ def _load_from_path(path: Path, *, suffix: str) -> Any:
 
 
 class _FlattenedArtifactColumns(dict):
-    """Marker mapping used to expand flattened DataArray payloads into multiple columns."""
+    """Marker mapping ``{column: value}`` for a DataArray expanded into several columns.
+
+    ``origins`` maps each column to a description of the coordinates behind it.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.origins: dict[str, str] = {}
+
+
+def _raise_on_column_collisions(origins: Sequence[tuple[str, str]]) -> None:
+    """Raise :class:`ColumnCollisionError` when two origins produce the same column."""
+    collisions = find_column_collisions(origins)
+    if not collisions:
+        return
+    shown = list(collisions.items())[:5]
+    details = "; ".join(f"{column!r} from " + " and ".join(found) for column, found in shown)
+    more = f" (and {len(collisions) - len(shown)} more)" if len(collisions) > len(shown) else ""
+    raise ColumnCollisionError(
+        f"Dataframe column collision: {details}{more}. Each column must come from exactly one "
+        "coordinate of one artifact; make the coordinate index unique and use one type per "
+        "coordinate (e.g. not both 1 and '1')."
+    )
+
+
+def _coord_label(value: Any) -> Any:
+    """Unwrap numpy scalars so the column shows ``1.5``, not ``np.float64(1.5)``."""
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
 
 
 def _flatten_dataarray_payload(
     data_array: "xr.DataArray",
     *,
-    sort_dims_alphabetically: bool,
-    derivative_name: str | None = None,
-    suffix: str | None = None,
+    derivative_name: str,
+    suffix: str,
 ) -> _FlattenedArtifactColumns:
+    """Expand a DataArray into ``{column: value}`` with :func:`naming.format_column` columns.
+
+    Raises
+    ------
+    ColumnCollisionError
+        When two elements map to the same column (non-unique index, or mixed types such
+        as ``1`` and ``"1"``).
+    """
+    artifact = f"{derivative_name}{suffix}"
     if data_array.ndim == 0:
         try:
             scalar = data_array.item()
         except Exception:
             scalar = data_array.values
-        return _FlattenedArtifactColumns({"": _simplify_value(scalar)})
+        column = format_column(derivative_name, suffix)
+        flattened = _FlattenedArtifactColumns({column: _simplify_value(scalar)})
+        flattened.origins[column] = f"artifact {artifact}"
+        return flattened
 
     dims = list(data_array.dims)
     shape = tuple(data_array.sizes[dim] for dim in dims)
     index_iterator = _ndindex(shape)
 
-    flattened: dict[str, Any] = {}
-    # Original (dim, coord_value) pairs behind each generated key, so collisions can be reported.
-    key_sources: dict[str, list[tuple[Any, Any]]] = {}
+    flattened = _FlattenedArtifactColumns()
+    origins: list[tuple[str, str]] = []
     for index_tuple in index_iterator:
         dims_with_values = []
         for dim, idx in zip(dims, index_tuple, strict=False):
@@ -1007,38 +1264,25 @@ def _flatten_dataarray_payload(
                     coord_value = coord[idx]
             else:
                 coord_value = idx
-            dims_with_values.append((dim, coord_value))
+            dims_with_values.append((dim, _coord_label(coord_value)))
 
-        if sort_dims_alphabetically:
-            dims_with_values.sort(key=lambda item: item[0])
-
-        # Build a BIDS-like segment: dim-dimvalue pairs joined by underscores.
-        key = "_".join(
-            f"{dim}-{_format_coord_value(coord_value)}" for dim, coord_value in dims_with_values
-        )
+        # Dims are percent-encoded and sorted by encoded name inside format_column.
+        column = format_column(derivative_name, suffix, dims_with_values)
 
         try:
             raw_value = data_array.data[index_tuple]
         except Exception:
             raw_value = data_array.values[index_tuple]
 
-        # _format_coord_value is not injective (e.g. "a-b" and "a~b" both become "a~b"), so two
-        # distinct coordinates can produce the same key. The later value overwrites the earlier
-        # one; warn so the silent data loss is visible.
-        if key in flattened:
-            log.warning(
-                "Dataframe column collision while flattening artifact: distinct coordinate "
-                "values map to the same column name; the earlier value is overwritten",
-                derivative=derivative_name,
-                suffix=suffix,
-                column_suffix=key,
-                kept_coords=dims_with_values,
-                overwritten_coords=key_sources[key],
-            )
-        key_sources[key] = list(dims_with_values)
-        flattened[key] = _simplify_value(raw_value)
+        origin = f"artifact {artifact} at " + ", ".join(
+            f"{dim}={value!r}" for dim, value in dims_with_values
+        )
+        origins.append((origin, column))
+        flattened.origins[column] = origin
+        flattened[column] = _simplify_value(raw_value)
 
-    return _FlattenedArtifactColumns(flattened)
+    _raise_on_column_collisions(origins)
+    return flattened
 
 
 def _ndindex(shape: Sequence[int]):
@@ -1061,29 +1305,6 @@ def _ndindex_fallback(shape: Sequence[int]):
             indices[axis] = 0
             if axis == 0:
                 return
-
-
-def _format_coord_value(value: Any) -> str:
-    if hasattr(value, "item"):
-        try:
-            value = value.item()
-        except Exception:
-            pass
-    # NOTE: the line below is a no-op (its result is discarded), so ``None`` currently becomes
-    # "None", not "NA". Left as is because generated column names are a compatibility surface.
-    "NA" if value is None else str(value)
-    # sanitized = re.sub(r"[^0-9A-Za-z\-.@~$]+", "-", text)
-    # sanitized = sanitized.strip("-")
-    value = str(value)
-
-    if isinstance(value, str):
-        value = value.replace("-", "~")
-        value = value.replace("_", "|")
-        value = value.replace("@", "$")
-        value = value.replace(",", ".")
-    sanitized = value
-
-    return sanitized or "NA"
 
 
 def _simplify_value(value: Any) -> Any:

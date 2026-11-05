@@ -13,26 +13,29 @@ pip install neurodags[tui]
 ## Launching the TUI
 
 Launch the TUI with the unified CLI. You can pass the path to a pipeline
-configuration file and optionally a datasets configuration file:
+configuration file and optionally a datasets configuration file and a mount point
+(`-m`, which sets `NEURODAGS_MOUNT_POINT` for the app; see {ref}`mount-point-override`):
 
 ```bash
-neurodags tui [pipeline.yml] [-d datasets.yml]
+neurodags tui [pipeline.yml] [-d datasets.yml] [-m MOUNT]
 ```
 
 Legacy alias:
 
 ```bash
-neurodags-tui [pipeline.yml] [-d datasets.yml]
+neurodags-tui [pipeline.yml] [-d datasets.yml] [-m MOUNT]
 ```
 
 Module entry point:
 
 ```bash
-python -m neurodags.tui [pipeline.yml] [-d datasets.yml]
+python -m neurodags.tui [pipeline.yml] [-d datasets.yml] [-m MOUNT]
 ```
 
-The `-d` path is relative to the directory you launch from (with a deprecated fallback to the
-pipeline YAML's directory); see {doc}`usage` for the exact resolution rule.
+The `-d` path is relative to the directory you launch from (the 0.3.5 fallback to the pipeline
+YAML's directory was removed in 0.4.0); see {doc}`usage` for the exact resolution rule. The
+pipeline must declare `naming_version: 1`: an unmigrated 0.3.x configuration is refused before
+the interface starts (see {doc}`migrating_to_0_4`).
 
 ## Interface Overview
 
@@ -41,7 +44,7 @@ The TUI is organized into several tabs, each focused on a specific part of the N
 ### 1. Config Tab
 This is where you load your pipeline configuration.
 - **Pipeline YAML path**: Enter the path to your `pipeline.yml`.
-- **Datasets YAML path (optional override)**: Enter the path to an independent `datasets.yml`. If provided, this overrides any `datasets` definition found inside the pipeline configuration.
+- **Datasets YAML path (optional override)**: Enter the path to an independent `datasets.yml`. If provided, this overrides any `datasets` definition found inside the pipeline configuration. A relative path is resolved against the directory the TUI was started from (the same rule as `-d` on the command line, not the pipeline YAML's directory); the summary lists the datasets of that file, and every tab uses that same file.
 - **Load**: Click to load the configuration. Once loaded, a summary of datasets and derivatives will be displayed.
 
 
@@ -65,7 +68,7 @@ Execute the pipeline to compute derivatives.
 
 ### 5. DataFrame Tab
 Assemble computation results into ML-ready DataFrames.
-- **derivatives**: Comma-separated list of derivatives to include (leave blank for all).
+- **derivatives**: Derivatives to include, separated by spaces (for example `Alpha Beta`; leave blank for all). Commas are still accepted as separators (`Alpha,Beta`), the pre-0.4.0 syntax.
 - **format**: Choose between `wide` or `long` format.
 - **max files/dataset**: Limit the number of files.
 - **Assemble**: Build the DataFrame and display a preview in the table.
@@ -73,7 +76,7 @@ Assemble computation results into ML-ready DataFrames.
 ### 6. Status Tab
 Check per-derivative processing status for the loaded pipeline (the TUI equivalent of the `neurodags status` command).
 - **Select derivative**: Choose a derivative to inspect, or leave on `All (DerivativeList)`.
-- **Refresh**: Scan outputs and populate the table with *done* / *skipped* / *missing* / *errored* counts per derivative, plus a summary line and any error paths.
+- **Refresh**: Scan outputs and populate the table with *done* / *incomplete* / *missing* / *errored* counts per derivative, plus a summary line and any error paths. The states are those of {ref}`Unit states <naming-unit-states>`; use `neurodags status` for the `skipped` and `(migrated)` counts. A unit whose plan could not be computed (a configuration error) is counted as *errored* and listed with its planning error.
 
 ### 7. NC Viewer Tab
 Launch the interactive Dash explorer for results.
