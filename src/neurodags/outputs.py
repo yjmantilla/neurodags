@@ -799,7 +799,10 @@ def plan_publication(
     for suffix, paths in staged.items():
         final[suffix] = []
         for index, path in enumerate(paths):
-            rel = os.path.relpath(os.path.abspath(path), root)
+            try:
+                rel = os.path.relpath(os.path.abspath(path), root)
+            except ValueError:  # another drive (Windows)
+                rel = os.pardir
             if rel == os.curdir or rel.startswith(os.pardir) or os.path.isabs(rel):
                 raise RuntimeError(
                     f"artifact writer for {suffix!r} reported {path!r}, outside the path it "

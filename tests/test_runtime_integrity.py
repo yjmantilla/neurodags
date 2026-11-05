@@ -440,6 +440,44 @@ def test_split_parts_reported_as_links_to_renamed_payloads_fail_the_unit(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+@pytest.mark.parametrize("change", ["link_inside", "link_outside", "remove"])
+def test_later_writer_changing_an_earlier_artifact_fails_the_unit(tmp_path, change):
+    """Review dbb251b B1: a later writer replaced an earlier artifact's checked file with a
+    link (to its last split part, or to a file moved outside staging) and .done certified
+    5,000 of 200,000 samples, or a link to a file neurodags does not control."""
+    big = _split_raw()
+    parts = []
+    outside = tmp_path / "payload.fif"
+
+    def recording_writer(path):
+        parts[:] = big.save(path, split_size="2MB", overwrite=True, verbose="error")
+        return parts
+
+    def metadata_writer(path):
+        if change == "link_inside":
+            os.unlink(parts[0])
+            os.symlink(os.path.basename(parts[-1]), parts[0])
+        elif change == "link_outside":
+            os.replace(parts[1], outside)
+            os.symlink(outside, parts[1])
+        else:
+            os.unlink(parts[1])
+        Path(path).write_text("{}")
+
+    @register_node(name="rt_later_writer", override=True)
+    def node():
+        return NodeResult(
+            {".fif": Artifact(big, recording_writer), ".json": Artifact(None, metadata_writer)}
+        )
+
+    base = _source(tmp_path)
+    with pytest.raises(RuntimeError):
+        run_derivative(_single("rt_later_writer"), "Rec", str(base), base)
+    assert unit_state(str(base) + "@Rec", "Rec").state == "error"
+    assert not any(".tmp~" in p.name for p in tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
 def test_reported_link_to_a_file_outside_staging_fails_the_unit(tmp_path):
     """Review fa8ebd1 #6: a link to a file elsewhere passed every check and .done
     certified a file neurodags does not control."""
